@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#
+# Passive physical-R1 review stage.
+#
+# The existing r1-sdk-preflight helper may start a temporary LowState reader.
+# That reader subscribes only to feedback and is stopped by the helper before
+# it exits. No ArmSdk, LocoClient, sport, stand, or command writer is created.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+echo 'R1 readonly preflight: inspecting feedback only.'
+echo 'No motor, stand, stiffness, ArmSdk, LocoClient, sport, or trajectory command is created.'
+
+exec "${SCRIPT_DIR}/r1-sdk-preflight" "$@"

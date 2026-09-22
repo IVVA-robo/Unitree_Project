@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Exercise the complete headset -> bounded head command -> writer path while
+# keeping the physical boundary closed. No Unitree reader/client is created.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_SETUP="${PROJECT_DIR}/ros2_ws/install/setup.bash"
+[[ -f "${WORKSPACE_SETUP}" ]] || WORKSPACE_SETUP="${PROJECT_DIR}/install/setup.bash"
+
+die() {
+  echo "[BLOCKED] $*" >&2
+  echo 'No Unitree SDK object or command was created.' >&2
+  exit 2
+}
+
+[[ $# -eq 0 ]] || die 'usage: r1-head-live-dry-arm'
+[[ -f /opt/ros/humble/setup.bash ]] || die 'ROS 2 Humble is unavailable'
+[[ -f "${WORKSPACE_SETUP}" ]] || die "workspace is not built: ${WORKSPACE_SETUP}"
+
+DOMAIN_ID=${R1_HEAD_DRY_ARM_ROS_DOMAIN_ID:-87}
+UDP_PORT=${R1_HEAD_DRY_ARM_UDP_PORT:-9091}
+[[ "${DOMAIN_ID}" =~ ^[0-9]+$ ]] && ((10#${DOMAIN_ID} <= 232)) \
+  || die 'R1_HEAD_DRY_ARM_ROS_DOMAIN_ID must be 0..232'
+[[ "${UDP_PORT}" =~ ^[0-9]+$ ]] \
+  && ((10#${UDP_PORT} >= 1 && 10#${UDP_PORT} <= 65535)) \
+  || die 'R1_HEAD_DRY_ARM_UDP_PORT must be 1..65535'
+if command -v ss >/dev/null 2>&1 \
+  && ss -H -lunp 2>/dev/null | grep -Eq "([.:]|\\])${UDP_PORT}[[:space:]]"; then
+  die "UDP port ${UDP_PORT} is already in use"
+fi
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${WORKSPACE_SETUP}"
+set -u
+export ROS_DOMAIN_ID="$((10#${DOMAIN_ID}))"
+export ROS_LOCALHOST_ONLY=1
+export ROBOT_DRY_RUN=1
+export ROBOT_ENABLE_ACTUATION=0
+export ROBOT_CONFIRM_OFF_CHARGER=0
+export ROBOT_CONFIRM_CLEAR_AREA=0
+export ROBOT_CONFIRM_ESTOP_READY=0
+export ROBOT_CONFIRM_COMMISSIONING=0
+export ROBOT_COMMISSIONING_TOKEN=
+export ROBOT_VR_SOURCE_IP=
+
+echo 'R1 HEAD LIVE DRY-ARM (MOCK ONLY)'
+echo "  domain=${ROS_DOMAIN_ID} udp_port=$((10#${UDP_PORT}))"
+echo '  transport=mock send_commands=false reader=false locomotion=false'
+
+launch_arguments=(
+  "ros_domain_id:=${ROS_DOMAIN_ID}"
+  "udp_port:=$((10#${UDP_PORT}))"
+  start_readonly_reader:=false
+  start_safety_supervisor:=true
+  enable_head:=true
+  enable_locomotion:=false
+  enable_prepare:=false
+  transport:=mock
+  send_commands:=false
+  commissioning_confirmed:=false
+  profile:=slow-safe
+)
+VR_SOURCE_IP=${R1_HEAD_DRY_ARM_VR_SOURCE_IP:-}
+if [[ -n ${VR_SOURCE_IP} ]]; then
+  launch_arguments+=("vr_source_ip:=${VR_SOURCE_IP}")
+fi
+
+exec ros2 launch r1_teleoperation_app r1_teleop_live.launch.py \
+  "${launch_arguments[@]}"

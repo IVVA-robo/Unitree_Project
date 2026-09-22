@@ -1,0 +1,48 @@
+r1_head_dry_run:
+  ros__parameters:
+    # This node has no Unitree SDK command path. Keep these values locked even
+    # when the robot is connected: all output stays on debug ROS topics.
+    hardware_enabled: false
+    dry_run: true
+
+    head_pose_topic: "/vr/head/pose"
+    active_topic: "/vr/teleop/active"
+    # Fail closed: no head target is allowed until this topic explicitly sends
+    # Bool(data=false). Sending true immediately clears the debug target.
+    emergency_stop_topic: "/r1/safety/kill"
+    debug_topic_prefix: "/r1_hardware_adapter/debug/head"
+    calibration_service: "/r1/head/calibrate_neutral"
+    reset_service: "/r1/head/reset_calibration"
+
+    pose_timeout_sec: 0.35
+    active_timeout_sec: 1.50
+    publish_rate_hz: 50.0
+    status_publish_period_sec: 0.50
+    trajectory_time_sec: 0.05
+
+    # Yaw is Z, pitch is Y, roll is X. R1 LowState exposes yaw and pitch;
+    # roll remains disabled until a verified physical joint map exists.
+    yaw_scale: 1.0
+    pitch_scale: 1.0
+    roll_scale: 1.0
+    yaw_limit_rad: 0.65
+    pitch_limit_rad: 0.45
+    roll_limit_rad: 0.20
+    deadzone_rad: 0.025
+    smoothing_alpha: 0.22
+    max_yaw_rate_rad_s: 0.80
+    max_pitch_rate_rad_s: 0.65
+    max_roll_rate_rad_s: 0.45
+    # An executor pause cannot create a larger rate-limit integration step.
+    # The pure controller rejects values above 0.10 s independently of YAML.
+    max_step_dt_sec: 0.10
+    yaw_enabled: true
+    pitch_enabled: true
+    roll_enabled: false
+    invert_yaw: false
+    invert_pitch: false
+    invert_roll: false
+
+    yaw_joint_name: "head_yaw_joint"
+    pitch_joint_name: "head_pitch_joint"
+    roll_joint_name: "head_roll_joint"

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#
+# Start the fail-closed physical writer with locomotion enabled and head off.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+[[ $# -eq 0 ]] || { echo 'Usage: r1-locomotion-live-test' >&2; exit 2; }
+exec "${SCRIPT_DIR}/r1-live-session" locomotion

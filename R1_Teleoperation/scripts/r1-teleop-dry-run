@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Start a laptop-only head/locomotion diagnostic pipeline.  This wrapper
+# deliberately pins every environment interlock to dry-run before it calls
+# ros2 launch.  It never starts a Unitree command writer.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# This repository's ROS workspace lives in ros2_ws.  Prefer that overlay so a
+# normal `cd ros2_ws && colcon build` cannot accidentally run stale artefacts
+# from a legacy root-level install directory.
+WORKSPACE_INSTALL="${PROJECT_DIR}/ros2_ws/install/setup.bash"
+if [[ ! -f "${WORKSPACE_INSTALL}" ]]; then
+  WORKSPACE_INSTALL="${PROJECT_DIR}/install/setup.bash"
+fi
+LEGACY_SETUP="${R1_LEGACY_WS_SETUP:-${PROJECT_DIR}/../Legacy_Robotics/robotics/ros2_ws/install/setup.bash}"
+
+die() {
+  echo "[FAIL] $*" >&2
+  exit 1
+}
+
+[[ -f /opt/ros/humble/setup.bash ]] || die 'ROS 2 Humble setup.bash is missing'
+[[ -f "${WORKSPACE_INSTALL}" ]] || die "workspace is not built: ${WORKSPACE_INSTALL}"
+
+set +u
+source /opt/ros/humble/setup.bash
+# The optional read-only arm pipeline needs the R1 description.  Sourcing the
+# overlay when it is present is harmless for the default no-robot pipeline.
+if [[ -f "${LEGACY_SETUP}" ]]; then
+  source "${LEGACY_SETUP}"
+fi
+source "${WORKSPACE_INSTALL}"
+set -u
+
+DOMAIN_ID="${R1_DRY_RUN_DOMAIN_ID:-89}"
+UDP_BIND_ADDRESS="${R1_DRY_RUN_UDP_BIND_ADDRESS:-0.0.0.0}"
+UDP_PORT="${R1_DRY_RUN_UDP_PORT:-9090}"
+VR_ALLOWED_SOURCE_IP="${R1_DRY_RUN_VR_ALLOWED_SOURCE_IP:-}"
+START_BRIDGE="${R1_DRY_RUN_START_BRIDGE:-true}"
+START_HEAD="${R1_DRY_RUN_START_HEAD:-true}"
+START_LOCOMOTION="${R1_DRY_RUN_START_LOCOMOTION:-true}"
+START_ARM_PIPELINE="${R1_DRY_RUN_START_ARM_PIPELINE:-false}"
+LOCOMOTION_MODE="${R1_DRY_RUN_LOCOMOTION_MODE:-slow-safe}"
+
+for boolean_name in START_BRIDGE START_HEAD START_LOCOMOTION START_ARM_PIPELINE; do
+  case "${!boolean_name}" in
+    true|false) ;;
+    *) die "${boolean_name} must be true or false" ;;
+  esac
+done
+[[ "${DOMAIN_ID}" =~ ^[0-9]+$ ]] && (( 10#${DOMAIN_ID} <= 232 )) || \
+  die 'R1_DRY_RUN_DOMAIN_ID must be an integer from 0 to 232'
+[[ "${UDP_PORT}" =~ ^[0-9]+$ ]] \
+  && (( 10#${UDP_PORT} >= 1 && 10#${UDP_PORT} <= 65535 )) || \
+  die 'R1_DRY_RUN_UDP_PORT must be an integer from 1 to 65535'
+case "${LOCOMOTION_MODE}" in
+  slow-safe|normal|exhibition) ;;
+  *) die 'R1_DRY_RUN_LOCOMOTION_MODE must be slow-safe, normal, or exhibition' ;;
+esac
+
+if [[ "${START_BRIDGE}" == true ]] && command -v ss >/dev/null 2>&1 \
+  && ss -H -lunp 2>/dev/null | grep -Eq "([.:]|\\])${UDP_PORT}[[:space:]]"; then
+  die "UDP port ${UDP_PORT} is already in use; stop the old bridge or set R1_DRY_RUN_UDP_PORT"
+fi
+
+# Do not inherit a user's stale actuation acknowledgement into a diagnostics
+# process.  The launch repeats these values as a second independent boundary.
+export ROS_DOMAIN_ID="$((10#${DOMAIN_ID}))"
+export ROS_LOCALHOST_ONLY=1
+export ROBOT_DRY_RUN=1
+export ROBOT_ENABLE_ACTUATION=0
+export ROBOT_CONFIRM_OFF_CHARGER=0
+export ROBOT_CONFIRM_CLEAR_AREA=0
+export ROBOT_CONFIRM_ESTOP_READY=0
+
+echo 'R1 full teleop dry-run: debug topics only; no Unitree SDK writer is started.'
+echo "  domain=${ROS_DOMAIN_ID} UDP=${UDP_BIND_ADDRESS}:${UDP_PORT} mode=${LOCOMOTION_MODE}"
+echo "  allowed VR source=${VR_ALLOWED_SOURCE_IP:-first valid sender (dry-run only)}"
+echo "  read-only arm pipeline=${START_ARM_PIPELINE} (default false)"
+
+launch_arguments=(
+  "ros_domain_id:=${ROS_DOMAIN_ID}"
+  "udp_bind_address:=${UDP_BIND_ADDRESS}"
+  "udp_port:=$((10#${UDP_PORT}))"
+  "start_bridge:=${START_BRIDGE}"
+  "start_head:=${START_HEAD}"
+  "start_locomotion:=${START_LOCOMOTION}"
+  "start_arm_pipeline:=${START_ARM_PIPELINE}"
+  "locomotion_mode:=${LOCOMOTION_MODE}"
+)
+# ROS 2 launch rejects a literal `name:=` token. Omit the optional argument
+# when it is empty so the launch file's fail-closed empty default is used.
+if [[ -n ${VR_ALLOWED_SOURCE_IP} ]]; then
+  launch_arguments+=("vr_allowed_source_ip:=${VR_ALLOWED_SOURCE_IP}")
+fi
+
+exec ros2 launch r1_teleoperation_app r1_teleop_dry_run.launch.py \
+  "${launch_arguments[@]}" "$@"

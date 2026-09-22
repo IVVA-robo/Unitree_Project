@@ -1,0 +1,20 @@
+logs/
+*.log
+build/
+install/
+logs/
+*.log
+build/
+install/
+Unity_Projects/**/Library/
+Unity_Projects/**/Builds/
+Unity_Projects/**/Temp/
+Unity_Projects/**/Logs/
+Unity_Projects/**/UserSettings/
+SDK/Pico/Archives/
+Tools/
+SDK/Pico/Archives/
+Tools/
+
+# Generated Pico APK backups (the source projects and release APKs are tracked elsewhere)
+Backups/Pico_2026-09-22/*.apk

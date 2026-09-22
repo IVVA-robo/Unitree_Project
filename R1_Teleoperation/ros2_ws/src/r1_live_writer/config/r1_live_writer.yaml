@@ -1,0 +1,113 @@
+r1_live_writer:
+  ros__parameters:
+    # Three independent locks are closed by default. Merely selecting "sdk"
+    # is insufficient: send_commands and each feature must also be enabled,
+    # then the process environment, commissioning token, kill, deadman,
+    # feedback, command freshness, and prepare state are checked on every send.
+    transport: "mock"
+    send_commands: false
+    enable_head: false
+    enable_arms: false
+    enable_locomotion: false
+    enable_prepare: false
+    commissioning_confirmed: false
+    commissioning_token: ""
+    expected_vr_source_ip: ""
+    profile: "slow-safe"
+    require_prepare: true
+
+    network_interface: "enxb4b024be59fe"
+    head_topic: "/r1_hardware_adapter/debug/head/joint_trajectory"
+    arm_topic: "/r1_kinematics_control/debug/arm_trajectory"
+    velocity_topic: "/r1/locomotion_dry_run/debug/cmd_vel"
+    joint_state_topic: "/r1/sdk/joint_states"
+    motor_health_topic: "/r1/sdk_transport/motors_healthy"
+    deadman_topic: "/vr/teleop/active"
+    kill_topic: "/r1/safety/kill"
+    kill_request_topic: "/r1/safety/kill_request"
+    status_topic: "/r1/live_writer/status"
+    debug_head_topic: "/r1/live_writer/debug/head_command"
+    debug_arm_topic: "/r1/live_writer/debug/arm_command"
+    debug_velocity_topic: "/r1/live_writer/debug/cmd_vel"
+
+    state_timeout_sec: 0.50
+    motor_health_timeout_sec: 0.50
+    command_timeout_sec: 0.25
+    deadman_timeout_sec: 1.50
+    kill_timeout_sec: 0.50
+    publish_rate_hz: 50.0
+    command_duration_sec: 0.12
+
+    # Immutable C++ ceilings reject anything larger than this first-live set.
+    max_forward_mps: 0.20
+    max_lateral_mps: 0.12
+    max_yaw_rps: 0.35
+    max_linear_rate_mps2: 0.25
+    max_yaw_rate_rps2: 0.50
+    # These four values are headset-relative deltas/rates, not absolute robot
+    # joint limits. The Unitree R1 absolute envelope is immutable C++ data:
+    # yaw [-2.0071, 2.0071], pitch [-0.6283, 0.6283] radians.
+    max_head_yaw_delta_rad: 0.35
+    max_head_pitch_delta_rad: 0.25
+    max_head_yaw_delta_rate_rad_s: 0.35
+    max_head_pitch_delta_rate_rad_s: 0.25
+
+    # Arm IK already enforces URDF joint/workspace limits.  The writer adds a
+    # second immutable first-live slew bound before the ArmSdk boundary.
+    max_arm_joint_delta_rad: 0.25
+    max_arm_joint_rate_rad_s: 1.00
+
+    # Physical SDK head mode is refused unless the staged launcher explicitly
+    # confirms that the immutable manufacturer envelope was reviewed.
+    head_absolute_envelope_confirmed: false
+    max_head_tracking_seed_yaw_rad: 0.35
+    max_head_tracking_seed_pitch_rad: 0.25
+    max_head_seed_velocity_rad_s: 0.05
+
+    # Legacy full physical recenter is suspended. Enabling this isolated mode
+    # exposes only the bounded ArmSdk ownership micro-probe; the old
+    # /recenter_head service always rejects.
+    head_recenter_enabled: false
+    head_recenter_confirmed: false
+    head_ownership_probe_only: true
+    head_ownership_probe_confirmed: false
+    head_recenter_yaw_rate_rad_s: 0.08
+    head_recenter_pitch_rate_rad_s: 0.05
+    # Independent measured-motion ceiling. A fresh q/dq sample above this
+    # value aborts recenter before another ArmSdk target is published.
+    head_recenter_max_feedback_velocity_rad_s: 0.12
+    # Three consecutive seed positions must remain inside this window even if
+    # a faulty or quantized dq field reports zero.
+    head_recenter_seed_stability_rad: 0.01
+    head_recenter_tolerance_rad: 0.02
+    head_recenter_follow_tolerance_rad: 0.02
+    head_recenter_follow_timeout_sec: 1.0
+    head_recenter_timeout_sec: 35.0
+
+    # Probe sequence: 0-weight discovery, ~1 s seed-hold weight ramp, a
+    # yaw-only 0.005 rad excursion at 0.005 rad/s, verified fresh feedback,
+    # return to the exact seed, then release and latch kill. All 12 non-probed
+    # fields remain the captured fresh seed and are watched for motion.
+    head_probe_zero_weight_hold_sec: 0.35
+    head_probe_weight_ramp_sec: 1.0
+    head_probe_step_rad: 0.005
+    head_probe_rate_rad_s: 0.005
+    # Separate from the suspended legacy recenter and normal seed guards. A
+    # 501-sample read-only baseline observed yaw dq max=0.02291 rad/s and no
+    # sample above 0.03, so 0.04 keeps measured noise margin while tightening
+    # the micro-probe fault boundary. The normal seed threshold remains 0.05.
+    head_probe_max_feedback_velocity_rad_s: 0.04
+    head_probe_min_progress_rad: 0.0015
+    # Ten consecutive fresh full-body samples must remain inside 0.003 rad
+    # before the transport can cross even the passive zero-weight boundary.
+    head_probe_seed_stability_rad: 0.003
+    head_probe_seed_samples: 10
+    # Exact-seed claim/ramp and all 12 non-probed fields use the same tight
+    # 0.003 rad ceiling. A false abort is preferable to an ownership jump.
+    head_probe_other_joint_tolerance_rad: 0.003
+    head_probe_claim_tolerance_rad: 0.003
+    head_probe_direction_tolerance_rad: 0.0005
+    head_probe_return_tolerance_rad: 0.0015
+    head_probe_follow_timeout_sec: 1.5
+    head_probe_total_timeout_sec: 8.0
+    head_probe_required_feedback_samples: 3

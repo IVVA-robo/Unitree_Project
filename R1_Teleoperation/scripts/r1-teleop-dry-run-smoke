@@ -1,0 +1,489 @@
+#!/usr/bin/env bash
+#
+# End-to-end smoke test for the strictly local R1 teleoperation dry-run tree.
+#
+# This script intentionally starts no Unitree SDK, LowState reader, ArmSdk,
+# LocoClient, simulator command publisher, or physical R1 transport.  It
+# creates a fresh local ROS domain, starts only the unified debug launch, and
+# sends protocol-v1 UDP packets to its loopback-only VR bridge.  Every checked
+# output is under an explicitly named debug namespace.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# Prefer the actual ros2_ws overlay; a root-level install is only a backwards
+# compatible fallback for an older build layout.
+WORKSPACE_SETUP="${PROJECT_DIR}/ros2_ws/install/setup.bash"
+if [[ ! -f "${WORKSPACE_SETUP}" ]]; then
+  WORKSPACE_SETUP="${PROJECT_DIR}/install/setup.bash"
+fi
+LAUNCH_LOG=""
+RUN_DIR=""
+LAUNCH_PID=""
+LAST_SENDER_PID=""
+SMOKE_PASSED=false
+SENDER_PIDS=()
+
+die() {
+  echo "[FAIL] $*" >&2
+  exit 1
+}
+
+command -v python3 >/dev/null 2>&1 || die 'python3 is required'
+command -v ros2 >/dev/null 2>&1 || true
+command -v setsid >/dev/null 2>&1 || die 'setsid is required'
+command -v timeout >/dev/null 2>&1 || die 'timeout is required'
+
+[[ -f /opt/ros/humble/setup.bash ]] || die 'ROS 2 Humble setup.bash is missing'
+[[ -f "${WORKSPACE_SETUP}" ]] || die "workspace is not built: ${WORKSPACE_SETUP}"
+
+# Do not source the legacy hardware workspace here.  The unified launch below
+# has its optional read-only arm pipeline explicitly disabled, so no robot
+# description, Ethernet interface, or R1 needs to be present for this test.
+set +u
+source /opt/ros/humble/setup.bash
+source "${WORKSPACE_SETUP}"
+set -u
+
+command -v ros2 >/dev/null 2>&1 || die 'ros2 is unavailable after sourcing ROS 2'
+
+# These are deliberately exported before discovery as well as forced again by
+# the launch file.  A stale shell acknowledgement can therefore never turn a
+# smoke test into an actuation path.
+export ROS_LOCALHOST_ONLY=1
+export ROBOT_DRY_RUN=1
+export ROBOT_ENABLE_ACTUATION=0
+export ROBOT_CONFIRM_OFF_CHARGER=0
+export ROBOT_CONFIRM_CLEAR_AREA=0
+export ROBOT_CONFIRM_ESTOP_READY=0
+
+validate_domain() {
+  local value="$1"
+  [[ "${value}" =~ ^[0-9]+$ ]] && (( 10#${value} <= 232 )) || \
+    die 'R1_DRY_RUN_SMOKE_DOMAIN must be an integer from 0 to 232'
+}
+
+domain_nodes() {
+  ROS_DOMAIN_ID="$1" ros2 node list --no-daemon --spin-time 0.35 2>/dev/null
+}
+
+select_isolated_domain() {
+  local requested="${R1_DRY_RUN_SMOKE_DOMAIN:-}"
+  local candidate graph offset
+
+  if [[ -n "${requested}" ]]; then
+    validate_domain "${requested}"
+    graph="$(domain_nodes "${requested}" || true)"
+    if [[ -n "${graph//[[:space:]]/}" ]]; then
+      die "refusing ROS domain ${requested}: it already contains nodes:\n${graph}"
+    fi
+    printf '%d\n' "$((10#${requested}))"
+    return
+  fi
+
+  # Domains 200--229 are well away from this project's normal 88/89 domains.
+  # Checking the graph first reduces the chance of publishing mock input into
+  # another local process even though ROS_LOCALHOST_ONLY is already enforced.
+  for offset in $(seq 0 29); do
+    candidate=$((200 + ((BASHPID + offset) % 30)))
+    graph="$(domain_nodes "${candidate}" || true)"
+    if [[ -z "${graph//[[:space:]]/}" ]]; then
+      printf '%s\n' "${candidate}"
+      return
+    fi
+  done
+  die 'could not find an empty isolated ROS domain in 200..229'
+}
+
+validate_udp_port() {
+  local value="$1"
+  [[ "${value}" =~ ^[0-9]+$ ]] && (( 10#${value} >= 1 && 10#${value} <= 65535 )) || \
+    die 'R1_DRY_RUN_SMOKE_UDP_PORT must be an integer from 1 to 65535'
+  [[ "${value}" != '9090' ]] || \
+    die 'R1_DRY_RUN_SMOKE_UDP_PORT must differ from the normal VR port 9090'
+}
+
+select_udp_port() {
+  local requested="${R1_DRY_RUN_SMOKE_UDP_PORT:-}"
+  if [[ -n "${requested}" ]]; then
+    validate_udp_port "${requested}"
+    printf '%d\n' "$((10#${requested}))"
+    return
+  fi
+
+  # Ask the kernel for a loopback port rather than reusing the operator's
+  # headset port.  The port is checked again when the bridge binds it.
+  python3 - <<'PY'
+import socket
+
+for _ in range(16):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.bind(('127.0.0.1', 0))
+        port = sock.getsockname()[1]
+    if port != 9090:
+        print(port)
+        break
+else:
+    raise SystemExit('failed to select an alternate UDP port')
+PY
+}
+
+wait_for_unified_launch() {
+  local prefix attempt
+  for attempt in $(seq 1 10); do
+    if prefix="$(ros2 pkg prefix r1_teleoperation_app 2>/dev/null)" \
+      && [[ -f "${prefix}/share/r1_teleoperation_app/launch/r1_teleop_dry_run.launch.py" ]]; then
+      return
+    fi
+    echo "[WAIT] unified dry-run launch is not installed yet (attempt ${attempt}/10)"
+    sleep 1
+  done
+  die 'r1_teleop_dry_run.launch.py is unavailable in the current install; build the workspace first'
+}
+
+launch_is_alive() {
+  [[ -n "${LAUNCH_PID}" ]] && kill -0 "${LAUNCH_PID}" 2>/dev/null
+}
+
+show_launch_log() {
+  [[ -n "${LAUNCH_LOG}" && -f "${LAUNCH_LOG}" ]] || return 0
+  echo '[INFO] last unified-launch output:' >&2
+  tail -n 120 "${LAUNCH_LOG}" >&2 || true
+}
+
+wait_for_node() {
+  local expected="$1" deadline=$((SECONDS + 25)) nodes
+  while (( SECONDS < deadline )); do
+    if ! launch_is_alive; then
+      show_launch_log
+      die "unified launch exited while waiting for node ${expected}"
+    fi
+    nodes="$(ros2 node list --no-daemon --spin-time 0.35 2>/dev/null || true)"
+    if grep -Fqx "${expected}" <<<"${nodes}"; then
+      return
+    fi
+    sleep 0.20
+  done
+  show_launch_log
+  die "timed out waiting for node ${expected}"
+}
+
+wait_for_service() {
+  local expected="$1" deadline=$((SECONDS + 25)) services
+  while (( SECONDS < deadline )); do
+    if ! launch_is_alive; then
+      show_launch_log
+      die "unified launch exited while waiting for service ${expected}"
+    fi
+    services="$(ros2 service list --no-daemon --spin-time 0.35 2>/dev/null || true)"
+    if grep -Fqx "${expected}" <<<"${services}"; then
+      return
+    fi
+    sleep 0.20
+  done
+  show_launch_log
+  die "timed out waiting for service ${expected}"
+}
+
+response_reports_success() {
+  grep -Eq \
+    'success[[:space:]]*=[[:space:]]*True|success:[[:space:]]*true' \
+    <<<"$1"
+}
+
+call_service_success() {
+  local name="$1" type="$2" request="$3" response
+  if ! response="$(timeout 8s ros2 service call "${name}" "${type}" "${request}" 2>&1)"; then
+    echo "${response}" >&2
+    die "service call failed: ${name}"
+  fi
+  printf '%s\n' "${response}"
+  if ! response_reports_success "${response}"; then
+    die "service ${name} did not report success"
+  fi
+}
+
+capture_scalar() {
+  local topic="$1" field="$2" expectation="$3" label="$4"
+  local output="${RUN_DIR}/${label//\//_}.txt"
+  if ! timeout 6s ros2 topic echo --once "${topic}" --field "${field}" >"${output}" 2>&1; then
+    cat "${output}" >&2 || true
+    die "timed out while reading ${label} from ${topic}"
+  fi
+  python3 - "${output}" "${expectation}" "${label}" <<'PY'
+import math
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding='utf-8', errors='replace')
+values = [float(token) for token in re.findall(
+    r'(?<![A-Za-z_])[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?', text
+)]
+if not values or not all(math.isfinite(value) for value in values):
+    raise SystemExit('no finite scalar found in %s: %r' % (sys.argv[3], text))
+value = values[-1]
+expectation = sys.argv[2]
+if expectation == 'nonzero':
+    if abs(value) <= 0.01:
+        raise SystemExit('%s expected non-zero debug output, got %.9f' % (sys.argv[3], value))
+elif expectation == 'zero':
+    if abs(value) > 1.0e-6:
+        raise SystemExit('%s expected zero debug output, got %.9f' % (sys.argv[3], value))
+else:
+    raise SystemExit('unknown scalar expectation: %s' % expectation)
+print('[OK] %s = %.6f (%s)' % (sys.argv[3], value, expectation))
+PY
+}
+
+assert_preflight_observes_active_debug_controllers() {
+  local output required
+  if ! output="$(timeout 10s ros2 run r1_teleop_safety r1_teleop_preflight \
+    --interface lo \
+    --robot-ip 127.0.0.1 \
+    --observe-seconds 1.0 \
+    --require-vr \
+    --require-kill-clear \
+    --require-debug-controllers 2>&1)"; then
+    printf '%s\n' "${output}" >&2
+    die 'read-only preflight did not accept the active isolated dry-run tree'
+  fi
+  for required in \
+    '[OK] head_dry_run status age=' \
+    '[OK] locomotion_dry_run status age=' \
+    'limits_ypr_rad=' \
+    'limits_mps_rps='; do
+    if ! grep -Fq "${required}" <<<"${output}"; then
+      printf '%s\n' "${output}" >&2
+      die "preflight output missed expected diagnostic: ${required}"
+    fi
+  done
+  echo '[OK] read-only preflight observed head/loco status and active limits'
+}
+
+start_udp_stream() {
+  local deadman="$1" yaw_rad="$2" left_x="$3" left_y="$4" right_x="$5" duration="$6"
+  local start_sequence="${UDP_SEQUENCE}"
+  # Each independent local sender gets a much higher sequence range than the
+  # last one.  The bridge therefore accepts every phase despite UDP sockets
+  # being recreated, while source-IP locking still sees only 127.0.0.1.
+  UDP_SEQUENCE=$((UDP_SEQUENCE + 10000))
+  python3 - "${UDP_PORT}" "${start_sequence}" "${deadman}" "${yaw_rad}" \
+    "${left_x}" "${left_y}" "${right_x}" "${duration}" <<'PY' &
+import json
+import math
+import socket
+import sys
+import time
+
+port = int(sys.argv[1])
+sequence = int(sys.argv[2])
+deadman = sys.argv[3].lower() == 'true'
+yaw = float(sys.argv[4])
+left_x = float(sys.argv[5])
+left_y = float(sys.argv[6])
+right_x = float(sys.argv[7])
+duration = float(sys.argv[8])
+
+half_yaw = yaw * 0.5
+head = {
+    'p': [0.0, 0.0, 1.65],
+    'q': [0.0, 0.0, math.sin(half_yaw), math.cos(half_yaw)],
+}
+hand = {'p': [0.35, 0.0, 1.20], 'q': [0.0, 0.0, 0.0, 1.0]}
+address = ('127.0.0.1', port)
+period = 1.0 / 60.0
+deadline = time.monotonic() + duration
+
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+    sock.bind(('127.0.0.1', 0))
+    while time.monotonic() < deadline:
+        packet = {
+            'v': 1,
+            'seq': sequence,
+            'client_time_ms': time.time_ns() // 1_000_000,
+            'left': hand,
+            'right': hand,
+            'head': head,
+            'sticks': {'left': [left_x, left_y], 'right': [right_x, 0.0]},
+            'triggers': [0.0, 0.0],
+            'deadman': deadman,
+        }
+        sock.sendto(json.dumps(packet, separators=(',', ':')).encode('utf-8'), address)
+        sequence = (sequence + 1) % (1 << 32)
+        time.sleep(period)
+PY
+  LAST_SENDER_PID=$!
+  SENDER_PIDS+=("${LAST_SENDER_PID}")
+}
+
+wait_for_sender() {
+  local pid="$1"
+  wait "${pid}"
+}
+
+stop_sender_without_release() {
+  local pid="$1"
+  # This process is one of our own local UDP generators.  Stopping it creates
+  # the deliberate packet-drop condition used by the watchdog test; it never
+  # sends a ROS command or touches a physical process.
+  if kill -0 "${pid}" 2>/dev/null; then
+    kill -TERM "${pid}" 2>/dev/null || true
+  fi
+  wait "${pid}" 2>/dev/null || true
+}
+
+assert_no_robot_command_topics() {
+  local topics forbidden
+  topics="$(ros2 topic list --no-daemon --spin-time 1.0 2>/dev/null || true)"
+  for forbidden in \
+    /cmd_vel \
+    /joint_trajectory_controller/joint_cmd \
+    /r1/hardware \
+    /r1/arm_cmd \
+    /r1/loco_cmd; do
+    if grep -Fqx "${forbidden}" <<<"${topics}"; then
+      die "unexpected physical command topic present in isolated smoke domain: ${forbidden}"
+    fi
+  done
+  echo '[OK] no known physical command topic is present in the isolated domain'
+}
+
+stop_started_processes() {
+  local pid deadline
+  for pid in "${SENDER_PIDS[@]:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -TERM "${pid}" 2>/dev/null || true
+    fi
+  done
+  for pid in "${SENDER_PIDS[@]:-}"; do
+    [[ -n "${pid}" ]] && wait "${pid}" 2>/dev/null || true
+  done
+
+  if launch_is_alive; then
+    # The launch was made session leader by setsid below.  Signalling its
+    # process group reaches only its own ROS children, never a user launch.
+    kill -INT -- "-${LAUNCH_PID}" 2>/dev/null || kill -INT "${LAUNCH_PID}" 2>/dev/null || true
+    deadline=$((SECONDS + 8))
+    while launch_is_alive && (( SECONDS < deadline )); do
+      sleep 0.10
+    done
+    if launch_is_alive; then
+      kill -TERM -- "-${LAUNCH_PID}" 2>/dev/null || kill -TERM "${LAUNCH_PID}" 2>/dev/null || true
+      deadline=$((SECONDS + 3))
+      while launch_is_alive && (( SECONDS < deadline )); do
+        sleep 0.10
+      done
+    fi
+    if launch_is_alive; then
+      kill -KILL -- "-${LAUNCH_PID}" 2>/dev/null || kill -KILL "${LAUNCH_PID}" 2>/dev/null || true
+    fi
+  fi
+  [[ -z "${LAUNCH_PID}" ]] || wait "${LAUNCH_PID}" 2>/dev/null || true
+}
+
+cleanup() {
+  local exit_code=$?
+  trap - EXIT
+  stop_started_processes
+  if [[ -n "${RUN_DIR}" && -d "${RUN_DIR}" ]]; then
+    if [[ "${SMOKE_PASSED}" == true && "${R1_DRY_RUN_SMOKE_KEEP_LOG:-0}" != 1 ]]; then
+      rm -rf -- "${RUN_DIR}"
+    else
+      echo "[INFO] smoke logs retained: ${RUN_DIR}" >&2
+    fi
+  fi
+  exit "${exit_code}"
+}
+
+trap 'exit 130' INT TERM
+trap cleanup EXIT
+
+wait_for_unified_launch
+ROS_DOMAIN_ID="$(select_isolated_domain)"
+export ROS_DOMAIN_ID
+UDP_PORT="$(select_udp_port)"
+RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/r1-teleop-dry-run-smoke.XXXXXX")"
+LAUNCH_LOG="${RUN_DIR}/launch.log"
+UDP_SEQUENCE=1000
+
+echo 'R1 teleoperation smoke test: local debug outputs only; no robot transport is started.'
+echo "  ROS_DOMAIN_ID=${ROS_DOMAIN_ID} UDP=127.0.0.1:${UDP_PORT}"
+
+# New session/process group: cleanup can only signal this launch and children
+# which it itself starts.  arm pipeline remains explicitly disabled.
+setsid ros2 launch r1_teleoperation_app r1_teleop_dry_run.launch.py \
+  ros_domain_id:="${ROS_DOMAIN_ID}" \
+  udp_bind_address:=127.0.0.1 \
+  udp_port:="${UDP_PORT}" \
+  start_arm_pipeline:=false \
+  >"${LAUNCH_LOG}" 2>&1 &
+LAUNCH_PID=$!
+
+wait_for_node /r1_safety_supervisor
+wait_for_node /vr_teleop_bridge
+wait_for_node /r1_head_dry_run
+wait_for_node /r1_locomotion_dry_run
+wait_for_service /r1/safety/set_kill
+wait_for_service /r1/head/calibrate_neutral
+assert_no_robot_command_topics
+
+# Startup is fail-closed before any mock packet or interlock release.
+capture_scalar /r1_hardware_adapter/debug/head/command_euler vector.x zero startup_head
+capture_scalar /r1/locomotion_dry_run/debug/cmd_vel twist.linear.x zero startup_locomotion
+
+echo '[INFO] releasing only the dry-run software kill latch'
+call_service_success /r1/safety/set_kill std_srvs/srv/SetBool '{data: false}'
+# The initial retained startup kill is an interlock, not an E-stop edge: its
+# first explicit false release must arm debug locomotion without a hidden
+# second reset. A later true edge still latches and requires its reset service.
+
+# Establish a fresh neutral HMD pose while the deadman heartbeat is active.
+# Keep the sender alive beyond the service-call timeout: on a cold DDS graph,
+# starting the ``ros2 service call`` helper can take longer than the old
+# 1.2-second packet window, making an otherwise valid neutral pose stale just
+# before the request reached the controller.  We stop the local sender as soon
+# as calibration succeeds, so the longer upper bound adds no delay normally.
+start_udp_stream true 0.0 0.0 0.0 0.0 12.0
+neutral_sender="${LAST_SENDER_PID}"
+sleep 0.30
+call_service_success /r1/head/calibrate_neutral std_srvs/srv/Trigger '{}'
+stop_sender_without_release "${neutral_sender}"
+
+# A bounded yaw and sticks must create only non-zero *debug* values.  Keep the
+# stream alive beyond the combined timeout of the two independent ``ros2
+# topic echo`` subscribers and the read-only preflight.  Each command performs
+# fresh DDS discovery and can otherwise consume the old four-second window on
+# a busy/cold host.  The sender is explicitly stopped as soon as the checks
+# complete, so this is only an upper bound.
+start_udp_stream true 0.35 0.0 0.80 0.50 30.0
+motion_sender="${LAST_SENDER_PID}"
+sleep 0.60
+capture_scalar /r1_hardware_adapter/debug/head/command_euler vector.x nonzero active_head
+capture_scalar /r1/locomotion_dry_run/debug/cmd_vel twist.linear.x nonzero active_locomotion
+assert_preflight_observes_active_debug_controllers
+stop_sender_without_release "${motion_sender}"
+
+# Explicit deadman release must decay/clear both diagnostic outputs to zero.
+start_udp_stream false 0.0 0.0 0.0 0.0 0.60
+release_sender="${LAST_SENDER_PID}"
+wait_for_sender "${release_sender}"
+sleep 0.75
+capture_scalar /r1_hardware_adapter/debug/head/command_euler vector.x zero released_head
+capture_scalar /r1/locomotion_dry_run/debug/cmd_vel twist.linear.x zero released_locomotion
+
+# Re-establish motion, then deliberately stop local UDP sending without a
+# release.  VR, head, and locomotion watchdogs must independently fail safe.
+start_udp_stream true 0.35 0.0 0.80 0.50 20.0
+stale_motion_sender="${LAST_SENDER_PID}"
+sleep 0.55
+capture_scalar /r1_hardware_adapter/debug/head/command_euler vector.x nonzero stale_setup_head
+capture_scalar /r1/locomotion_dry_run/debug/cmd_vel twist.linear.x nonzero stale_setup_locomotion
+stop_sender_without_release "${stale_motion_sender}"
+sleep 1.10
+capture_scalar /r1_hardware_adapter/debug/head/command_euler vector.x zero stale_head
+capture_scalar /r1/locomotion_dry_run/debug/cmd_vel twist.linear.x zero stale_locomotion
+
+SMOKE_PASSED=true
+echo '[PASS] isolated VR/head/locomotion dry-run smoke test passed; no robot command was sent.'

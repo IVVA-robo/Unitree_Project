@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+# Source this file after the ROS/workspace setup files in every process that
+# joins the physical-R1 ROS domain.  The Unitree SDK embeds CycloneDDS 0.10.2,
+# while ROS Humble currently ships a different CycloneDDS ABI.  Keeping the
+# ROS graph on Fast DDS prevents either implementation from borrowing the
+# other one's libddsc at runtime.
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  echo '[BLOCKED] r1-physical-ros-env must be sourced, not executed.' >&2
+  exit 2
+fi
+
+_r1_fastrtps_rmw=/opt/ros/humble/lib/librmw_fastrtps_cpp.so
+if [[ ! -f "${_r1_fastrtps_rmw}" ]]; then
+  echo '[BLOCKED] ROS Fast DDS RMW is unavailable: ros-humble-rmw-fastrtps-cpp is required.' >&2
+  return 1
+fi
+
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+unset _r1_fastrtps_rmw

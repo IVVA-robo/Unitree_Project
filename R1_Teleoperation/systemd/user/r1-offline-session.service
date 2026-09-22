@@ -1,0 +1,21 @@
+[Unit]
+Description=Unitree R1 offline LAN telepresence endpoints (video-only)
+After=graphical-session.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/unitree/Unitree_Project/R1_Teleoperation
+ExecStart=/home/unitree/Unitree_Project/R1_Teleoperation/scripts/r1-offline-session r1
+Restart=on-failure
+RestartSec=4
+Environment=PYTHONUNBUFFERED=1
+Environment=R1_TELEOP_VIDEO_MDNS=true
+
+# The session is deliberately limited to the UDP bridge and the video-only
+# Unitree camera source. It never starts the hardware adapter or live writer.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

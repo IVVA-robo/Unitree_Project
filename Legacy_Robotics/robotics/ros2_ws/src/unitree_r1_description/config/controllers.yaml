@@ -1,0 +1,103 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 100
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    arms_controller:
+      type: position_controllers/JointGroupPositionController
+
+    arm_trajectory_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    # Simulation-only proxy used by r1_sim_leg_visualizer.  It is not a
+    # hardware locomotion controller and is not started by hardware launch.
+    leg_trajectory_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    waist_hold_controller:
+      type: position_controllers/JointGroupPositionController
+
+arms_controller:
+  ros__parameters:
+    joints:
+      - left_shoulder_pitch_joint
+      - left_shoulder_roll_joint
+      - left_shoulder_yaw_joint
+      - left_elbow_joint
+      - left_wrist_roll_joint
+      - right_shoulder_pitch_joint
+      - right_shoulder_roll_joint
+      - right_shoulder_yaw_joint
+      - right_elbow_joint
+      - right_wrist_roll_joint
+
+arm_trajectory_controller:
+  ros__parameters:
+    joints:
+      - left_shoulder_pitch_joint
+      - left_shoulder_roll_joint
+      - left_shoulder_yaw_joint
+      - left_elbow_joint
+      - left_wrist_roll_joint
+      - right_shoulder_pitch_joint
+      - right_shoulder_roll_joint
+      - right_shoulder_yaw_joint
+      - right_elbow_joint
+      - right_wrist_roll_joint
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+    allow_partial_joints_goal: false
+    constraints:
+      goal_time: 0.5
+      stopped_velocity_tolerance: 0.2
+
+leg_trajectory_controller:
+  ros__parameters:
+    joints:
+      - left_hip_pitch_joint
+      - left_hip_roll_joint
+      - left_hip_yaw_joint
+      - left_knee_joint
+      - left_ankle_pitch_joint
+      - left_ankle_roll_joint
+      - right_hip_pitch_joint
+      - right_hip_roll_joint
+      - right_hip_yaw_joint
+      - right_knee_joint
+      - right_ankle_pitch_joint
+      - right_ankle_roll_joint
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+    allow_partial_joints_goal: false
+    constraints:
+      goal_time: 0.5
+      stopped_velocity_tolerance: 0.2
+
+waist_hold_controller:
+  ros__parameters:
+    joints:
+      - waist_roll_joint
+      - waist_yaw_joint
+    interface_name: position
+
+gazebo_ros2_control:
+  ros__parameters:
+    pid_gains:
+      waist_roll_joint: {p: 150.0, i: 0.0, d: 2.0}
+      waist_yaw_joint: {p: 150.0, i: 0.0, d: 2.0}
+      left_shoulder_pitch_joint: {p: 100.0, i: 0.0, d: 1.0}
+      left_shoulder_roll_joint: {p: 100.0, i: 0.0, d: 1.0}
+      left_shoulder_yaw_joint: {p: 100.0, i: 0.0, d: 1.0}
+      left_elbow_joint: {p: 100.0, i: 0.0, d: 1.0}
+      left_wrist_roll_joint: {p: 50.0, i: 0.0, d: 0.5}
+      right_shoulder_pitch_joint: {p: 100.0, i: 0.0, d: 1.0}
+      right_shoulder_roll_joint: {p: 100.0, i: 0.0, d: 1.0}
+      right_shoulder_yaw_joint: {p: 100.0, i: 0.0, d: 1.0}
+      right_elbow_joint: {p: 100.0, i: 0.0, d: 1.0}
+      right_wrist_roll_joint: {p: 50.0, i: 0.0, d: 0.5}

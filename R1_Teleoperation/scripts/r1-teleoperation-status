@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+set -u
+
+# Read-only health snapshot for the unified teleoperation app. This script
+# never publishes ROS messages, opens a Unitree transport, or changes state.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WS_DIR="${PROJECT_DIR}/ros2_ws"
+LEGACY_WS_SETUP="${R1_LEGACY_WS_SETUP:-${PROJECT_DIR}/../Legacy_Robotics/robotics/ros2_ws/install/setup.bash}"
+DOMAIN_ID="${R1_TELEOP_DOMAIN_ID:-81}"
+VIDEO_HOST="${R1_TELEOP_STATUS_VIDEO_HOST:-127.0.0.1}"
+VIDEO_PORT="${R1_TELEOP_VIDEO_PORT:-8080}"
+
+mark() {
+  printf '[%s] %s\n' "$1" "$2"
+}
+
+if [[ -f /opt/ros/humble/setup.bash ]]; then
+  # ROS setup scripts are not nounset-clean.
+  set +u
+  source /opt/ros/humble/setup.bash
+  set -u
+else
+  mark 'FAIL' 'ROS 2 Humble setup.bash is missing'
+  exit 1
+fi
+if [[ -f "${LEGACY_WS_SETUP}" ]]; then
+  set +u
+  source "${LEGACY_WS_SETUP}"
+  set -u
+fi
+if [[ -f "${WS_DIR}/install/setup.bash" ]]; then
+  set +u
+  source "${WS_DIR}/install/setup.bash"
+  set -u
+else
+  mark 'FAIL' "workspace is not built: ${WS_DIR}/install/setup.bash"
+  exit 1
+fi
+
+export ROS_DOMAIN_ID="${DOMAIN_ID}"
+export ROS_LOCALHOST_ONLY=1
+
+printf 'R1 teleoperation status (read-only)\n'
+printf 'ROS_DOMAIN_ID=%s | ROS_LOCALHOST_ONLY=%s\n' "${ROS_DOMAIN_ID}" "${ROS_LOCALHOST_ONLY}"
+
+if ! command -v ros2 >/dev/null 2>&1; then
+  mark 'FAIL' 'ros2 command is unavailable'
+  exit 1
+fi
+
+# DDS graph discovery can be staggered while Gazebo is starting.  Take two
+# short snapshots and merge them so a healthy node is not reported missing
+# merely because the first graph query raced discovery.
+NODE_LIST="$(for _ in 1 2; do ros2 node list --no-daemon --spin-time 1.5 2>/dev/null || true; done)"
+for node in \
+  /vr_teleop_bridge \
+  /r1_kinematics_control \
+  /r1_sim_locomotion_adapter \
+  /r1_sim_leg_visualizer \
+  /r1_sim_whole_body_planner \
+  /r1_stereo_camera_viewer; do
+  if grep -Fxq "${node}" <<<"${NODE_LIST}"; then
+    mark 'OK' "node ${node}"
+  else
+    mark 'WARN' "node ${node} is not discovered"
+  fi
+done
+
+TOPIC_LIST="$(for _ in 1 2; do ros2 topic list --no-daemon --spin-time 1.5 2>/dev/null || true; done)"
+for topic in \
+  /vr/head/pose \
+  /vr/left_controller/pose \
+  /vr/right_controller/pose \
+  /vr/cmd_vel \
+  /vr/teleop/active \
+  /r1/telepresence/leg_targets \
+  /r1_kinematics_control/debug/arm_trajectory \
+  /r1/telepresence/whole_body_targets; do
+  if grep -Fxq "${topic}" <<<"${TOPIC_LIST}"; then
+    mark 'OK' "topic ${topic}"
+  else
+    mark 'WARN' "topic ${topic} is not discovered"
+  fi
+done
+
+ACTIVE_SAMPLE="$(timeout 2s ros2 topic echo --once /vr/teleop/active 2>/dev/null || true)"
+ACTIVE_VALUE="$(awk '/^data:/ {print $2; exit}' <<<"${ACTIVE_SAMPLE}")"
+case "${ACTIVE_VALUE}" in
+  true) mark 'INFO' 'Deadman is ACTIVE (movement is permitted by the gate)' ;;
+  false) mark 'INFO' 'Deadman is released (movement is blocked)' ;;
+  *) mark 'WARN' 'Deadman state is unavailable' ;;
+esac
+
+CMD_SAMPLE="$(timeout 2s ros2 topic echo --once /vr/cmd_vel 2>/dev/null || true)"
+if [[ -n "${CMD_SAMPLE}" ]]; then
+  linear_x="$(awk '/^    x:/ {print $2; exit}' <<<"${CMD_SAMPLE}")"
+  linear_y="$(awk '/^    y:/ {print $2; exit}' <<<"${CMD_SAMPLE}")"
+  angular_z="$(awk '/^    z:/ {print $2; exit}' <<<"${CMD_SAMPLE}")"
+  mark 'INFO' "latest /vr/cmd_vel: x=${linear_x:-?}, y=${linear_y:-?}, yaw=${angular_z:-?}"
+else
+  mark 'WARN' 'no /vr/cmd_vel sample received'
+fi
+
+if command -v curl >/dev/null 2>&1; then
+  VIDEO_URL="http://${VIDEO_HOST}:${VIDEO_PORT}"
+  if curl -fsS --max-time 2 "${VIDEO_URL}/healthz" >/dev/null; then
+    mark 'OK' "video server ${VIDEO_URL}/healthz"
+  else
+    mark 'WARN' "video server is not reachable at ${VIDEO_URL}"
+  fi
+  READY_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "${VIDEO_URL}/readyz" 2>/dev/null || printf '000')"
+  case "${READY_STATUS}" in
+    200) mark 'OK' 'video source is receiving fresh frames' ;;
+    503) mark 'WARN' 'video server is up, but the source has no fresh frame' ;;
+    *) mark 'WARN' "video readiness check returned HTTP ${READY_STATUS}" ;;
+  esac
+else
+  mark 'WARN' 'curl is unavailable; video HTTP check skipped'
+fi

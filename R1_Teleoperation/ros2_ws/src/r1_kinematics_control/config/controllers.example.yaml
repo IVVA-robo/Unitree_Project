@@ -1,0 +1,33 @@
+# Template only: replace every joint name with names from the actual R1 URDF.
+controller_manager:
+  ros__parameters:
+    update_rate: 250
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+    joint_trajectory_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+    left_hand_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+    right_hand_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+joint_trajectory_controller:
+  ros__parameters:
+    joints:
+      - REPLACE_LEFT_ARM_JOINTS
+      - REPLACE_RIGHT_ARM_JOINTS
+    command_interfaces: [position]
+    state_interfaces: [position, velocity]
+    allow_partial_joints_goal: false
+
+left_hand_controller:
+  ros__parameters:
+    joints: [REPLACE_LEFT_FINGER_JOINTS]
+    command_interfaces: [position]
+    state_interfaces: [position, velocity]
+
+right_hand_controller:
+  ros__parameters:
+    joints: [REPLACE_RIGHT_FINGER_JOINTS]
+    command_interfaces: [position]
+    state_interfaces: [position, velocity]

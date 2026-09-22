@@ -1,0 +1,65 @@
+r1_kinematics_control:
+  ros__parameters:
+    use_sim_time: true
+    control_rate_hz: 60.0
+    robot_description: ""
+    urdf_path: ""
+    robot_description_topic: "/robot_description"
+
+    left_arm:
+      base_link: "torso_link"
+      tip_link: "left_hand_link"
+      joint_names: ["AUTO"]
+    right_arm:
+      base_link: "torso_link"
+      tip_link: "right_hand_link"
+      joint_names: ["AUTO"]
+
+    left_hand:
+      joint_names: ["DISABLED"]
+      open_positions: [0.0]
+      closed_positions: [1.0]
+    right_hand:
+      joint_names: ["DISABLED"]
+      open_positions: [0.0]
+      closed_positions: [1.0]
+
+    left_trigger_axis_index: 4
+    right_trigger_axis_index: 5
+    left_trigger_button_index: 1
+    right_trigger_button_index: 2
+    trigger_axis_released_value: 0.0
+    trigger_axis_pressed_value: 1.0
+
+    position_ema_tau_sec: 0.075
+    orientation_ema_tau_sec: 0.10
+    finger_ema_tau_sec: 0.12
+    trajectory_time_sec: 0.10
+    max_joint_velocity_rad_s: 2.0
+
+    pose_timeout_sec: 0.25
+    joy_timeout_sec: 0.50
+    active_timeout_sec: 1.50
+    cmd_vel_timeout_sec: 0.25
+
+    workspace_reach_scale: 0.98
+    max_ik_position_error_m: 0.08
+    ik:
+      max_iterations: 30
+      damping: 0.03
+      singularity_threshold: 0.05
+      max_joint_step_rad: 0.15
+      position_tolerance_m: 0.005
+      orientation_tolerance_rad: 0.04
+      orientation_weight: 0.35
+
+    left_pose_topic: "/vr/left_controller/pose"
+    right_pose_topic: "/vr/right_controller/pose"
+    joy_topic: "/vr/joy"
+    active_topic: "/vr/teleop/active"
+    cmd_vel_input_topic: "/vr/cmd_vel"
+    cmd_vel_output_topic: "/cmd_vel"
+    joint_states_topic: "/joint_states"
+    arm_command_topic: "/joint_trajectory_controller/joint_trajectory"
+    left_hand_command_topic: "/left_hand_controller/joint_trajectory"
+    right_hand_command_topic: "/right_hand_controller/joint_trajectory"

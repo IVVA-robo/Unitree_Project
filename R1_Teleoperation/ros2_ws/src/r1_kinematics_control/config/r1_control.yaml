@@ -1,0 +1,164 @@
+r1_kinematics_control:
+  ros__parameters:
+    use_sim_time: true
+    control_rate_hz: 60.0
+    # Standalone launches are output-safe by default. The dedicated Gazebo
+    # launch overrides this to false because its controllers are simulated.
+    dry_run: true
+    # Only the localhost-only telepresence_sim launch may turn dry_run off.
+    # This node rejects non-dry-run use unless simulation_mode is also true.
+    simulation_mode: false
+    debug_enabled: true
+    debug_topic_prefix: "/r1_kinematics_control/debug"
+    debug_log_period_sec: 1.0
+
+    # The node tries these sources in order: robot_description parameter,
+    # urdf_path, then a transient-local std_msgs/String topic.
+    robot_description: ""
+    urdf_path: ""
+    robot_description_topic: "/robot_description"
+    pose_calibration_frame: "vr_tracking"
+
+    # First-person/avatar mapping. All three poses are first transformed into
+    # vr_tracking, then hand_local = inverse(head_pose) * hand_world. A
+    # yaw-stabilized virtual body maps both sides with the same scale and
+    # exactly mirrored neutral anchors.
+    headset_relative_enabled: true
+    head_pose_topic: "/vr/head/pose"
+    body_proxy:
+      require_calibration: true
+      calibration_service: "/vr/calibrate_body"
+      calibration_file: "~/Unitree_Project/Configs/Calibration/r1_body_calibration.json"
+      sync_tolerance_sec: 0.05
+      # Set user_height_m to a measured value to override the HMD-height
+      # estimate. Shoulder width and arm reach cannot be measured reliably
+      # from HMD + controllers alone, so enter measured values when available.
+      user_height_m: 0.0
+      fallback_user_height_m: 1.75
+      shoulder_width_m: 0.40
+      user_arm_reach_m: 0.65
+      head_height_ratio: 0.93
+      neck_height_ratio: 0.86
+      shoulder_height_ratio: 0.82
+      chest_height_ratio: 0.72
+      waist_height_ratio: 0.53
+      shoulder_forward_offset_m: -0.02
+      body_position_tau_sec: 0.12
+      body_yaw_tau_sec: 0.20
+      motion_scale: 1.15
+      robot_reach_scale: 0.95
+      max_behind_shoulder_m: 0.04
+      # Keep left/right wrist targets at least 8 cm from the torso centre
+      # plane; this prevents crossed-arm IK solutions when controllers cross.
+      min_hand_lateral_m: 0.08
+      max_input_jump_m: 0.25
+      max_target_speed_mps: 0.75
+
+    # Legacy world-relative calibration, used only when
+    # headset_relative_enabled=false. The unequal recorded neutral points are
+    # the source of the old left/right depth asymmetry.
+    left_pose_neutral_vr: [0.0135, 0.2993, 0.9595]
+    right_pose_neutral_vr: [0.2316, 0.0403, 0.9355]
+    left_pose_neutral_base: [0.128371, 0.138605, -0.018039]
+    right_pose_neutral_base: [0.128371, -0.138605, -0.018039]
+    left_pose_scale: [0.80, 0.80, 0.80]
+    # The bridge already converts Unity +X (operator right) to ROS -Y.  Keep
+    # this scale positive so a rightward controller motion moves the robot's
+    # right hand further toward negative base-Y instead of mirroring it back.
+    right_pose_scale: [0.80, 0.80, 0.80]
+
+    left_arm:
+      base_link: "torso_link"
+      tip_link: "left_wrist_roll_link"
+      joint_names:
+        - "left_shoulder_pitch_joint"
+        - "left_shoulder_roll_joint"
+        - "left_shoulder_yaw_joint"
+        - "left_elbow_joint"
+        - "left_wrist_roll_joint"
+    right_arm:
+      base_link: "torso_link"
+      tip_link: "right_wrist_roll_link"
+      joint_names:
+        - "right_shoulder_pitch_joint"
+        - "right_shoulder_roll_joint"
+        - "right_shoulder_yaw_joint"
+        - "right_elbow_joint"
+        - "right_wrist_roll_joint"
+
+    # Replace DISABLED and both angle arrays when hand joints are known.
+    # Each open/closed value maps to the joint at the same array index.
+    left_hand:
+      joint_names: ["DISABLED"]
+      # Example: ["left_thumb_joint", "left_index_joint", ...]
+      open_positions: [0.0]
+      closed_positions: [1.0]
+    right_hand:
+      joint_names: ["DISABLED"]
+      open_positions: [0.0]
+      closed_positions: [1.0]
+
+    # Prefer analog trigger axes for proportional finger control. Set an axis to
+    # -1 to fall back to the corresponding Joy button. Current bridge buttons:
+    # [deadman, left_trigger, right_trigger].
+    left_trigger_axis_index: 4
+    right_trigger_axis_index: 5
+    left_trigger_button_index: 1
+    right_trigger_button_index: 2
+    trigger_axis_released_value: 0.0
+    trigger_axis_pressed_value: 1.0
+
+    # Time-based smoothing remains consistent when the VR frame rate changes.
+    position_ema_tau_sec: 0.075
+    orientation_ema_tau_sec: 0.10
+    finger_ema_tau_sec: 0.12
+    trajectory_time_sec: 0.10
+    max_joint_velocity_rad_s: 1.0
+
+    pose_timeout_sec: 0.25
+    joy_timeout_sec: 0.50
+    active_timeout_sec: 1.50
+    cmd_vel_timeout_sec: 0.25
+
+    # Gazebo only: continuously command the waist joints to neutral so the
+    # torso cannot rotate while the arms are being teleoperated. Keep false
+    # for real hardware unless a dedicated waist safety controller is used.
+    waist_hold_enabled: true
+    waist_hold_topic: "/waist_hold_controller/commands"
+    waist_hold_positions: [0.0, 0.0]
+
+    workspace_reach_scale: 0.98
+    max_ik_position_error_m: 0.08
+    ik:
+      max_iterations: 30
+      damping: 0.03
+      singularity_threshold: 0.05
+      max_joint_step_rad: 0.15
+      position_tolerance_m: 0.005
+      orientation_tolerance_rad: 0.04
+      # The local R1 arm chain has five joints, so a full 6-D pose is
+      # over-constrained.  Position is prioritized until wrist calibration.
+      orientation_weight: 0.05
+      # Retry from the neutral pose if a tracking jump leaves numerical IK in
+      # a bad local minimum. This never bypasses joint, speed, or residual
+      # safety limits.
+      recovery_enabled: true
+      recovery_min_improvement_m: 0.01
+      recovery_retry_sec: 0.50
+
+    left_pose_topic: "/vr/left_controller/pose"
+    right_pose_topic: "/vr/right_controller/pose"
+    joy_topic: "/vr/joy"
+    active_topic: "/vr/teleop/active"
+    cmd_vel_input_topic: "/vr/cmd_vel"
+    # A separate simulation/hardware adapter owns the final /cmd_vel output.
+    cmd_vel_output_topic: "/vr/safe_cmd_vel"
+    joint_states_topic: "/joint_states"
+    arm_command_topic: "/arm_trajectory_controller/joint_trajectory"
+    left_hand_command_topic: "/left_hand_controller/joint_trajectory"
+    right_hand_command_topic: "/right_hand_controller/joint_trajectory"
+
+    # A second defensive saturation layer after vr_teleop_bridge.
+    max_forward_mps: 0.35
+    max_lateral_mps: 0.25
+    max_yaw_rps: 0.60

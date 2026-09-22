@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Build a self-contained, verified bundle for a robot with no Internet access.
+# The archive is intentionally copied, never re-downloaded or modified.
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARCHIVE="${R1_VOSK_ARCHIVE:-${PROJECT_DIR}/.cache/voice-models/vosk-model-small-ru-0.22.full.zip}"
+OUT="${R1_VOICE_BUNDLE:-${PROJECT_DIR}/.cache/voice-models/r1-voice-offline-bundle.tar.gz}"
+INSTALLER="${PROJECT_DIR}/scripts/r1-install-vosk-ru"
+PREFLIGHT="${PROJECT_DIR}/scripts/r1-voice-preflight"
+
+[[ -f "$ARCHIVE" ]] || { echo "Missing archive: $ARCHIVE" >&2; exit 1; }
+[[ -x "$INSTALLER" ]] || { echo "Missing installer: $INSTALLER" >&2; exit 1; }
+[[ -x "$PREFLIGHT" ]] || { echo "Missing preflight: $PREFLIGHT" >&2; exit 1; }
+command -v unzip >/dev/null || { echo 'unzip is required' >&2; exit 1; }
+command -v tar >/dev/null || { echo 'tar is required' >&2; exit 1; }
+unzip -tq "$ARCHIVE" >/dev/null
+
+tmp="$(mktemp -d /tmp/r1-voice-bundle.XXXXXX)"
+cleanup() { rm -rf -- "$tmp"; }
+trap cleanup EXIT
+mkdir -p "$tmp/r1-voice-offline-bundle"
+cp -- "$ARCHIVE" "$tmp/r1-voice-offline-bundle/vosk-model-small-ru-0.22.zip"
+cp -- "$INSTALLER" "$PREFLIGHT" "$tmp/r1-voice-offline-bundle/"
+cat > "$tmp/r1-voice-offline-bundle/README.txt" <<'EOF'
+R1 offline Russian voice bundle
+
+1. Copy this directory to the R1 computer.
+2. Install the model (the robot itself does not need Internet):
+
+   sudo VOSK_RU_CACHE="$PWD/vosk-model-small-ru-0.22.zip" \
+     ./r1-install-vosk-ru
+
+3. Run the read-only check:
+
+   ./r1-voice-preflight
+
+4. Restart the existing service only after the check passes:
+
+   sudo systemctl restart robot-voice-service.service
+   systemctl --no-pager --full status robot-voice-service.service
+
+The language model, Ollama model, and TTS assets must already be installed
+locally on the R1 computer for fully offline operation.
+EOF
+(cd "$tmp/r1-voice-offline-bundle" && sha256sum * > SHA256SUMS)
+mkdir -p "$(dirname "$OUT")"
+tar -czf "$OUT" -C "$tmp" r1-voice-offline-bundle
+sha256sum "$OUT"
+printf '[OK] offline voice bundle: %s\n' "$OUT"
+tar -tzf "$OUT"

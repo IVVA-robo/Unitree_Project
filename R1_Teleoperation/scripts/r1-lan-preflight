@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Read-only LAN audit for the offline Pico ↔ laptop ↔ R1 topology.
+# It never contacts a public host, starts a ROS node, or opens a robot SDK
+# client. A powered-off robot is reported as WARN, not as a failure.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+WIFI_INTERFACE="${R1_WIFI_INTERFACE:-wlp4s0}"
+ROBOT_INTERFACE="${R1_ROBOT_INTERFACE:-enxb4b024be59fe}"
+ROBOT_PROFILE="${R1_ROBOT_PROFILE:-Unitree_R1}"
+LAPTOP_ROBOT_IP="${R1_LAPTOP_ROBOT_IP:-192.168.123.162}"
+ROBOT_IP="${R1_ROBOT_IP:-192.168.123.164}"
+VIDEO_NAME="${R1_VIDEO_MDNS_NAME:-$(hostname -s).local}"
+VIDEO_PORT="${R1_VIDEO_PORT:-8080}"
+UDP_PORT="${R1_UDP_PORT:-9090}"
+DISCOVERY_PORT="${R1_DISCOVERY_PORT:-9091}"
+
+warnings=0
+failures=0
+
+ok() { printf '[OK] %s\n' "$*"; }
+warn() { warnings=$((warnings + 1)); printf '[WARN] %s\n' "$*"; }
+fail() { failures=$((failures + 1)); printf '[FAIL] %s\n' "$*"; }
+
+require_command() {
+  if command -v "$1" >/dev/null 2>&1; then
+    ok "$1 is installed"
+  else
+    fail "$1 is required"
+  fi
+}
+
+printf 'R1 OFFLINE LAN PREFLIGHT\n'
+printf 'No public network is contacted; the robot may remain powered off.\n'
+printf 'Expected topology: Pico/VR Wi-Fi + laptop %s, R1 Ethernet %s.\n\n' \
+  "${WIFI_INTERFACE}" "${ROBOT_INTERFACE}"
+
+for command in ip nmcli ss getent; do
+  require_command "${command}"
+done
+
+wifi_address="$(ip -4 -o addr show dev "${WIFI_INTERFACE}" 2>/dev/null \
+  | awk '{split($4, parts, "/"); print parts[1]; exit}')"
+if [[ "${wifi_address}" =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.) ]]; then
+  ok "Wi-Fi ${WIFI_INTERFACE} has private IPv4 ${wifi_address}"
+elif [[ -n "${wifi_address}" ]]; then
+  warn "Wi-Fi ${WIFI_INTERFACE} has non-private IPv4 ${wifi_address}"
+else
+  warn "Wi-Fi ${WIFI_INTERFACE} is not currently connected; Pico discovery cannot work yet"
+fi
+
+robot_address="$(ip -4 -o addr show dev "${ROBOT_INTERFACE}" 2>/dev/null \
+  | awk '{split($4, parts, "/"); print parts[1]; exit}')"
+if [[ "${robot_address}" == "${LAPTOP_ROBOT_IP}" ]]; then
+  ok "R1 Ethernet ${ROBOT_INTERFACE} has ${robot_address}"
+elif [[ -n "${robot_address}" ]]; then
+  warn "R1 Ethernet ${ROBOT_INTERFACE} has ${robot_address}; expected ${LAPTOP_ROBOT_IP}"
+else
+  warn "R1 Ethernet ${ROBOT_INTERFACE} is down (normal while R1 is off or disconnected)"
+fi
+
+if nmcli connection show "${ROBOT_PROFILE}" >/dev/null 2>&1; then
+  autoconnect="$(nmcli -g connection.autoconnect connection show "${ROBOT_PROFILE}" 2>/dev/null || true)"
+  address="$(nmcli -g ipv4.addresses connection show "${ROBOT_PROFILE}" 2>/dev/null || true)"
+  never_default="$(nmcli -g ipv4.never-default connection show "${ROBOT_PROFILE}" 2>/dev/null || true)"
+  if [[ "${autoconnect}" == yes ]]; then
+    ok "NetworkManager profile ${ROBOT_PROFILE} autoconnects"
+  else
+    fail "NetworkManager profile ${ROBOT_PROFILE} is not set to autoconnect"
+  fi
+  [[ "${address}" == *"${LAPTOP_ROBOT_IP}/24"* ]] \
+    && ok "${ROBOT_PROFILE} uses ${LAPTOP_ROBOT_IP}/24" \
+    || fail "${ROBOT_PROFILE} does not use ${LAPTOP_ROBOT_IP}/24 (got ${address:-empty})"
+  [[ "${never_default}" == yes ]] \
+    && ok "${ROBOT_PROFILE} cannot replace the Wi-Fi default route" \
+    || warn "${ROBOT_PROFILE} may install a default route; set ipv4.never-default yes"
+else
+  fail "NetworkManager profile ${ROBOT_PROFILE} is missing"
+fi
+
+route="$(ip route get "${ROBOT_IP}" 2>/dev/null || true)"
+if [[ "${route}" == *"dev ${ROBOT_INTERFACE}"* ]]; then
+  ok "route to R1 ${ROBOT_IP} uses ${ROBOT_INTERFACE}"
+elif [[ -n "${route}" ]]; then
+  warn "route to R1 ${ROBOT_IP} is currently ${route}"
+else
+  warn "no route to R1 ${ROBOT_IP} while the Ethernet link is down"
+fi
+
+if command -v ping >/dev/null 2>&1 && timeout 1 ping -c 1 -W 1 "${ROBOT_IP}" >/dev/null 2>&1; then
+  ok "R1 ${ROBOT_IP} answers ICMP"
+else
+  warn "R1 ${ROBOT_IP} is unreachable (expected while it is off)"
+fi
+
+if systemctl is-active --quiet avahi-daemon 2>/dev/null \
+  && command -v avahi-publish >/dev/null 2>&1; then
+  ok "Avahi is active; ${VIDEO_NAME} can be advertised locally"
+else
+  warn "Avahi is unavailable; use the numeric laptop IP for Robot POV"
+fi
+
+offline_session_active=false
+if command -v systemctl >/dev/null 2>&1 \
+  && systemctl --user is-active --quiet r1-offline-session.service 2>/dev/null; then
+  offline_session_active=true
+fi
+for port in "${UDP_PORT}" "${DISCOVERY_PORT}" "${VIDEO_PORT}"; do
+  if ss -H -ltnup 2>/dev/null | grep -Eq "([.:]|\\])${port}[[:space:]]"; then
+    if [[ "${offline_session_active}" == true ]]; then
+      ok "local port ${port} is occupied by the active offline session"
+    else
+      warn "local port ${port} is already occupied"
+    fi
+  else
+    ok "local port ${port} is free"
+  fi
+done
+
+combined_apk="${R1_COMBINED_APK:-${PROJECT_DIR}/../Unity_Projects/Unitree_VR_Controller/Builds/CombinedDemo/UnitreeR1TelepresenceDemo_offline.apk}"
+if [[ -s "${combined_apk}" ]]; then
+  ok "combined Pico APK exists: ${combined_apk}"
+else
+  warn "combined Pico APK not found at ${combined_apk}"
+fi
+
+if [[ "${failures}" -gt 0 ]]; then
+  printf '\n[BLOCKED] %s hard prerequisite(s) failed; warnings=%s.\n' "${failures}" "${warnings}"
+  exit 2
+fi
+
+printf '\n[PASS] offline LAN prerequisites are present; warnings=%s.\n' "${warnings}"
+printf 'This preflight is diagnostic only and never enables robot motion.\n'

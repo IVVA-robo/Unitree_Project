@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SOURCE_PACKAGE="${PROJECT_DIR}/ros2_ws/src/r1_robot_pov"
+
+if [[ -f /opt/ros/humble/setup.bash ]]; then
+  set +u
+  source /opt/ros/humble/setup.bash
+  set -u
+fi
+if [[ -f "${PROJECT_DIR}/ros2_ws/install/setup.bash" ]]; then
+  set +u
+  source "${PROJECT_DIR}/ros2_ws/install/setup.bash"
+  set -u
+fi
+
+export PYTHONPATH="${SOURCE_PACKAGE}${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTHONUNBUFFERED=1
+cd "${PROJECT_DIR}"
+
+COMMAND="${1:-mock}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
+
+case "${COMMAND}" in
+  mock)
+    exec python3 -m r1_robot_pov.cli mock \
+      --env-file "${SOURCE_PACKAGE}/config/robot_pov.mock.env" "$@"
+    ;;
+  exhibition)
+    exec python3 -m r1_robot_pov.cli exhibition \
+      --env-file "${SOURCE_PACKAGE}/config/robot_pov.exhibition.env" "$@"
+    ;;
+  bad-wifi)
+    exec python3 -m r1_robot_pov.cli exhibition \
+      --env-file "${SOURCE_PACKAGE}/config/robot_pov.bad-wifi.env" "$@"
+    ;;
+  r1|unitree)
+    exec python3 -m r1_robot_pov.cli exhibition \
+      --env-file "${SOURCE_PACKAGE}/config/robot_pov.r1.env" "$@"
+    ;;
+  r1-preflight|unitree-preflight)
+    exec python3 -m r1_robot_pov.cli preflight \
+      --env-file "${SOURCE_PACKAGE}/config/robot_pov.r1.env" "$@"
+    ;;
+  preflight)
+    exec python3 -m r1_robot_pov.cli preflight \
+      --env-file "${SOURCE_PACKAGE}/config/robot_pov.exhibition.env" "$@"
+    ;;
+  *)
+    exec python3 -m r1_robot_pov.cli "${COMMAND}" "$@"
+    ;;
+esac

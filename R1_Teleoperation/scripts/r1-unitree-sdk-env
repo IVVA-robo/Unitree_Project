@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+
+# Source after ROS/workspace setup and before starting any Unitree SDK2
+# process.  This selects Fast DDS for ROS and forces Unitree's matched
+# libddsc/libddscxx pair to win over ROS library directories.
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  echo '[BLOCKED] r1-unitree-sdk-env must be sourced, not executed.' >&2
+  exit 2
+fi
+
+_r1_env_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=r1-physical-ros-env
+source "${_r1_env_dir}/r1-physical-ros-env"
+
+case "$(uname -m)" in
+  x86_64|amd64) _r1_sdk_arch=x86_64 ;;
+  aarch64|arm64) _r1_sdk_arch=aarch64 ;;
+  *)
+    echo "[BLOCKED] unsupported Unitree SDK architecture: $(uname -m)" >&2
+    return 1
+    ;;
+esac
+
+export R1_UNITREE_SDK_ROOT="${R1_UNITREE_SDK_ROOT:-/home/unitree/Unitree_Project/Legacy_Robotics/robotics/unitree_sdk/unitree_sdk2}"
+export R1_UNITREE_DDS_LIB_DIR="${R1_UNITREE_SDK_ROOT}/thirdparty/lib/${_r1_sdk_arch}"
+for _r1_dds_library in libddsc.so.0 libddscxx.so.0; do
+  if [[ ! -f "${R1_UNITREE_DDS_LIB_DIR}/${_r1_dds_library}" ]]; then
+    echo "[BLOCKED] Unitree DDS runtime is missing: ${R1_UNITREE_DDS_LIB_DIR}/${_r1_dds_library}" >&2
+    return 1
+  fi
+done
+
+if [[ "${LD_LIBRARY_PATH-}" != "${R1_UNITREE_DDS_LIB_DIR}" \
+    && "${LD_LIBRARY_PATH-}" != "${R1_UNITREE_DDS_LIB_DIR}:"* ]]; then
+  export LD_LIBRARY_PATH="${R1_UNITREE_DDS_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+
+unset _r1_dds_library _r1_env_dir _r1_sdk_arch

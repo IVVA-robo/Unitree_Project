@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Robot POV only needs network access to the exhibition LAN. Android blocks
+  plain HTTP by default on recent API levels, while the offline viewer uses a
+  private IPv4 or .local URL. No storage, microphone, location, USB, or
+  Bluetooth permission is requested here.
+-->
+<manifest
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+  <uses-permission android:name="android.permission.INTERNET" />
+  <application android:usesCleartextTraffic="true">
+    <!--
+      Keep Unity's standard launcher declaration in the custom main manifest.
+      Unity and the Pico XR package add their generated attributes and metadata
+      during the Android manifest merge.
+    -->
+    <activity
+        android:name="com.unity3d.player.UnityPlayerActivity"
+        android:theme="@style/UnityThemeSelector"
+        android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+      <meta-data
+          android:name="unityplayer.UnityActivity"
+          android:value="true" />
+    </activity>
+  </application>
+</manifest>

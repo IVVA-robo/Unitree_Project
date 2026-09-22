@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Temporary, non-persistent TP-Link UE200 (2357:0602) driver test.
+# Stock Linux 6.8 does not list this revision in r8152, so USB configuration 2
+# binds to cdc_ether. Linux 6.16 added exactly this ID to r8152. This helper is
+# intentionally guarded and must only be used with the robot RJ45 unplugged.
+
+if [[ $# -eq 0 ]]; then
+  MODE=--check
+elif [[ $# -eq 1 ]]; then
+  MODE=$1
+else
+  MODE=invalid
+fi
+STATE_FILE=/run/r1-ue200-r8152-test.state
+VENDOR=2357
+PRODUCT=0602
+
+usage() {
+  cat <<'EOF'
+Usage: r1-ue200-driver-test [--check|--apply|--rollback]
+
+  --check       Read-only report (default; no root required)
+  --apply       Temporarily select USB vendor config 1 and r8152
+  --rollback    Return to USB CDC config 2 and cdc_ether
+
+--apply and --rollback require root, the robot RJ45 physically unplugged, and
+no Unitree writer process. The dynamic driver ID disappears after reboot or
+USB removal; this tool never blacklists cdc_ether or edits boot configuration.
+EOF
+}
+
+die() { printf '[BLOCKED] %s\n' "$*" >&2; exit 2; }
+ok() { printf '[OK] %s\n' "$*"; }
+info() { printf '[INFO] %s\n' "$*"; }
+
+case "$MODE" in
+  --check|--apply|--rollback) ;;
+  -h|--help) usage; exit 0 ;;
+  *) usage >&2; die "unknown argument: $MODE" ;;
+esac
+(( $# <= 1 )) || die 'at most one mode argument is allowed'
+
+mapfile -t MATCHES < <(
+  for vendor_path in /sys/bus/usb/devices/*/idVendor; do
+    [[ -f $vendor_path ]] || continue
+    usb_path=${vendor_path%/idVendor}
+    [[ $(cat "$vendor_path" 2>/dev/null || true) == "$VENDOR" ]] || continue
+    [[ $(cat "$usb_path/idProduct" 2>/dev/null || true) == "$PRODUCT" ]] || continue
+    printf '%s\n' "$usb_path"
+  done
+)
+[[ ${#MATCHES[@]} -eq 1 ]] \
+  || die "expected exactly one TP-Link UE200 $VENDOR:$PRODUCT, found ${#MATCHES[@]}"
+
+USB_PATH=${MATCHES[0]}
+USB_DEVICE=${USB_PATH##*/}
+CONFIG_PATH=$USB_PATH/bConfigurationValue
+[[ -r $CONFIG_PATH ]] || die "USB configuration is unavailable: $CONFIG_PATH"
+
+interface_report() {
+  local found=false interface_path net_path driver_path driver_name carrier
+  for interface_path in "$USB_PATH":*; do
+    [[ -d $interface_path ]] || continue
+    driver_path=$(readlink -f "$interface_path/driver" 2>/dev/null || true)
+    driver_name=${driver_path##*/}
+    [[ -n $driver_name ]] || driver_name=none
+    for net_path in "$interface_path"/net/*; do
+      [[ -d $net_path ]] || continue
+      found=true
+      carrier=$(cat "$net_path/carrier" 2>/dev/null || printf unknown)
+      printf 'interface=%s usb_interface=%s driver=%s carrier=%s\n' \
+        "${net_path##*/}" "${interface_path##*/}" "$driver_name" "$carrier"
+    done
+  done
+  [[ $found == true ]] || printf 'interface=none\n'
+}
+
+require_writer_idle() {
+  local processes writers
+  processes=$(ps -eo pid=,args= 2>/dev/null || true)
+  writers=$(printf '%s\n' "$processes" | grep -E -i \
+    'r1_live_writer|ArmSdk|LocoClient|rt/(arm_sdk|lowcmd)' || true)
+  [[ -z $writers ]] || {
+    printf '%s\n' "$writers" >&2
+    die 'a Unitree command-writer process appears to be running'
+  }
+}
+
+require_rj45_unplugged() {
+  local interface_path net_path carrier saw_interface=false
+  for interface_path in "$USB_PATH":*; do
+    [[ -d $interface_path ]] || continue
+    for net_path in "$interface_path"/net/*; do
+      [[ -d $net_path ]] || continue
+      saw_interface=true
+      carrier=$(cat "$net_path/carrier" 2>/dev/null || printf unknown)
+      [[ $carrier == 0 ]] \
+        || die "RJ45 must be unplugged before changing USB configuration (${net_path##*/} carrier=$carrier)"
+    done
+  done
+  [[ $saw_interface == true ]] \
+    || info 'no network interface is currently bound; continuing guarded recovery'
+}
+
+configuration=$(cat "$CONFIG_PATH")
+printf 'device=%s id=%s:%s configuration=%s\n' \
+  "$USB_DEVICE" "$VENDOR" "$PRODUCT" "$configuration"
+interface_report
+
+if [[ $MODE == --check ]]; then
+  driver=$(basename "$(readlink -f "$USB_PATH:1.0/driver" 2>/dev/null || printf none)")
+  if [[ $configuration == 1 && $driver == r8152 ]]; then
+    ok 'temporary r8152 vendor mode is active'
+  elif [[ $configuration == 2 ]]; then
+    info 'CDC mode is active; --apply remains blocked until the RJ45 is unplugged'
+  else
+    info 'adapter is in an unexpected configuration; use --rollback in a maintenance window'
+  fi
+  exit 0
+fi
+
+[[ $EUID -eq 0 ]] || die 'run this mode with sudo after physically unplugging the robot RJ45'
+command -v modprobe >/dev/null 2>&1 || die 'modprobe is unavailable'
+command -v grep >/dev/null 2>&1 || die 'grep is unavailable'
+require_writer_idle
+require_rj45_unplugged
+
+R8152_DRIVER=/sys/bus/usb/drivers/r8152
+
+if [[ $MODE == --rollback ]]; then
+  modprobe r8152
+  if [[ -w $R8152_DRIVER/remove_id ]]; then
+    printf '%s %s\n' "$VENDOR" "$PRODUCT" \
+      > "$R8152_DRIVER/remove_id" 2>/dev/null || true
+  fi
+  printf '2\n' > "$CONFIG_PATH"
+  for _ in {1..50}; do
+    driver=$(basename "$(readlink -f "$USB_PATH:2.0/driver" 2>/dev/null || printf none)")
+    if [[ $(cat "$CONFIG_PATH" 2>/dev/null || true) == 2 \
+        && $driver == cdc_ether ]]; then
+      rm -f -- "$STATE_FILE"
+      ok 'rollback complete: USB configuration 2 uses cdc_ether'
+      interface_report
+      exit 0
+    fi
+    sleep 0.1
+  done
+  die 'rollback did not restore configuration 2/cdc_ether; reboot before reconnecting RJ45'
+fi
+
+[[ $configuration == 2 ]] \
+  || die "--apply requires the known starting configuration 2 (found $configuration)"
+
+modprobe r8152
+[[ -w $R8152_DRIVER/new_id ]] || die 'r8152 dynamic-ID interface is unavailable'
+
+dynamic_id_added=false
+rollback_on_error() {
+  local status=$?
+  trap - ERR INT TERM HUP
+  set +e
+  if [[ $dynamic_id_added == true && -w $R8152_DRIVER/remove_id ]]; then
+    printf '%s %s\n' "$VENDOR" "$PRODUCT" > "$R8152_DRIVER/remove_id"
+  fi
+  if [[ -w $CONFIG_PATH ]]; then
+    printf '2\n' > "$CONFIG_PATH"
+  fi
+  printf '[ROLLBACK] failed apply returned the adapter to CDC configuration 2 where possible\n' >&2
+  exit "$status"
+}
+trap rollback_on_error ERR INT TERM HUP
+
+# Scope the dynamic interface match to vendor-specific class ff. This avoids
+# claiming either CDC interface if a rollback recreates configuration 2.
+printf '%s %s ff\n' "$VENDOR" "$PRODUCT" > "$R8152_DRIVER/new_id"
+dynamic_id_added=true
+printf '1\n' > "$CONFIG_PATH"
+
+for _ in {1..50}; do
+  driver=$(basename "$(readlink -f "$USB_PATH:1.0/driver" 2>/dev/null || printf none)")
+  if [[ $(cat "$CONFIG_PATH" 2>/dev/null || true) == 1 \
+      && $driver == r8152 ]]; then
+    printf 'usb_device=%s\ndynamic_id=%s:%s:ff\n' \
+      "$USB_DEVICE" "$VENDOR" "$PRODUCT" > "$STATE_FILE"
+    trap - ERR INT TERM HUP
+    ok 'temporary r8152 vendor mode is active; it is not persistent across reboot/USB removal'
+    interface_report
+    printf 'Keep writers disabled. Reconnect RJ45, then run make robot-readonly-preflight.\n'
+    exit 0
+  fi
+  sleep 0.1
+done
+
+false  # Invoke the rollback trap if r8152 did not bind within five seconds.

@@ -1,0 +1,9 @@
+r1_state_monitor:
+  ros__parameters:
+    network_interface: "enxb4b024be59fe"
+    lowstate_channel: "rt/lf/lowstate"
+    joint_state_topic: "/r1/hardware/joint_states"
+    status_topic: "/r1/hardware/status"
+    state_timeout_sec: 0.5
+    publish_rate_hz: 20.0
+

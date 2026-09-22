@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Download the Russian Vosk archive through small parallel HTTP ranges."""
+from __future__ import annotations
+
+import concurrent.futures
+import os
+import socket
+import sys
+import time
+import uuid
+import urllib.request
+
+URL = "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip"
+DEST = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else
+                       ".cache/voice-models/vosk-model-small-ru-0.22.zip")
+CHUNK = 16 * 1024
+# The hosting server/proxy may stall when too many TLS range requests are
+# opened at once.  Keep the default conservative, while allowing a faster
+# local override when the connection is known to tolerate it.
+WORKERS = int(os.environ.get("R1_VOSK_WORKERS", "8"))
+ATTEMPTS = int(os.environ.get("R1_VOSK_ATTEMPTS", "12"))
+TIMEOUT = float(os.environ.get("R1_VOSK_TIMEOUT", "60"))
+
+# alphacephei advertises both IPv4 and IPv6.  On this workstation the IPv6
+# route intermittently stalls during TLS setup, while IPv4 is reliable.  Keep
+# the downloader deterministic by selecting IPv4 for all HTTP requests.
+_getaddrinfo = socket.getaddrinfo
+def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    return [item for item in _getaddrinfo(host, port, family, type, proto, flags)
+            if item[0] == socket.AF_INET]
+socket.getaddrinfo = _ipv4_getaddrinfo
+
+
+def fetch(start: int, total: int):
+    end = min(total - 1, start + CHUNK - 1)
+    expected = end - start + 1
+    for attempt in range(ATTEMPTS):
+        try:
+            query = "&" if "?" in URL else "?"
+            request = urllib.request.Request(
+                # A fresh cache-buster avoids a stale/slow CDN response after
+                # a failed range request.
+                URL + f"{query}r1_chunk={start}&r1_nonce={uuid.uuid4().hex}",
+                headers={"Range": f"bytes={start}-{end}",
+                         "Accept-Encoding": "identity",
+                         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) \
+                         AppleWebKit/537.36 Chrome/124 Safari/537.36",
+                         "Referer": "https://alphacephei.com/vosk/models"},
+            )
+            with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                body = response.read()
+                content_range = response.headers.get("Content-Range", "")
+            if len(body) != expected or not content_range.startswith(
+                    f"bytes {start}-{end}/"):
+                raise RuntimeError(
+                    f"bad range {start}: {len(body)} bytes {content_range!r}")
+            return start, body
+        except Exception:
+            if attempt == ATTEMPTS - 1:
+                raise
+            time.sleep(0.25 * (attempt + 1))
+
+
+probe_query = "&" if "?" in URL else "?"
+probe = urllib.request.Request(
+    URL + f"{probe_query}r1_probe=0&r1_nonce={uuid.uuid4().hex}",
+    headers={"Range": "bytes=0-0", "Accept-Encoding": "identity",
+             "User-Agent": "Mozilla/5.0", "Referer":
+             "https://alphacephei.com/vosk/models"},
+)
+try:
+    with urllib.request.urlopen(probe, timeout=TIMEOUT) as response:
+        content_range = response.headers.get("Content-Range", "")
+    total = int(content_range.rsplit("/", 1)[1])
+except (OSError, ValueError, IndexError):
+    # The CDN may temporarily block the one-byte probe while still allowing
+    # range requests.  The published archive size is stable, so use it for
+    # resumable downloads when probing is unavailable.
+    total = int(os.environ.get("R1_VOSK_TOTAL", "46236750"))
+    print(f"[INFO] probe unavailable; using known archive size {total}", flush=True)
+if total < 1_000_000:
+    raise SystemExit(f"Unexpected archive size: {total}")
+
+os.makedirs(os.path.dirname(DEST), exist_ok=True)
+partial = DEST + ".partial"
+
+# Keep a sparse partial archive across interruptions.  The range writer uses
+# fixed-size writes, so SEEK_DATA/SEEK_HOLE lets us skip chunks already
+# received instead of downloading the completed prefix again.
+if not os.path.exists(partial) or os.path.getsize(partial) != total:
+    with open(partial, "wb") as output:
+        output.truncate(total)
+
+def chunk_present(fd: int, start: int, end: int) -> bool:
+    try:
+        data = os.lseek(fd, start, os.SEEK_DATA)
+        if data > start:
+            return False
+        hole = os.lseek(fd, start, os.SEEK_HOLE)
+        return hole >= end
+    except (AttributeError, OSError):
+        # Filesystems without sparse-file extent queries are treated as empty.
+        return False
+
+with open(partial, "rb", buffering=0) as existing:
+    existing_fd = existing.fileno()
+    ranges = []
+    for start in range(0, total, CHUNK):
+        end = min(total, start + CHUNK)
+        if not chunk_present(existing_fd, start, end):
+            ranges.append(start)
+if not ranges:
+    os.replace(partial, DEST)
+    print(f"[OK] archive already complete at {DEST}")
+    raise SystemExit(0)
+print(f"resuming {len(ranges)}/{(total + CHUNK - 1) // CHUNK} ranges", flush=True)
+completed = 0
+with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
+    futures = [pool.submit(fetch, start, total) for start in ranges]
+    with open(partial, "r+b", buffering=0) as output:
+        for future in concurrent.futures.as_completed(futures):
+            start, body = future.result()
+            output.seek(start)
+            output.write(body)
+            completed += 1
+            if completed % 100 == 0 or completed == len(ranges):
+                print(f"downloaded {completed}/{len(ranges)} ranges", flush=True)
+os.replace(partial, DEST)
+print(f"[OK] downloaded {total} bytes to {DEST}")

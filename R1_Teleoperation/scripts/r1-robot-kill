@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Emergency software path: ask the writer to latch/stop/release and then assert
+# the independent central kill. The physical E-stop remains authoritative.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_SETUP="${PROJECT_DIR}/ros2_ws/install/setup.bash"
+[[ -f "${WORKSPACE_SETUP}" ]] || WORKSPACE_SETUP="${PROJECT_DIR}/install/setup.bash"
+
+[[ $# -eq 0 ]] || { echo 'Usage: r1-robot-kill' >&2; exit 2; }
+[[ -f /opt/ros/humble/setup.bash ]] || { echo '[FAIL] ROS 2 Humble is unavailable' >&2; exit 1; }
+[[ -f "${WORKSPACE_SETUP}" ]] || { echo "[FAIL] workspace is not built: ${WORKSPACE_SETUP}" >&2; exit 1; }
+
+DOMAIN_ID=${R1_LIVE_ROS_DOMAIN_ID:-88}
+[[ "${DOMAIN_ID}" =~ ^[0-9]+$ ]] && ((10#${DOMAIN_ID} <= 232)) \
+  || { echo '[FAIL] R1_LIVE_ROS_DOMAIN_ID must be 0..232' >&2; exit 1; }
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${WORKSPACE_SETUP}"
+# shellcheck source=r1-physical-ros-env
+source "${SCRIPT_DIR}/r1-physical-ros-env"
+set -u
+export ROS_DOMAIN_ID="$((10#${DOMAIN_ID}))"
+export ROS_LOCALHOST_ONLY=1
+
+writer_ok=false
+supervisor_ok=false
+set +e
+writer_response="$(timeout 8s ros2 service call \
+  /r1/live_writer/kill std_srvs/srv/Trigger '{}' 2>&1)"
+writer_status=$?
+printf '%s\n' "${writer_response}"
+if ((writer_status == 0)) && grep -Eq \
+  'success[[:space:]]*=[[:space:]]*True|success:[[:space:]]*true' <<<"${writer_response}"; then
+  writer_ok=true
+fi
+
+kill_response="$(timeout 8s ros2 service call \
+  /r1/safety/emergency_stop std_srvs/srv/Trigger '{}' 2>&1)"
+kill_status=$?
+printf '%s\n' "${kill_response}"
+if ((kill_status == 0)) && grep -Eq \
+  'success[[:space:]]*=[[:space:]]*True|success:[[:space:]]*true' <<<"${kill_response}"; then
+  supervisor_ok=true
+fi
+set -e
+
+if [[ ${writer_ok} != true || ${supervisor_ok} != true ]]; then
+  echo '[FAIL] software kill could not be confirmed on every layer.' >&2
+  echo 'PRESS THE PHYSICAL E-STOP if robot motion is possible.' >&2
+  exit 1
+fi
+echo '[OK] writer kill and central software kill are latched.'
+echo 'The software kill does not replace the physical E-stop.'

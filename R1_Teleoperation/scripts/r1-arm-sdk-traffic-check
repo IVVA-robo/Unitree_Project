@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Bounded read-only observer for active command samples on rt/arm_sdk and the
+# built-in arm action state. The executable creates only typed Unitree receive
+# channels; it never creates a publisher or service/RPC client.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WS_DIR="${PROJECT_DIR}/ros2_ws"
+INTERFACE="${R1_SDK_NETWORK_INTERFACE:-enxb4b024be59fe}"
+DURATION_SEC="${R1_ARM_SDK_OBSERVE_SECONDS:-6.0}"
+FRESH_SEC="${R1_ARM_SDK_FRESH_SECONDS:-0.5}"
+ACTION_FRESH_SEC="${R1_ARM_ACTION_STATE_FRESH_SECONDS:-3.5}"
+MIN_SAMPLES="${R1_ARM_SDK_MIN_SAMPLES:-3}"
+EXPECTED_WRITERS=1
+
+usage() {
+  cat <<'EOF'
+Usage: r1-arm-sdk-traffic-check [options]
+
+Read-only, bounded rt/arm_sdk traffic gate.
+
+Options:
+  --interface NAME       Robot-facing Ethernet interface
+  --duration-sec SEC     Observation window, 2.0..30.0 (default 6.0)
+  --fresh-sec SEC        Maximum final sample age (default 0.5)
+  --action-fresh-sec SEC Maximum action-state age (default 3.5)
+  --min-samples N        Samples required for ACTIVE_FRESH (default 3)
+  --expected-writers N   Exact stable typed writers for this phase: 1 or 2
+  -h, --help             Show this help
+
+Exit status is preserved from the observer:
+  0  expected stable typed writer set, idle action state, and no LowCmd samples
+  10 fresh active LowCmd stream observed
+  11 one or more samples observed, but not fresh/continuous at exit
+  12 no action-state sample arrived in the bounded window
+  13 malformed action-state JSON was received
+  14 arm action is holding or is non-idle
+  15 typed writer match is absent, unexpected, changed, or not stable for 2 s
+  20 observer was built without Unitree SDK2
+  21 observer runtime/ABI failure
+  64 invalid invocation
+
+Use expected-writers=1 before our local ArmSdk transport is initialized, and 2
+only at the post-initialize ownership-probe boundary (built-in plus our known
+local writer). DDS publication handles, count, topic/type metadata, and match
+history must remain unchanged for at least the final two seconds. Any extra,
+missing, replaced, or churning writer fails closed. A valid idle one-shot from
+rt/arm/action/state is also required because this firmware may publish it slowly.
+EOF
+}
+
+die() {
+  printf '[BLOCKED] %s\n' "$*" >&2
+  exit 21
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --interface)
+      [[ $# -ge 2 ]] || { usage >&2; exit 64; }
+      INTERFACE=$2
+      shift 2
+      ;;
+    --duration-sec)
+      [[ $# -ge 2 ]] || { usage >&2; exit 64; }
+      DURATION_SEC=$2
+      shift 2
+      ;;
+    --fresh-sec)
+      [[ $# -ge 2 ]] || { usage >&2; exit 64; }
+      FRESH_SEC=$2
+      shift 2
+      ;;
+    --action-fresh-sec)
+      [[ $# -ge 2 ]] || { usage >&2; exit 64; }
+      ACTION_FRESH_SEC=$2
+      shift 2
+      ;;
+    --min-samples)
+      [[ $# -ge 2 ]] || { usage >&2; exit 64; }
+      MIN_SAMPLES=$2
+      shift 2
+      ;;
+    --expected-writers)
+      [[ $# -ge 2 ]] || { usage >&2; exit 64; }
+      EXPECTED_WRITERS=$2
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unknown option: %s\n' "$1" >&2
+      usage >&2
+      exit 64
+      ;;
+  esac
+done
+
+[[ "${INTERFACE}" =~ ^[[:alnum:]_.-]{1,15}$ ]] || die "invalid interface: ${INTERFACE}"
+command -v ip >/dev/null 2>&1 || die 'ip command is required'
+command -v timeout >/dev/null 2>&1 || die 'timeout command is required'
+ip link show dev "${INTERFACE}" >/dev/null 2>&1 || \
+  die "network interface not found: ${INTERFACE}"
+[[ -f /opt/ros/humble/setup.bash ]] || die 'ROS 2 Humble setup.bash is missing'
+INSTALL_SETUP="${WS_DIR}/install/setup.bash"
+[[ -f "${INSTALL_SETUP}" ]] || INSTALL_SETUP="${PROJECT_DIR}/install/setup.bash"
+[[ -f "${INSTALL_SETUP}" ]] || die "workspace is not built: ${WS_DIR}/install/setup.bash"
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${INSTALL_SETUP}"
+# shellcheck source=r1-unitree-sdk-env
+source "${SCRIPT_DIR}/r1-unitree-sdk-env"
+set -u
+
+PACKAGE_PREFIX="$(ros2 pkg prefix r1_sdk_transport 2>/dev/null)" || \
+  die 'installed r1_sdk_transport package was not found'
+OBSERVER_BINARY="${PACKAGE_PREFIX}/lib/r1_sdk_transport/r1_arm_sdk_traffic_observer"
+[[ -x "${OBSERVER_BINARY}" ]] || die "observer executable is missing: ${OBSERVER_BINARY}"
+
+printf 'R1 ArmSdk traffic gate (READ-ONLY): interface=%s duration=%ss topics=rt/arm_sdk,rt/arm/action/state\n' \
+  "${INTERFACE}" "${DURATION_SEC}"
+printf 'Expected typed writer count for this phase: %s\n' "${EXPECTED_WRITERS}"
+printf 'No publisher, RPC client, service request, or actuator command is created.\n'
+set +e
+timeout --signal=TERM --kill-after=2s 40s "${OBSERVER_BINARY}" \
+  --interface "${INTERFACE}" \
+  --duration-sec "${DURATION_SEC}" \
+  --fresh-sec "${FRESH_SEC}" \
+  --action-fresh-sec "${ACTION_FRESH_SEC}" \
+  --min-samples "${MIN_SAMPLES}" \
+  --expected-writers "${EXPECTED_WRITERS}"
+observer_status=$?
+set -e
+if [[ ${observer_status} -eq 124 || ${observer_status} -eq 137 ]]; then
+  printf 'ARM_SDK_TRAFFIC status=OBSERVER_ERROR detail=wrapper_timeout\n' >&2
+  exit 21
+fi
+exit "${observer_status}"

@@ -1,0 +1,11 @@
+r1_safety_supervisor:
+  ros__parameters:
+    # Starts asserted. Set /r1/safety/set_kill false only for dry-run tests or
+    # after all independent physical commissioning checks are complete.
+    kill_topic: "/r1/safety/kill"
+    # A physical writer may only request true here. The supervisor ignores
+    # false requests, so a downstream process can never clear the latch.
+    kill_request_topic: "/r1/safety/kill_request"
+    status_topic: "/r1/safety/status"
+    allow_dry_run_release: true
+    publish_rate_hz: 5.0

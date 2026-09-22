@@ -1,0 +1,945 @@
+#!/usr/bin/env bash
+#
+# Isolated end-to-end smoke test for r1_live_writer's MockTransport only.
+#
+# The test reserves a fresh localhost-only ROS domain and a loopback UDP port.
+# It never constructs SdkTransport, opens a robot-facing interface, or starts
+# a Unitree SDK/DDS client.  The apparently live environment values are scoped
+# only to the MockTransport process so that its complete fail-closed gate can
+# be exercised without granting any hardware process permission.
+
+set -euo pipefail
+
+# Run the entire smoke graph in a private user/network namespace.  This is a
+# stronger boundary than ROS_LOCALHOST_ONLY: even if a future regression were
+# to select SdkTransport, the process can see no robot-facing NIC and can send
+# packets only through its private loopback device.  There is deliberately no
+# unsafe fallback when unprivileged network namespaces are unavailable.
+if [[ "${R1_LIVE_WRITER_MOCK_NETNS:-}" != 'loopback-only' ]]; then
+  command -v unshare >/dev/null 2>&1 || {
+    echo '[FAIL] unshare is required for loopback-only mock isolation' >&2
+    exit 1
+  }
+  command -v ip >/dev/null 2>&1 || {
+    echo '[FAIL] ip is required for loopback-only mock isolation' >&2
+    exit 1
+  }
+  exec unshare --user --map-root-user --net \
+    bash -c 'set -e; ip link set lo up; export R1_LIVE_WRITER_MOCK_NETNS=loopback-only; exec "$@"' \
+    bash "$0" "$@"
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_SETUP="${PROJECT_DIR}/ros2_ws/install/setup.bash"
+RUN_DIR=""
+UPSTREAM_PID=""
+WRITER_PID=""
+STATE_PID=""
+HEAD_COMMAND_PID=""
+VELOCITY_COMMAND_PID=""
+UDP_PID=""
+UPSTREAM_LOG=""
+WRITER_LOG=""
+SMOKE_PASSED=false
+UDP_SEQUENCE=1000
+
+STATE_TOPIC='/r1/live_writer_mock/joint_states'
+HEAD_TOPIC='/r1/live_writer_mock/head_input'
+VELOCITY_TOPIC='/r1/live_writer_mock/velocity_input'
+TEST_VR_IP='192.168.250.42'
+TEST_TOKEN='mock-only-commissioning-token-2026'
+
+die() {
+  echo "[FAIL] $*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "${1} is required"
+}
+
+validate_domain() {
+  local value="$1"
+  [[ "${value}" =~ ^[0-9]+$ ]] && \
+    (( 10#${value} >= 230 && 10#${value} <= 232 )) || \
+    die 'R1_LIVE_WRITER_MOCK_DOMAIN must be one of the isolated domains 230..232'
+}
+
+assert_loopback_only_namespace() {
+  local interface unexpected=()
+  while IFS= read -r interface; do
+    # iproute2 queries the current network namespace.  /sys/class/net cannot
+    # be used here because sysfs remains mounted from the parent mount
+    # namespace and can therefore list host NICs that are not reachable.
+    interface="${interface%%@*}"
+    [[ "${interface}" == 'lo' ]] || unexpected+=("${interface}")
+  done < <(ip -o link show | awk -F': ' '{print $2}' | sort)
+  (( ${#unexpected[@]} == 0 )) || \
+    die "mock smoke can see non-loopback network interfaces: ${unexpected[*]}"
+  ip link show dev lo 2>/dev/null | grep -Eq '<[^>]*\bUP\b[^>]*>' || \
+    die 'private loopback interface is not up'
+}
+
+domain_nodes() {
+  ROS_DOMAIN_ID="$1" ROS_LOCALHOST_ONLY=1 \
+    ros2 node list --no-daemon --spin-time 0.35 2>/dev/null || true
+}
+
+select_domain() {
+  local requested="${R1_LIVE_WRITER_MOCK_DOMAIN:-}"
+  local candidate nodes
+  if [[ -n "${requested}" ]]; then
+    validate_domain "${requested}"
+    nodes="$(domain_nodes "${requested}")"
+    [[ -z "${nodes//[[:space:]]/}" ]] || \
+      die "refusing ROS domain ${requested}; it already has nodes: ${nodes}"
+    printf '%d\n' "$((10#${requested}))"
+    return
+  fi
+
+  # Keep this smoke separate from project domains 77, 81, 88, 89 and from
+  # the general dry-run smoke range 200..229.
+  for candidate in 230 231 232; do
+    nodes="$(domain_nodes "${candidate}")"
+    if [[ -z "${nodes//[[:space:]]/}" ]]; then
+      printf '%s\n' "${candidate}"
+      return
+    fi
+  done
+  die 'could not find an empty mock-smoke ROS domain in 230..232'
+}
+
+validate_udp_port() {
+  local value="$1"
+  [[ "${value}" =~ ^[0-9]+$ ]] && (( 10#${value} >= 1 && 10#${value} <= 65535 )) || \
+    die 'R1_LIVE_WRITER_MOCK_UDP_PORT must be an integer from 1 to 65535'
+  (( 10#${value} != 9090 )) || \
+    die 'R1_LIVE_WRITER_MOCK_UDP_PORT must differ from port 9090'
+}
+
+select_udp_port() {
+  local requested="${R1_LIVE_WRITER_MOCK_UDP_PORT:-}"
+  if [[ -n "${requested}" ]]; then
+    validate_udp_port "${requested}"
+    printf '%d\n' "$((10#${requested}))"
+    return
+  fi
+
+  python3 - <<'PY'
+import socket
+
+for _ in range(16):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.bind(('127.0.0.1', 0))
+        port = sock.getsockname()[1]
+    if port != 9090:
+        print(port)
+        break
+else:
+    raise SystemExit('could not allocate a non-9090 loopback UDP port')
+PY
+}
+
+process_alive() {
+  [[ -n "$1" ]] && kill -0 "$1" 2>/dev/null
+}
+
+process_group_alive() {
+  [[ -n "$1" ]] && kill -0 -- "-$1" 2>/dev/null
+}
+
+stop_process_group() {
+  local pid="$1"
+  local deadline
+  [[ -n "${pid}" ]] || return 0
+  if process_group_alive "${pid}"; then
+    kill -INT -- "-${pid}" 2>/dev/null || kill -INT "${pid}" 2>/dev/null || true
+    deadline=$((SECONDS + 6))
+    while process_group_alive "${pid}" && (( SECONDS < deadline )); do
+      sleep 0.10
+    done
+  fi
+  if process_group_alive "${pid}"; then
+    kill -TERM -- "-${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
+    deadline=$((SECONDS + 3))
+    while process_group_alive "${pid}" && (( SECONDS < deadline )); do
+      sleep 0.10
+    done
+  fi
+  if process_group_alive "${pid}"; then
+    kill -KILL -- "-${pid}" 2>/dev/null || kill -KILL "${pid}" 2>/dev/null || true
+  fi
+  wait "${pid}" 2>/dev/null || true
+  deadline=$((SECONDS + 2))
+  while process_group_alive "${pid}" && (( SECONDS < deadline )); do
+    sleep 0.05
+  done
+  if process_group_alive "${pid}"; then
+    echo "[FAIL] process group ${pid} survived KILL" >&2
+    return 1
+  fi
+}
+
+show_logs() {
+  local log
+  for log in "${UPSTREAM_LOG}" "${WRITER_LOG}"; do
+    [[ -n "${log}" && -f "${log}" ]] || continue
+    echo "[INFO] last output from ${log}:" >&2
+    tail -n 100 "${log}" >&2 || true
+  done
+}
+
+cleanup() {
+  local exit_code=$?
+  local cleanup_failed=false
+  trap - EXIT
+  stop_process_group "${UDP_PID}" || cleanup_failed=true
+  stop_process_group "${HEAD_COMMAND_PID}" || cleanup_failed=true
+  stop_process_group "${VELOCITY_COMMAND_PID}" || cleanup_failed=true
+  stop_process_group "${STATE_PID}" || cleanup_failed=true
+  stop_process_group "${WRITER_PID}" || cleanup_failed=true
+  stop_process_group "${UPSTREAM_PID}" || cleanup_failed=true
+  if [[ -n "${RUN_DIR}" && -d "${RUN_DIR}" ]]; then
+    if [[ "${SMOKE_PASSED}" == true && "${R1_LIVE_WRITER_MOCK_KEEP_LOG:-0}" != 1 ]]; then
+      rm -rf -- "${RUN_DIR}"
+    else
+      echo "[INFO] smoke logs retained: ${RUN_DIR}" >&2
+      show_logs
+    fi
+  fi
+  if [[ "${cleanup_failed}" == true && "${exit_code}" -eq 0 ]]; then
+    exit_code=1
+  fi
+  exit "${exit_code}"
+}
+
+trap 'exit 130' INT TERM
+trap cleanup EXIT
+
+wait_for_package() {
+  local package="$1"
+  local attempt
+  for attempt in $(seq 1 15); do
+    if ros2 pkg prefix "${package}" >/dev/null 2>&1; then
+      return
+    fi
+    sleep 0.50
+  done
+  die "ROS package ${package} is not installed; build ros2_ws first"
+}
+
+wait_for_node() {
+  local expected="$1"
+  local deadline=$((SECONDS + 25))
+  local nodes
+  while (( SECONDS < deadline )); do
+    if ! process_alive "${UPSTREAM_PID}" && [[ "${expected}" != '/r1_live_writer' ]]; then
+      show_logs
+      die "upstream launch stopped while waiting for ${expected}"
+    fi
+    if [[ "${expected}" == '/r1_live_writer' ]] && ! process_alive "${WRITER_PID}"; then
+      show_logs
+      die 'writer stopped while waiting for /r1_live_writer'
+    fi
+    nodes="$(ros2 node list --no-daemon --spin-time 0.35 2>/dev/null || true)"
+    if grep -Fqx "${expected}" <<<"${nodes}"; then
+      return
+    fi
+    sleep 0.20
+  done
+  show_logs
+  die "timed out waiting for ROS node ${expected}"
+}
+
+wait_for_node_gone() {
+  local expected="$1"
+  local deadline=$((SECONDS + 12))
+  local nodes
+  while (( SECONDS < deadline )); do
+    nodes="$(ros2 node list --no-daemon --spin-time 0.35 2>/dev/null || true)"
+    if ! grep -Fqx "${expected}" <<<"${nodes}"; then
+      return
+    fi
+    sleep 0.20
+  done
+  die "timed out waiting for ROS node ${expected} to stop"
+}
+
+wait_for_service() {
+  local expected="$1"
+  local deadline=$((SECONDS + 25))
+  local services
+  while (( SECONDS < deadline )); do
+    services="$(ros2 service list --no-daemon --spin-time 0.35 2>/dev/null || true)"
+    if grep -Fqx "${expected}" <<<"${services}"; then
+      return
+    fi
+    sleep 0.20
+  done
+  show_logs
+  die "timed out waiting for ROS service ${expected}"
+}
+
+service_response() {
+  local name="$1"
+  local type="$2"
+  local request="$3"
+  timeout 8s ros2 service call "${name}" "${type}" "${request}" 2>&1
+}
+
+expect_service_success() {
+  local name="$1"
+  local type="$2"
+  local request="$3"
+  local response
+  if ! response="$(service_response "${name}" "${type}" "${request}")"; then
+    printf '%s\n' "${response}" >&2
+    die "service invocation failed: ${name}"
+  fi
+  printf '%s\n' "${response}"
+  grep -Eq 'success[[:space:]]*=[[:space:]]*True|success:[[:space:]]*true' \
+    <<<"${response}" || die "service did not succeed: ${name}"
+}
+
+expect_service_failure() {
+  local name="$1"
+  local type="$2"
+  local request="$3"
+  local expected_text="$4"
+  local response
+  if ! response="$(service_response "${name}" "${type}" "${request}")"; then
+    printf '%s\n' "${response}" >&2
+    die "service invocation failed unexpectedly: ${name}"
+  fi
+  printf '%s\n' "${response}"
+  if grep -Eq 'success[[:space:]]*=[[:space:]]*True|success:[[:space:]]*true' \
+    <<<"${response}"; then
+    die "service unexpectedly succeeded: ${name}"
+  fi
+  grep -Fqi "${expected_text}" <<<"${response}" || \
+    die "service failure did not mention ${expected_text}: ${name}"
+}
+
+assert_topic_bool() {
+  local topic="$1"
+  local expected="$2"
+  local label="$3"
+  local output="${RUN_DIR}/${label}.txt"
+  if ! timeout 6s ros2 topic echo --once "${topic}" --field data >"${output}" 2>&1; then
+    cat "${output}" >&2 || true
+    die "timed out reading ${label} from ${topic}"
+  fi
+  if ! grep -Eqi "^${expected}[[:space:]]*$" "${output}"; then
+    cat "${output}" >&2 || true
+    die "${label} expected ${expected}"
+  fi
+  echo "[OK] ${label}=${expected}"
+}
+
+assert_scalar() {
+  local topic="$1"
+  local field="$2"
+  local expectation="$3"
+  local label="$4"
+  local output="${RUN_DIR}/${label}.txt"
+  if ! timeout 6s ros2 topic echo --once "${topic}" --field "${field}" >"${output}" 2>&1; then
+    cat "${output}" >&2 || true
+    die "timed out reading ${label} from ${topic}"
+  fi
+  python3 - "${output}" "${expectation}" "${label}" <<'PY'
+import math
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding='utf-8', errors='replace')
+values = [float(value) for value in re.findall(
+    r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?', text
+)]
+if not values or not all(math.isfinite(value) for value in values):
+    raise SystemExit('no finite scalar in %s: %r' % (sys.argv[3], text))
+value = values[-1]
+if sys.argv[2] == 'nonzero' and abs(value) <= 0.005:
+    raise SystemExit('%s expected non-zero output, got %.9f' % (sys.argv[3], value))
+if sys.argv[2] == 'zero' and abs(value) > 1.0e-6:
+    raise SystemExit('%s expected zero output, got %.9f' % (sys.argv[3], value))
+print('[OK] %s=%.6f (%s)' % (sys.argv[3], value, sys.argv[2]))
+PY
+}
+
+assert_head_points() {
+  local expectation="$1"
+  local label="$2"
+  local output="${RUN_DIR}/${label}.txt"
+  if ! timeout 6s ros2 topic echo --once /r1/live_writer/debug/head_command \
+    --field points >"${output}" 2>&1; then
+    cat "${output}" >&2 || true
+    die "timed out reading ${label}"
+  fi
+  python3 - "${output}" "${expectation}" "${label}" <<'PY'
+import math
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding='utf-8', errors='replace')
+values = [float(value) for value in re.findall(
+    r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?', text
+)]
+if not values or not all(math.isfinite(value) for value in values):
+    raise SystemExit('no finite head positions in %s: %r' % (sys.argv[3], text))
+if sys.argv[2] == 'nonzero' and not any(abs(value) > 0.005 for value in values):
+    raise SystemExit('%s expected a non-zero head target: %r' % (sys.argv[3], values))
+if sys.argv[2] == 'zero' and any(abs(value) > 1.0e-6 for value in values):
+    raise SystemExit('%s expected zero head target: %r' % (sys.argv[3], values))
+print('[OK] %s (%s)' % (sys.argv[3], sys.argv[2]))
+PY
+}
+
+wait_for_log() {
+  local text="$1"
+  local deadline=$((SECONDS + 10))
+  while (( SECONDS < deadline )); do
+    if grep -Fq "${text}" "${WRITER_LOG}" 2>/dev/null; then
+      echo "[OK] writer log contains ${text}"
+      return
+    fi
+    process_alive "${WRITER_PID}" || {
+      show_logs
+      die 'writer exited while waiting for a mock-safety result'
+    }
+    sleep 0.10
+  done
+  show_logs
+  die "writer log did not contain ${text}"
+}
+
+wait_for_writer_status() {
+  local expected="$1"
+  local deadline=$((SECONDS + 12))
+  local status
+  while ((SECONDS < deadline)); do
+    status="$(timeout 3s ros2 topic echo --once /r1/live_writer/status \
+      std_msgs/msg/String --field data --no-daemon 2>/dev/null || true)"
+    if grep -Eq "${expected}" <<<"${status}"; then
+      echo "[OK] writer status matches ${expected}: ${status}"
+      return
+    fi
+    process_alive "${WRITER_PID}" || {
+      show_logs
+      die 'writer exited while waiting for status'
+    }
+    sleep 0.10
+  done
+  show_logs
+  die "writer status did not match ${expected}"
+}
+
+assert_mock_transport() {
+  local result
+  result="$(timeout 5s ros2 param get /r1_live_writer transport 2>&1)" || {
+    printf '%s\n' "${result}" >&2
+    die 'could not query writer transport parameter'
+  }
+  grep -Fq 'mock' <<<"${result}" || die "writer transport is not mock: ${result}"
+  echo '[OK] writer transport=mock; no SDK transport is selected'
+}
+
+assert_no_physical_command_topics() {
+  local topics forbidden
+  topics="$(ros2 topic list --no-daemon --spin-time 0.70 2>/dev/null || true)"
+  for forbidden in /cmd_vel /joint_trajectory_controller/joint_cmd /r1/hardware /r1/arm_cmd /r1/loco_cmd; do
+    if grep -Fqx "${forbidden}" <<<"${topics}"; then
+      die "unexpected physical command topic in mock domain: ${forbidden}"
+    fi
+  done
+  echo '[OK] mock domain exposes no known physical command topic'
+}
+
+start_upstream() {
+  UPSTREAM_LOG="${RUN_DIR}/upstream.log"
+  setsid env \
+    ROS_DOMAIN_ID="${ROS_DOMAIN_ID}" \
+    ROS_LOCALHOST_ONLY=1 \
+    ROBOT_DRY_RUN=1 \
+    ROBOT_ENABLE_ACTUATION=0 \
+    ROBOT_CONFIRM_OFF_CHARGER=0 \
+    ROBOT_CONFIRM_CLEAR_AREA=0 \
+    ROBOT_CONFIRM_ESTOP_READY=0 \
+    ros2 launch r1_teleoperation_app r1_teleop_dry_run.launch.py \
+      ros_domain_id:="${ROS_DOMAIN_ID}" \
+      udp_bind_address:=127.0.0.1 \
+      udp_port:="${UDP_PORT}" \
+      start_head:=false \
+      start_locomotion:=false \
+      start_arm_pipeline:=false \
+      >"${UPSTREAM_LOG}" 2>&1 &
+  UPSTREAM_PID=$!
+}
+
+start_disabled_writer() {
+  WRITER_LOG="${RUN_DIR}/writer-disabled.log"
+  setsid env \
+    ROS_DOMAIN_ID="${ROS_DOMAIN_ID}" \
+    ROS_LOCALHOST_ONLY=1 \
+    ROBOT_DRY_RUN=1 \
+    ROBOT_ENABLE_ACTUATION=0 \
+    ROBOT_CONFIRM_OFF_CHARGER=0 \
+    ROBOT_CONFIRM_CLEAR_AREA=0 \
+    ROBOT_CONFIRM_ESTOP_READY=0 \
+    ros2 run r1_live_writer r1_live_writer_node --ros-args \
+      --params-file "${WRITER_CONFIG}" \
+      -p transport:=mock \
+      -p network_interface:=mock-only \
+      -p send_commands:=false \
+      -p enable_head:=true \
+      -p enable_locomotion:=true \
+      -p enable_prepare:=true \
+      -p commissioning_confirmed:=true \
+      -p profile:=slow-safe \
+      -p head_topic:="${HEAD_TOPIC}" \
+      -p velocity_topic:="${VELOCITY_TOPIC}" \
+      -p joint_state_topic:="${STATE_TOPIC}" \
+      >"${WRITER_LOG}" 2>&1 &
+  WRITER_PID=$!
+}
+
+start_mock_writer() {
+  WRITER_LOG="${RUN_DIR}/writer-mock.log"
+  setsid env \
+    ROS_DOMAIN_ID="${ROS_DOMAIN_ID}" \
+    ROS_LOCALHOST_ONLY=1 \
+    ROBOT_DRY_RUN=0 \
+    ROBOT_ENABLE_ACTUATION=1 \
+    ROBOT_CONFIRM_OFF_CHARGER=1 \
+    ROBOT_CONFIRM_CLEAR_AREA=1 \
+    ROBOT_CONFIRM_ESTOP_READY=1 \
+    ROBOT_CONFIRM_COMMISSIONING=1 \
+    ROBOT_COMMISSIONING_TOKEN="${TEST_TOKEN}" \
+    ROBOT_VR_SOURCE_IP="${TEST_VR_IP}" \
+    ros2 run r1_live_writer r1_live_writer_node --ros-args \
+      --params-file "${WRITER_CONFIG}" \
+      -p transport:=mock \
+      -p network_interface:=mock-only \
+      -p send_commands:=true \
+      -p enable_head:=true \
+      -p enable_locomotion:=true \
+      -p enable_prepare:=true \
+      -p commissioning_confirmed:=true \
+      -p commissioning_token:="${TEST_TOKEN}" \
+      -p expected_vr_source_ip:="${TEST_VR_IP}" \
+      -p profile:=slow-safe \
+      -p head_topic:="${HEAD_TOPIC}" \
+      -p velocity_topic:="${VELOCITY_TOPIC}" \
+      -p joint_state_topic:="${STATE_TOPIC}" \
+      >"${WRITER_LOG}" 2>&1 &
+  WRITER_PID=$!
+}
+
+start_state_feeder() {
+  setsid env ROS_DOMAIN_ID="${ROS_DOMAIN_ID}" ROS_LOCALHOST_ONLY=1 \
+    python3 - "${STATE_TOPIC}" <<'PY' &
+import sys
+
+import rclpy
+from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
+from rclpy.qos import QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import JointState
+
+
+class StateFeeder(Node):
+    def __init__(self, topic):
+        super().__init__('r1_live_writer_mock_state_feeder')
+        qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
+        self.publisher = self.create_publisher(JointState, topic, qos)
+        self.names = [
+            'left_shoulder_pitch_joint', 'left_shoulder_roll_joint',
+            'left_shoulder_yaw_joint', 'left_elbow_joint',
+            'left_wrist_roll_joint', 'right_shoulder_pitch_joint',
+            'right_shoulder_roll_joint', 'right_shoulder_yaw_joint',
+            'right_elbow_joint', 'right_wrist_roll_joint', 'waist_yaw_joint',
+            'head_pitch_joint', 'head_yaw_joint',
+        ]
+        self.create_timer(0.02, self.publish)
+
+    def publish(self):
+        if not rclpy.ok():
+            return
+        try:
+            message = JointState()
+            message.header.stamp = self.get_clock().now().to_msg()
+            message.name = self.names
+            message.position = [0.0] * len(self.names)
+            message.velocity = [0.0] * len(self.names)
+            self.publisher.publish(message)
+        except Exception:
+            # SIGINT can invalidate the context between ok() and publish().
+            # Suppress only that expected shutdown race.
+            if rclpy.ok():
+                raise
+
+
+rclpy.init()
+node = StateFeeder(sys.argv[1])
+try:
+    rclpy.spin(node)
+except (KeyboardInterrupt, ExternalShutdownException):
+    pass
+except Exception:
+    # Humble can surface a private RCLError rather than
+    # ExternalShutdownException after SIGINT invalidates the context.
+    if rclpy.ok():
+        raise
+finally:
+    node.destroy_node()
+    if rclpy.ok():
+        rclpy.shutdown()
+PY
+  STATE_PID=$!
+}
+
+start_command_feeder() {
+  local mode="$1"
+  local pid
+  [[ "${mode}" == 'head' || "${mode}" == 'velocity' ]] || \
+    die "invalid command feeder mode: ${mode}"
+  setsid env ROS_DOMAIN_ID="${ROS_DOMAIN_ID}" ROS_LOCALHOST_ONLY=1 \
+    python3 - "${HEAD_TOPIC}" "${VELOCITY_TOPIC}" "${mode}" <<'PY' &
+import sys
+
+import rclpy
+from geometry_msgs.msg import TwistStamped
+from rclpy.executors import ExternalShutdownException
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+
+class CommandFeeder(Node):
+    def __init__(self, head_topic, velocity_topic, mode):
+        super().__init__('r1_live_writer_mock_%s_command_feeder' % mode)
+        self.mode = mode
+        qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
+        self.head_publisher = self.create_publisher(JointTrajectory, head_topic, qos)
+        self.velocity_publisher = self.create_publisher(
+            TwistStamped, velocity_topic, qos
+        )
+        self.create_timer(0.02, self.publish)
+
+    def publish(self):
+        if not rclpy.ok():
+            return
+        try:
+            if self.mode in ('both', 'head'):
+                head = JointTrajectory()
+                head.header.stamp = self.get_clock().now().to_msg()
+                head.joint_names = ['head_yaw_joint', 'head_pitch_joint']
+                point = JointTrajectoryPoint()
+                point.positions = [0.20, -0.10]
+                head.points = [point]
+                self.head_publisher.publish(head)
+
+            if self.mode in ('both', 'velocity'):
+                velocity = TwistStamped()
+                velocity.header.stamp = self.get_clock().now().to_msg()
+                velocity.header.frame_id = 'base_link'
+                velocity.twist.linear.x = 0.18
+                velocity.twist.linear.y = 0.08
+                velocity.twist.angular.z = 0.25
+                self.velocity_publisher.publish(velocity)
+        except Exception:
+            # Process-group cleanup invalidates rclpy asynchronously.  Keep
+            # real publish failures visible and silence only that shutdown.
+            if rclpy.ok():
+                raise
+
+
+rclpy.init()
+node = CommandFeeder(sys.argv[1], sys.argv[2], sys.argv[3])
+try:
+    rclpy.spin(node)
+except (KeyboardInterrupt, ExternalShutdownException):
+    pass
+except Exception:
+    # Humble can surface a private RCLError rather than
+    # ExternalShutdownException after SIGINT invalidates the context.
+    if rclpy.ok():
+        raise
+finally:
+    node.destroy_node()
+    if rclpy.ok():
+        rclpy.shutdown()
+PY
+  pid=$!
+  if [[ "${mode}" == 'head' ]]; then
+    HEAD_COMMAND_PID="${pid}"
+  else
+    VELOCITY_COMMAND_PID="${pid}"
+  fi
+}
+
+start_command_feeders() {
+  start_command_feeder head
+  start_command_feeder velocity
+}
+
+stop_head_command_feeder() {
+  stop_process_group "${HEAD_COMMAND_PID}"
+  HEAD_COMMAND_PID=""
+}
+
+stop_velocity_command_feeder() {
+  stop_process_group "${VELOCITY_COMMAND_PID}"
+  VELOCITY_COMMAND_PID=""
+}
+
+stop_command_feeders() {
+  stop_head_command_feeder
+  stop_velocity_command_feeder
+}
+
+publish_neutral_velocity_once() {
+  local output="${RUN_DIR}/neutral-velocity.txt"
+  if ! timeout 6s ros2 topic pub --once "${VELOCITY_TOPIC}" \
+    geometry_msgs/msg/TwistStamped \
+    "{header: {frame_id: base_link}, twist: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}" \
+    >"${output}" 2>&1; then
+    cat "${output}" >&2 || true
+    die 'failed to publish post-prepare neutral velocity'
+  fi
+}
+
+publish_non_neutral_velocity_once() {
+  local output="${RUN_DIR}/non-neutral-velocity.txt"
+  if ! timeout 6s ros2 topic pub --once "${VELOCITY_TOPIC}" \
+    geometry_msgs/msg/TwistStamped \
+    "{header: {frame_id: base_link}, twist: {linear: {x: 0.05, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}" \
+    >"${output}" 2>&1; then
+    cat "${output}" >&2 || true
+    die 'failed to publish post-prepare non-neutral velocity'
+  fi
+}
+
+start_udp_stream() {
+  local deadman="$1"
+  local duration="$2"
+  local sequence="${UDP_SEQUENCE}"
+  UDP_SEQUENCE=$((UDP_SEQUENCE + 10000))
+  setsid python3 - "${UDP_PORT}" "${sequence}" "${deadman}" "${duration}" <<'PY' &
+import json
+import socket
+import sys
+import time
+
+port = int(sys.argv[1])
+sequence = int(sys.argv[2])
+deadman = sys.argv[3].lower() == 'true'
+duration = float(sys.argv[4])
+pose = {'p': [0.0, 0.0, 1.60], 'q': [0.0, 0.0, 0.0, 1.0]}
+deadline = time.monotonic() + duration
+
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+    sock.bind(('127.0.0.1', 0))
+    while time.monotonic() < deadline:
+        packet = {
+            'v': 1,
+            'seq': sequence,
+            'client_time_ms': time.time_ns() // 1_000_000,
+            'left': pose,
+            'right': pose,
+            'head': pose,
+            'sticks': {'left': [0.0, 0.0], 'right': [0.0, 0.0]},
+            'triggers': [0.0, 0.0],
+            'deadman': deadman,
+        }
+        sock.sendto(json.dumps(packet, separators=(',', ':')).encode('utf-8'),
+                    ('127.0.0.1', port))
+        sequence = (sequence + 1) % (1 << 32)
+        time.sleep(0.02)
+PY
+  UDP_PID=$!
+}
+
+stop_udp_stream() {
+  stop_process_group "${UDP_PID}"
+  UDP_PID=""
+}
+
+complete_post_prepare_rearm() {
+  wait_for_writer_status 'prepared=true.*prepare_rearm=await_deadman_release'
+  assert_topic_bool /r1/live_writer/armed false awaiting_rearm_armed
+  stop_command_feeders
+  stop_udp_stream
+  start_udp_stream false 120
+  wait_for_writer_status 'prepare_rearm=await_neutral_velocity'
+  assert_topic_bool /r1/live_writer/armed false awaiting_neutral_armed
+  publish_non_neutral_velocity_once
+  wait_for_writer_status 'prepare_rearm=await_neutral_velocity'
+  assert_topic_bool /r1/live_writer/armed false non_neutral_rejected_armed
+  publish_neutral_velocity_once
+  wait_for_writer_status 'prepare_rearm=await_deadman_press'
+  assert_topic_bool /r1/live_writer/armed false awaiting_new_press_armed
+  stop_udp_stream
+  start_udp_stream true 120
+  wait_for_writer_status 'prepare_rearm=ready'
+  # The transition to ready clears pre-rearm command freshness.  A new press
+  # alone must therefore remain disarmed until fresh head *and* velocity data
+  # arrive after that press.
+  assert_topic_bool /r1/live_writer/armed false stale_commands_discarded_armed
+  start_command_feeders
+  sleep 0.45
+  assert_topic_bool /r1/live_writer/armed true post_rearm_armed
+}
+
+require_command python3
+require_command ros2
+require_command setsid
+require_command timeout
+require_command awk
+[[ -f /opt/ros/humble/setup.bash ]] || die 'ROS 2 Humble setup.bash is missing'
+[[ -f "${WORKSPACE_SETUP}" ]] || die "workspace is not built: ${WORKSPACE_SETUP}"
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${WORKSPACE_SETUP}"
+set -u
+
+wait_for_package r1_teleoperation_app
+wait_for_package r1_teleop_safety
+wait_for_package r1_live_writer
+
+assert_loopback_only_namespace
+
+ROS_DOMAIN_ID="$(select_domain)"
+export ROS_DOMAIN_ID
+export ROS_LOCALHOST_ONLY=1
+UDP_PORT="$(select_udp_port)"
+RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/r1-live-writer-mock-smoke.XXXXXX")"
+WRITER_PREFIX="$(ros2 pkg prefix r1_live_writer)"
+WRITER_CONFIG="${WRITER_PREFIX}/share/r1_live_writer/config/r1_live_writer.yaml"
+[[ -f "${WRITER_CONFIG}" ]] || die "writer config missing: ${WRITER_CONFIG}"
+
+echo 'R1 live-writer mock smoke: MockTransport only; no robot or SDK transport.'
+echo "  ROS_DOMAIN_ID=${ROS_DOMAIN_ID} UDP=127.0.0.1:${UDP_PORT}"
+
+start_upstream
+wait_for_node /r1_safety_supervisor
+wait_for_node /vr_teleop_bridge
+wait_for_service /r1/safety/set_kill
+
+echo '[TEST] send_commands=false blocks mock prepare before any transport initialization'
+start_disabled_writer
+wait_for_node /r1_live_writer
+wait_for_service /r1/live_writer/prepare
+assert_mock_transport
+assert_topic_bool /r1/live_writer/armed false disabled_armed
+expect_service_failure /r1/live_writer/prepare std_srvs/srv/Trigger '{}' 'send_commands=false'
+stop_process_group "${WRITER_PID}"
+WRITER_PID=""
+wait_for_node_gone /r1_live_writer
+
+echo '[TEST] complete mock gating, prepare, head/velocity acceptance, and stop paths'
+start_mock_writer
+wait_for_node /r1_live_writer
+wait_for_service /r1/live_writer/prepare
+wait_for_service /r1/live_writer/reset_kill
+assert_mock_transport
+assert_no_physical_command_topics
+start_state_feeder
+start_command_feeders
+sleep 0.35
+
+# The mock writer receives complete input but cannot prepare until the
+# supervisor's retained startup kill is explicitly released.
+expect_service_failure /r1/live_writer/prepare std_srvs/srv/Trigger '{}' \
+  'kill_not_explicitly_clear'
+expect_service_success /r1/safety/set_kill std_srvs/srv/SetBool '{data: false}'
+start_udp_stream true 120
+sleep 0.60
+# A retained startup kill is intentionally fail-closed in the writer too. A
+# fresh external false plus this explicit reset prevents a stale command from
+# being re-enabled implicitly.
+expect_service_success /r1/live_writer/reset_kill std_srvs/srv/Trigger '{}'
+assert_topic_bool /r1/live_writer/armed false pre_prepare_armed
+expect_service_success /r1/live_writer/prepare std_srvs/srv/Trigger '{}'
+complete_post_prepare_rearm
+assert_head_points nonzero prepared_head
+assert_scalar /r1/live_writer/debug/cmd_vel twist.linear.x nonzero prepared_velocity
+
+# An explicit kill must zero mock outputs, remain latched after kill=false,
+# and require the separate reset service before prepare can happen again.
+echo '[TEST] external kill latches mock outputs until explicit reset'
+expect_service_success /r1/safety/set_kill std_srvs/srv/SetBool '{data: true}'
+sleep 0.45
+assert_topic_bool /r1/live_writer/armed false killed_armed
+assert_head_points zero killed_head
+assert_scalar /r1/live_writer/debug/cmd_vel twist.linear.x zero killed_velocity
+expect_service_failure /r1/live_writer/reset_kill std_srvs/srv/Trigger '{}' \
+  'external kill must be explicitly false'
+expect_service_success /r1/safety/set_kill std_srvs/srv/SetBool '{data: false}'
+sleep 0.35
+assert_topic_bool /r1/live_writer/armed false kill_still_latched_armed
+assert_head_points zero kill_still_latched_head
+assert_scalar /r1/live_writer/debug/cmd_vel twist.linear.x zero kill_still_latched_velocity
+expect_service_success /r1/live_writer/reset_kill std_srvs/srv/Trigger '{}'
+expect_service_success /r1/live_writer/prepare std_srvs/srv/Trigger '{}'
+complete_post_prepare_rearm
+
+# A real VR-side Deadman false packet flows through the isolated UDP bridge,
+# stops the mock writer, latches kill, and returns debug outputs to zero.
+echo '[TEST] VR Deadman release produces mock stop and local kill latch'
+stop_udp_stream
+start_udp_stream false 0.80
+deadman_release_pid="${UDP_PID}"
+wait "${deadman_release_pid}" || true
+UDP_PID=""
+sleep 0.50
+assert_topic_bool /r1/live_writer/armed false deadman_released_armed
+assert_head_points zero deadman_released_head
+assert_scalar /r1/live_writer/debug/cmd_vel twist.linear.x zero deadman_released_velocity
+wait_for_log 'deadman_released'
+
+# Clear the central dry-run latch, reset the writer's local latch, and prepare
+# once more. The stale-command checks below keep kill/deadman/state fresh and
+# use independent head and velocity feeder processes.  Removing one feeder
+# therefore cannot create a DDS-discovery gap in the channel under test.
+expect_service_success /r1/safety/set_kill std_srvs/srv/SetBool '{data: false}'
+start_udp_stream true 120
+sleep 0.45
+expect_service_success /r1/live_writer/reset_kill std_srvs/srv/Trigger '{}'
+expect_service_success /r1/live_writer/prepare std_srvs/srv/Trigger '{}'
+complete_post_prepare_rearm
+assert_scalar /r1/live_writer/debug/cmd_vel twist.linear.x nonzero watchdog_setup_velocity
+
+echo '[TEST] head watchdog stops mock outputs while velocity remains fresh'
+# The velocity feeder has already been publishing independently throughout
+# the armed interval.  Stop only head input, so watchdog selection cannot race
+# a newly-created velocity publisher through DDS discovery.
+stop_head_command_feeder
+sleep 0.60
+assert_topic_bool /r1/live_writer/armed false head_watchdog_armed
+assert_head_points zero head_watchdog_head
+assert_scalar /r1/live_writer/debug/cmd_vel twist.linear.x zero head_watchdog_velocity
+wait_for_log 'watchdog_head_command_missing_stale_or_invalid'
+
+# Re-arm from the fail-closed latch with both independent streams, then remove
+# only velocity.  This gives each command watchdog its own negative control.
+echo '[TEST] velocity watchdog stops mock outputs while head remains fresh'
+start_command_feeder head
+expect_service_success /r1/safety/set_kill std_srvs/srv/SetBool '{data: false}'
+sleep 0.45
+expect_service_success /r1/live_writer/reset_kill std_srvs/srv/Trigger '{}'
+expect_service_success /r1/live_writer/prepare std_srvs/srv/Trigger '{}'
+complete_post_prepare_rearm
+assert_head_points nonzero velocity_watchdog_setup_head
+stop_velocity_command_feeder
+sleep 0.60
+assert_topic_bool /r1/live_writer/armed false velocity_watchdog_armed
+assert_head_points zero velocity_watchdog_head
+assert_scalar /r1/live_writer/debug/cmd_vel twist.linear.x zero velocity_watchdog_velocity
+wait_for_log 'watchdog_velocity_missing_stale_or_invalid'
+
+SMOKE_PASSED=true
+echo '[PASS] r1_live_writer mock smoke passed: all exercised outputs were local MockTransport/debug paths only.'

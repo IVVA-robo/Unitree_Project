@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# Inert Unitree SDK/DDS ABI check.  The SDK objects are constructed only in a
+# private network namespace containing loopback and no robot-facing interface.
+set -Eeuo pipefail
+
+readonly INTERNAL_ARGUMENT="--inside-r1-sdk-abi-private-network"
+readonly VENDOR_LIBRARY_DIRECTORY="/home/unitree/Unitree_Project/Legacy_Robotics/robotics/unitree_sdk/unitree_sdk2/thirdparty/lib/x86_64"
+readonly PROBE_TIMEOUT_SECONDS="15"
+
+fail() {
+  printf 'FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+command -v readlink >/dev/null 2>&1 || fail "readlink is required"
+SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd -P)" || \
+  fail "could not resolve wrapper directory"
+readonly SCRIPT_DIRECTORY
+readonly SCRIPT_PATH="${SCRIPT_DIRECTORY}/$(basename -- "${BASH_SOURCE[0]}")"
+readonly PROBE_EXECUTABLE="${SCRIPT_DIRECTORY}/r1_sdk_abi_probe"
+
+# The public entry point has no direct execution path.  Re-enter this exact
+# script in a fresh user+network namespace or fail; never fall back to the host
+# network namespace when unshare is unavailable or denied.
+if [[ "${1:-}" != "${INTERNAL_ARGUMENT}" ]]; then
+  [[ "$#" -eq 0 ]] || fail "this probe accepts no arguments"
+  command -v unshare >/dev/null 2>&1 || fail "unshare is required; refusing host-network fallback"
+  # Keep an inherited descriptor to the caller's network namespace.  Unlike
+  # /proc/1/ns/net it remains readable after entering an unprivileged user
+  # namespace and cannot be fabricated by merely setting an environment flag.
+  exec 9< /proc/self/ns/net || fail "could not retain caller network namespace identity"
+  exec unshare --user --map-root-user --net -- "${SCRIPT_PATH}" "${INTERNAL_ARGUMENT}"
+fi
+shift
+[[ "$#" -eq 0 ]] || fail "unexpected argument after private-network entry"
+
+# A caller can type the private marker manually, so the marker is not trusted.
+# Verify against the inherited namespace descriptor before touching loopback
+# or loading any SDK library.
+CURRENT_NETWORK_NAMESPACE="$(readlink -- /proc/self/ns/net)" || fail "could not identify current network namespace"
+readonly CURRENT_NETWORK_NAMESPACE
+CALLER_NETWORK_NAMESPACE="$(readlink -- /proc/self/fd/9)" || fail "missing caller network namespace identity"
+readonly CALLER_NETWORK_NAMESPACE
+[[ "${CURRENT_NETWORK_NAMESPACE}" == net:\[*\] ]] || fail "invalid current network namespace identity"
+[[ "${CALLER_NETWORK_NAMESPACE}" == net:\[*\] ]] || fail "invalid caller network namespace identity"
+[[ "${CURRENT_NETWORK_NAMESPACE}" != "${CALLER_NETWORK_NAMESPACE}" ]] || \
+  fail "not in a private network namespace"
+exec 9<&-
+
+command -v ip >/dev/null 2>&1 || fail "iproute2 is required"
+ip link set dev lo up || fail "could not bring up private loopback"
+
+LINK_LIST="$(ip -o link show)" || fail "could not enumerate private interfaces"
+readonly LINK_LIST
+NON_LOOPBACK_INTERFACES="$(
+  awk -F': ' '{name=$2; sub(/@.*/, "", name); if (name != "lo") print name}' <<<"${LINK_LIST}"
+)" || fail "could not validate private interfaces"
+readonly NON_LOOPBACK_INTERFACES
+[[ -z "${NON_LOOPBACK_INTERFACES}" ]] || \
+  fail "private namespace exposes non-loopback interface(s): ${NON_LOOPBACK_INTERFACES//$'\n'/, }"
+awk -F': ' '
+  {
+    name=$2
+    sub(/@.*/, "", name)
+    if (name == "lo" && $0 ~ /<[^>]*UP[^>]*>/) found=1
+  }
+  END {exit found ? 0 : 1}
+' <<<"${LINK_LIST}" || fail "private loopback is not UP"
+
+[[ -x "${PROBE_EXECUTABLE}" ]] || \
+  fail "installed probe executable is missing: ${PROBE_EXECUTABLE}"
+[[ -d "${VENDOR_LIBRARY_DIRECTORY}" ]] || \
+  fail "Unitree vendor library directory is missing: ${VENDOR_LIBRARY_DIRECTORY}"
+
+VENDOR_LIBRARY_DIRECTORY_REAL="$(readlink -e -- "${VENDOR_LIBRARY_DIRECTORY}")" || \
+  fail "could not canonicalize vendor library directory"
+readonly VENDOR_LIBRARY_DIRECTORY_REAL
+[[ -n "${VENDOR_LIBRARY_DIRECTORY_REAL}" ]] || fail "could not canonicalize vendor library directory"
+
+# Force this diagnostic onto Fast DDS and an otherwise unused, loopback-only
+# domain.  Ignore inherited discovery/profile settings that could change the
+# transport selected by the diagnostic.
+export RMW_IMPLEMENTATION="rmw_fastrtps_cpp"
+export ROS_DOMAIN_ID="232"
+export ROS_LOCALHOST_ONLY="1"
+unset ROS_DISCOVERY_SERVER FASTDDS_DEFAULT_PROFILES_FILE FASTRTPS_DEFAULT_PROFILES_FILE CYCLONEDDS_URI
+export LD_LIBRARY_PATH="${VENDOR_LIBRARY_DIRECTORY}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
+command -v ldd >/dev/null 2>&1 || fail "ldd is required"
+LDD_OUTPUT="$(ldd -- "${PROBE_EXECUTABLE}" 2>&1)" || fail "ldd could not inspect the probe executable"
+readonly LDD_OUTPUT
+if grep -Fq '=> not found' <<<"${LDD_OUTPUT}"; then
+  printf '%s\n' "${LDD_OUTPUT}" >&2
+  fail "probe has an unresolved shared-library dependency"
+fi
+
+verify_vendor_library() {
+  local soname="$1"
+  local resolved_path
+  local resolved_real
+  local match_count
+
+  match_count="$(awk -v wanted="${soname}" '$1 == wanted {count++} END {print count+0}' <<<"${LDD_OUTPUT}")"
+  [[ "${match_count}" == "1" ]] || \
+    fail "ldd must report exactly one ${soname} dependency (found ${match_count})"
+
+  resolved_path="$(
+    awk -v wanted="${soname}" '
+      $1 == wanted {
+        if ($2 == "=>") print $3
+        else print $1
+      }
+    ' <<<"${LDD_OUTPUT}"
+  )"
+  [[ "${resolved_path}" == /* ]] || fail "${soname} did not resolve to an absolute path"
+  resolved_real="$(readlink -e -- "${resolved_path}")" || fail "could not canonicalize ${soname}"
+  [[ "$(dirname -- "${resolved_real}")" == "${VENDOR_LIBRARY_DIRECTORY_REAL}" ]] || \
+    fail "${soname} resolved outside the Unitree vendor directory: ${resolved_real}"
+  printf 'OK: %s -> %s\n' "${soname}" "${resolved_real}"
+}
+
+verify_vendor_library "libddsc.so.0"
+verify_vendor_library "libddscxx.so.0"
+
+command -v timeout >/dev/null 2>&1 || fail "timeout is required"
+printf 'INFO: starting inert SDK ABI probe (private loopback only, timeout=%ss)\n' \
+  "${PROBE_TIMEOUT_SECONDS}"
+
+set +e
+timeout --foreground --signal=TERM --kill-after=2s \
+  "${PROBE_TIMEOUT_SECONDS}s" "${PROBE_EXECUTABLE}"
+readonly PROBE_STATUS="$?"
+set -e
+
+case "${PROBE_STATUS}" in
+  0)
+    printf 'PASS: Unitree SDK/DDS ABI probe initialized without a command path\n'
+    ;;
+  124|137)
+    fail "SDK ABI probe exceeded its bounded timeout"
+    ;;
+  *)
+    fail "SDK ABI probe exited with status ${PROBE_STATUS}"
+    ;;
+esac

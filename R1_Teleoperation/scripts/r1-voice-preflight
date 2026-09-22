@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Read-only offline voice readiness check for the R1 computer.
+# This script never starts the voice service, records audio, or changes files.
+
+MODEL_DIR="${R1_VOSK_MODEL_DIR:-/opt/R1Service/models/vosk-ru}"
+SERVICE="${R1_VOICE_SERVICE:-robot-voice-service.service}"
+OLLAMA_MODEL="${R1_OLLAMA_MODEL:-qwen2.5:1.5b}"
+if [[ -n "${R1_VOICE_PYTHON:-}" ]]; then
+  PYTHON_BIN="$R1_VOICE_PYTHON"
+elif [[ -x /opt/R1Service/.venv/bin/python ]]; then
+  # The system service uses this interpreter; checking /usr/bin/python3 alone
+  # can report a false failure even while the service is healthy.
+  PYTHON_BIN="/opt/R1Service/.venv/bin/python"
+else
+  PYTHON_BIN="$(command -v python3 || true)"
+fi
+
+ok=0
+warn=0
+fail=0
+mark() {
+  local level="$1" message="$2"
+  printf '[%s] %s\n' "$level" "$message"
+  case "$level" in
+    OK) ok=$((ok + 1)) ;;
+    WARN) warn=$((warn + 1)) ;;
+    FAIL) fail=$((fail + 1)) ;;
+  esac
+}
+
+printf 'R1 offline voice preflight (READ-ONLY)\n'
+printf 'Model: %s | service: %s | Ollama model: %s\n\n' \
+  "$MODEL_DIR" "$SERVICE" "$OLLAMA_MODEL"
+
+if [[ -d "$MODEL_DIR" && -d "$MODEL_DIR/am" && -d "$MODEL_DIR/conf" && \
+      -d "$MODEL_DIR/graph" ]]; then
+  mark OK 'Vosk Russian model directories are present'
+else
+  mark FAIL 'Vosk Russian model is missing or incomplete'
+fi
+
+if [[ -n "$PYTHON_BIN" && -x "$PYTHON_BIN" ]]; then
+  if "$PYTHON_BIN" - "$MODEL_DIR" <<'PY'
+import importlib.util
+import os
+import sys
+
+model = sys.argv[1]
+required = ('am', 'conf', 'graph')
+if not all(os.path.isdir(os.path.join(model, item)) for item in required):
+    raise SystemExit(1)
+if importlib.util.find_spec('vosk') is None:
+    raise SystemExit(2)
+PY
+  then
+    mark OK 'Python can import vosk'
+  else
+    case "$?" in
+      2) mark FAIL "Python module vosk is not installed in $PYTHON_BIN" ;;
+      *) mark FAIL 'Python Vosk model check failed' ;;
+    esac
+  fi
+else
+  mark FAIL 'voice-service Python interpreter is unavailable'
+fi
+
+if command -v ollama >/dev/null 2>&1; then
+  if ollama list 2>/dev/null | awk 'NR > 1 {print $1}' | grep -Fxq "$OLLAMA_MODEL"; then
+    mark OK "Ollama model $OLLAMA_MODEL is installed"
+  else
+    mark FAIL "Ollama model $OLLAMA_MODEL is not listed locally"
+  fi
+else
+  mark FAIL 'ollama command is unavailable'
+fi
+
+if command -v aplay >/dev/null 2>&1; then
+  mark OK 'aplay is available for local audio output'
+else
+  mark WARN 'aplay is unavailable; text-to-speech playback will not work'
+fi
+
+if systemctl cat "$SERVICE" >/dev/null 2>&1; then
+  if systemctl is-enabled --quiet "$SERVICE" 2>/dev/null; then
+    mark OK "$SERVICE is enabled"
+  else
+    mark WARN "$SERVICE exists but is not enabled"
+  fi
+else
+  mark FAIL "$SERVICE is not installed"
+fi
+
+printf '\nResult: %d OK, %d WARN, %d FAIL\n' "$ok" "$warn" "$fail"
+if (( fail > 0 )); then
+  printf 'OFFLINE VOICE NOT READY\n'
+  exit 1
+fi
+printf 'OFFLINE VOICE PREREQUISITES READY\n'

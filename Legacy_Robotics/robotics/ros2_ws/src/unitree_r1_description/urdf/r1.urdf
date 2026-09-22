@@ -1,0 +1,500 @@
+<?xml version="1.0"?>
+<robot name="unitree_r1">
+
+  <link name="world"/>
+
+  <joint name="fixed_to_world" type="fixed">
+    <parent link="world"/>
+    <child link="pelvis"/>
+    <origin xyz="0 0 0.5" rpy="0 0 0"/>
+  </joint>
+
+  <link name="pelvis">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/pelvis_link.STL"/>
+      </geometry>
+    </visual>
+    <inertial>
+      <mass value="2.25"/>
+      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/>
+    </inertial>
+  </link>
+
+  <!-- ================= ЛЕВАЯ НОГА ================= -->
+  <joint name="left_hip_pitch_joint" type="revolute">
+    <parent link="pelvis"/>
+    <child link="left_hip_pitch_link"/>
+    <origin xyz="0.0325 0.0704672 -0.0902351" rpy="-0.436 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.5" upper="1.5" effort="100" velocity="10"/>
+  </joint>
+  <link name="left_hip_pitch_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/left_hip_pitch_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="1.0"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial>
+  </link>
+
+  <joint name="left_hip_roll_joint" type="revolute">
+    <parent link="left_hip_pitch_link"/>
+    <child link="left_hip_roll_link"/>
+    <origin xyz="0.0248 0.045 -0.053" rpy="0.436 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-1.047" upper="1.745" effort="100" velocity="10"/>
+  </joint>
+  <link name="left_hip_roll_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/left_hip_roll_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="0.2"/><inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/></inertial>
+  </link>
+
+  <joint name="left_hip_yaw_joint" type="revolute">
+    <parent link="left_hip_roll_link"/>
+    <child link="left_hip_yaw_link"/>
+    <origin xyz="-0.0194507 -0.0006 -0.0618" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.74" upper="2.74" effort="100" velocity="10"/>
+  </joint>
+  <link name="left_hip_yaw_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/left_hip_yaw_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="1.74"/><inertia ixx="0.008" ixy="0" ixz="0" iyy="0.008" iyz="0" izz="0.001"/></inertial>
+  </link>
+
+  <joint name="left_knee_joint" type="revolute">
+    <parent link="left_hip_yaw_link"/>
+    <child link="left_knee_link"/>
+    <origin xyz="-0.02315 0.01866 -0.159301" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.174" upper="2.426" effort="100" velocity="10"/>
+  </joint>
+  <link name="left_knee_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/left_knee_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="2.37"/><inertia ixx="0.012" ixy="0" ixz="0" iyy="0.012" iyz="0" izz="0.001"/></inertial>
+  </link>
+
+  <joint name="left_ankle_pitch_joint" type="revolute">
+    <parent link="left_knee_link"/>
+    <child link="left_ankle_pitch_link"/>
+    <origin xyz="-0.0168139 -0.0205811 -0.309175" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.872" upper="0.575" effort="50" velocity="10"/>
+  </joint>
+  <link name="left_ankle_pitch_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/left_ankle_pitch_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="0.07"/><inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/></inertial>
+  </link>
+
+  <joint name="left_ankle_roll_joint" type="revolute">
+    <parent link="left_ankle_pitch_link"/>
+    <child link="left_ankle_roll_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.26" upper="0.26" effort="50" velocity="10"/>
+  </joint>
+  <link name="left_ankle_roll_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/left_ankle_roll_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="0.48"/><inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.0002"/></inertial>
+  </link>
+
+  <!-- ================= ПРАВАЯ НОГА ================= -->
+  <joint name="right_hip_pitch_joint" type="revolute">
+    <parent link="pelvis"/>
+    <child link="right_hip_pitch_link"/>
+    <origin xyz="0.0325 -0.0704672 -0.0902351" rpy="0.436 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.5" upper="1.5" effort="100" velocity="10"/>
+  </joint>
+  <link name="right_hip_pitch_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/right_hip_pitch_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="1.0"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial>
+  </link>
+
+  <joint name="right_hip_roll_joint" type="revolute">
+    <parent link="right_hip_pitch_link"/>
+    <child link="right_hip_roll_link"/>
+    <origin xyz="0.0248 -0.045 -0.053" rpy="-0.436 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-1.745" upper="1.047" effort="100" velocity="10"/>
+  </joint>
+  <link name="right_hip_roll_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/right_hip_roll_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="0.2"/><inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/></inertial>
+  </link>
+
+  <joint name="right_hip_yaw_joint" type="revolute">
+    <parent link="right_hip_roll_link"/>
+    <child link="right_hip_yaw_link"/>
+    <origin xyz="-0.0194507 0.0006 -0.0618" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.74" upper="2.74" effort="100" velocity="10"/>
+  </joint>
+  <link name="right_hip_yaw_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/right_hip_yaw_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="1.74"/><inertia ixx="0.008" ixy="0" ixz="0" iyy="0.008" iyz="0" izz="0.001"/></inertial>
+  </link>
+
+  <joint name="right_knee_joint" type="revolute">
+    <parent link="right_hip_yaw_link"/>
+    <child link="right_knee_link"/>
+    <origin xyz="-0.02315 -0.01866 -0.159301" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.174" upper="2.426" effort="100" velocity="10"/>
+  </joint>
+  <link name="right_knee_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/right_knee_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="2.37"/><inertia ixx="0.012" ixy="0" ixz="0" iyy="0.012" iyz="0" izz="0.001"/></inertial>
+  </link>
+
+  <joint name="right_ankle_pitch_joint" type="revolute">
+    <parent link="right_knee_link"/>
+    <child link="right_ankle_pitch_link"/>
+    <origin xyz="-0.0168139 0.0205811 -0.309175" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.872" upper="0.575" effort="50" velocity="10"/>
+  </joint>
+  <link name="right_ankle_pitch_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/right_ankle_pitch_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="0.07"/><inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/></inertial>
+  </link>
+
+  <joint name="right_ankle_roll_joint" type="revolute">
+    <parent link="right_ankle_pitch_link"/>
+    <child link="right_ankle_roll_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.26" upper="0.26" effort="50" velocity="10"/>
+  </joint>
+  <link name="right_ankle_roll_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/right_ankle_roll_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="0.48"/><inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.0002"/></inertial>
+  </link>
+
+  <!-- ================= ТУЛОВИЩЕ И ГОЛОВА ================= -->
+  <joint name="waist_roll_joint" type="revolute">
+    <parent link="pelvis"/>
+    <child link="waist_roll_link"/>
+    <origin xyz="0.0325 0 0.049" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.52" upper="0.52" effort="100" velocity="10"/>
+  </joint>
+  <link name="waist_roll_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/waist_roll_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="0.92"/><inertia ixx="0.0008" ixy="0" ixz="0" iyy="0.0007" iyz="0" izz="0.0006"/></inertial>
+  </link>
+
+  <joint name="waist_yaw_joint" type="revolute">
+    <parent link="waist_roll_link"/>
+    <child link="torso_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.618" upper="2.618" effort="100" velocity="10"/>
+  </joint>
+  <link name="torso_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/waist_yaw_link.STL"/></geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.006 0.03155 0.255" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/head_pitch_link.STL"/></geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.0049874 0 0.3715" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/head_yaw_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="7.33"/><inertia ixx="0.11" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.02"/></inertial>
+  </link>
+
+  <!-- ================= ЛЕВАЯ РУКА ================= -->
+  <joint name="left_shoulder_pitch_joint" type="revolute">
+    <parent link="torso_link"/>
+    <child link="left_shoulder_pitch_link"/>
+    <origin xyz="0 0.085688 0.19749" rpy="0.2618 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.14" upper="2.09" effort="50" velocity="10"/>
+  </joint>
+  <link name="left_shoulder_pitch_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/left_shoulder_pitch_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="0.84"/><inertia ixx="0.0006" ixy="0" ixz="0" iyy="0.0006" iyz="0" izz="0.0005"/></inertial>
+  </link>
+
+  <joint name="left_shoulder_roll_joint" type="revolute">
+    <parent link="left_shoulder_pitch_link"/>
+    <child link="left_shoulder_roll_link"/>
+    <origin xyz="0.03445 0.047132 -0.025693" rpy="-0.2618 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.22" upper="2.47" effort="50" velocity="10"/>
+  </joint>
+  <link name="left_shoulder_roll_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/left_shoulder_roll_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="0.74"/><inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.0005"/></inertial>
+  </link>
+
+  <joint name="left_shoulder_yaw_joint" type="revolute">
+    <parent link="left_shoulder_roll_link"/>
+    <child link="left_shoulder_yaw_link"/>
+    <origin xyz="-0.03445 0.0043 -0.10835" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.91" upper="1.91" effort="33" velocity="10"/>
+  </joint>
+  <link name="left_shoulder_yaw_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/left_shoulder_yaw_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="0.73"/><inertia ixx="0.0008" ixy="0" ixz="0" iyy="0.0008" iyz="0" izz="0.0004"/></inertial>
+  </link>
+
+  <joint name="left_elbow_joint" type="revolute">
+    <parent link="left_shoulder_yaw_link"/>
+    <child link="left_elbow_link"/>
+    <origin xyz="0.016191 0.026461 -0.082858" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.97" upper="2.18" effort="33" velocity="10"/>
+  </joint>
+  <link name="left_elbow_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/left_elbow_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="0.75"/><inertia ixx="0.0009" ixy="0" ixz="0" iyy="0.0009" iyz="0" izz="0.0004"/></inertial>
+  </link>
+
+  <joint name="left_wrist_roll_joint" type="revolute">
+    <parent link="left_elbow_link"/>
+    <child link="left_wrist_roll_link"/>
+    <origin xyz="0.11218 -0.03002 -0.011702" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-1.91" upper="1.91" effort="33" velocity="10"/>
+  </joint>
+  <link name="left_wrist_roll_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/left_wrist_roll_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="0.32"/><inertia ixx="0.0007" ixy="0" ixz="0" iyy="0.0007" iyz="0" izz="0.0001"/></inertial>
+  </link>
+
+  <!-- ================= ПРАВАЯ РУКА ================= -->
+  <joint name="right_shoulder_pitch_joint" type="revolute">
+    <parent link="torso_link"/>
+    <child link="right_shoulder_pitch_link"/>
+    <origin xyz="0 -0.085688 0.19749" rpy="-0.2618 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.14" upper="2.09" effort="50" velocity="10"/>
+  </joint>
+  <link name="right_shoulder_pitch_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/right_shoulder_pitch_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="0.84"/><inertia ixx="0.0006" ixy="0" ixz="0" iyy="0.0006" iyz="0" izz="0.0005"/></inertial>
+  </link>
+
+  <joint name="right_shoulder_roll_joint" type="revolute">
+    <parent link="right_shoulder_pitch_link"/>
+    <child link="right_shoulder_roll_link"/>
+    <origin xyz="0.03445 -0.047132 -0.025693" rpy="0.2618 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-2.47" upper="0.22" effort="50" velocity="10"/>
+  </joint>
+  <link name="right_shoulder_roll_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/right_shoulder_roll_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="0.74"/><inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.0005"/></inertial>
+  </link>
+
+  <joint name="right_shoulder_yaw_joint" type="revolute">
+    <parent link="right_shoulder_roll_link"/>
+    <child link="right_shoulder_yaw_link"/>
+    <origin xyz="-0.03445 -0.0043 -0.10835" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.91" upper="1.91" effort="33" velocity="10"/>
+  </joint>
+  <link name="right_shoulder_yaw_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/right_shoulder_yaw_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="0.73"/><inertia ixx="0.0008" ixy="0" ixz="0" iyy="0.0008" iyz="0" izz="0.0004"/></inertial>
+  </link>
+
+  <joint name="right_elbow_joint" type="revolute">
+    <parent link="right_shoulder_yaw_link"/>
+    <child link="right_elbow_link"/>
+    <origin xyz="0.016191 -0.026461 -0.082858" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.97" upper="2.18" effort="33" velocity="10"/>
+  </joint>
+  <link name="right_elbow_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/right_elbow_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="0.75"/><inertia ixx="0.0009" ixy="0" ixz="0" iyy="0.0009" iyz="0" izz="0.0004"/></inertial>
+  </link>
+
+  <joint name="right_wrist_roll_joint" type="revolute">
+    <parent link="right_elbow_link"/>
+    <child link="right_wrist_roll_link"/>
+    <origin xyz="0.11218 0.03002 -0.011702" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-1.91" upper="1.91" effort="33" velocity="10"/>
+  </joint>
+  <link name="right_wrist_roll_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="file:///home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/meshes/right_wrist_roll_link.STL"/></geometry>
+    </visual>
+    <inertial><mass value="0.32"/><inertia ixx="0.0007" ixy="0" ixz="0" iyy="0.0007" iyz="0" izz="0.0001"/></inertial>
+  </link>
+
+  <!-- Simulation-only first-person stereo camera rig.  The fixed mounts keep
+       camera topics stable even though the legacy model has no head controller. -->
+  <link name="left_eye_camera_link"/>
+  <joint name="left_eye_camera_joint" type="fixed">
+    <parent link="torso_link"/>
+    <child link="left_eye_camera_link"/>
+    <origin xyz="0.075 0.032 0.280" rpy="0 0 0"/>
+  </joint>
+  <link name="right_eye_camera_link"/>
+  <joint name="right_eye_camera_joint" type="fixed">
+    <parent link="torso_link"/>
+    <child link="right_eye_camera_link"/>
+    <origin xyz="0.075 -0.032 0.280" rpy="0 0 0"/>
+  </joint>
+
+  <gazebo reference="left_eye_camera_link">
+    <sensor name="left_eye_camera" type="camera">
+      <always_on>true</always_on>
+      <update_rate>30</update_rate>
+      <visualize>false</visualize>
+      <camera>
+        <horizontal_fov>1.3962634</horizontal_fov>
+        <image><width>640</width><height>480</height><format>R8G8B8</format></image>
+        <clip><near>0.05</near><far>30.0</far></clip>
+      </camera>
+      <plugin name="left_eye_camera_ros" filename="libgazebo_ros_camera.so">
+        <ros><namespace>/r1/camera/left</namespace></ros>
+        <camera_name>left_eye</camera_name>
+        <frame_name>left_eye_camera_link</frame_name>
+        <hack_baseline>0.064</hack_baseline>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <gazebo reference="right_eye_camera_link">
+    <sensor name="right_eye_camera" type="camera">
+      <always_on>true</always_on>
+      <update_rate>30</update_rate>
+      <visualize>false</visualize>
+      <camera>
+        <horizontal_fov>1.3962634</horizontal_fov>
+        <image><width>640</width><height>480</height><format>R8G8B8</format></image>
+        <clip><near>0.05</near><far>30.0</far></clip>
+      </camera>
+      <plugin name="right_eye_camera_ros" filename="libgazebo_ros_camera.so">
+        <ros><namespace>/r1/camera/right</namespace></ros>
+        <camera_name>right_eye</camera_name>
+        <frame_name>right_eye_camera_link</frame_name>
+        <hack_baseline>0.064</hack_baseline>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <!-- ================= БЛОК ДАТЧИКОВ И МОТОРОВ ================= -->
+  <ros2_control name="GazeboSystem" type="system">
+    <hardware>
+      <plugin>gazebo_ros2_control/GazeboSystem</plugin>
+    </hardware>
+
+    <!-- ДАТЧИКИ ДЛЯ НОГ И СПИНЫ (чтобы RViz их видел) -->
+    <!-- Simulation-only position commands for the leg visualizer.  The
+         physical R1 adapter does not use this URDF or these interfaces. -->
+    <joint name="left_hip_pitch_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="left_hip_roll_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="left_hip_yaw_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="left_knee_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="left_ankle_pitch_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="left_ankle_roll_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="right_hip_pitch_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="right_hip_roll_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="right_hip_yaw_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="right_knee_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="right_ankle_pitch_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="right_ankle_roll_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <!-- Position command interfaces are simulation-only hold points.  Without
+         them the uncommanded waist joints fall to their limits and the torso
+         appears to spin when the arms move. -->
+    <joint name="waist_roll_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="waist_yaw_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+
+    <!-- МОТОРЫ ДЛЯ ЛЕВОЙ РУКИ -->
+    <joint name="left_shoulder_pitch_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="left_shoulder_roll_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="left_shoulder_yaw_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="left_elbow_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="left_wrist_roll_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+
+    <!-- МОТОРЫ ДЛЯ ПРАВОЙ РУКИ -->
+    <joint name="right_shoulder_pitch_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="right_shoulder_roll_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="right_shoulder_yaw_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="right_elbow_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="right_wrist_roll_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+  </ros2_control>
+
+  <!-- Подключение плагина к Gazebo -->
+  <gazebo>
+    <plugin filename="libgazebo_ros2_control.so" name="gazebo_ros2_control">
+      <parameters>/home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/src/unitree_r1_description/config/controllers.yaml</parameters>
+    </plugin>
+  </gazebo>
+
+</robot>

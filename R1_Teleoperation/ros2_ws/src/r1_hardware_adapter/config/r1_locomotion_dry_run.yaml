@@ -1,0 +1,61 @@
+r1_locomotion_dry_run:
+  ros__parameters:
+    # This controller has debug publishers only.  It refuses any attempt to
+    # turn off dry-run or claim that a hardware writer is enabled.
+    hardware_enabled: false
+    dry_run: true
+
+    # Inputs supplied by vr_teleop_bridge.  The controller independently
+    # validates the deadman and never trusts an upstream velocity gate alone.
+    input_topic: "/vr/cmd_vel"
+    active_topic: "/vr/teleop/active"
+    # A supervisor should publish this Bool with reliable + transient-local
+    # QoS so the startup kill state reaches a late-joining controller.
+    emergency_stop_topic: "/r1/safety/kill"
+    mode_topic: "/r1/locomotion/mode"
+    reset_emergency_stop_service: "/r1/locomotion_dry_run/reset_emergency_stop"
+
+    # Outputs intentionally live in a debug-only namespace; this file never
+    # publishes a real robot or simulator command topic.
+    debug_topic_prefix: "/r1/locomotion_dry_run/debug"
+    mode: "slow-safe"
+    publish_rate_hz: 50.0
+    status_rate_hz: 5.0
+
+    # A missing/released deadman or velocity packet zeros debug output
+    # immediately. A normal zero stick intent while Deadman stays held still
+    # uses the selected profile's smooth deceleration ramp.
+    # The bridge refreshes an unchanged deadman at 1 Hz; this must stay above
+    # that cadence so a continuously held button does not false-trigger stop.
+    deadman_timeout_sec: 1.50
+    command_timeout_sec: 0.25
+    max_step_dt_sec: 0.10
+
+    # Profiles may be reduced for a demo, but the pure controller rejects any
+    # value above the `exhibition` row; YAML cannot remove the hard ceiling.
+    slow_safe:
+      max_forward_mps: 0.20
+      max_lateral_mps: 0.12
+      max_yaw_rps: 0.35
+      acceleration_mps2: 0.25
+      deceleration_mps2: 0.45
+      yaw_acceleration_rps2: 0.50
+      yaw_deceleration_rps2: 0.90
+
+    normal:
+      max_forward_mps: 0.40
+      max_lateral_mps: 0.22
+      max_yaw_rps: 0.65
+      acceleration_mps2: 0.45
+      deceleration_mps2: 0.75
+      yaw_acceleration_rps2: 0.85
+      yaw_deceleration_rps2: 1.40
+
+    exhibition:
+      max_forward_mps: 0.55
+      max_lateral_mps: 0.30
+      max_yaw_rps: 0.90
+      acceleration_mps2: 0.60
+      deceleration_mps2: 1.00
+      yaw_acceleration_rps2: 1.10
+      yaw_deceleration_rps2: 1.80

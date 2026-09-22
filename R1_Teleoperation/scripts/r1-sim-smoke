@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Integration smoke test for the local, localhost-only Gazebo scenario.  This
+# script never opens a Unitree transport and hard-codes hardware_enabled=false.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WS_DIR="${PROJECT_DIR}/ros2_ws"
+LEGACY_WS_SETUP="${R1_LEGACY_WS_SETUP:-${PROJECT_DIR}/../Legacy_Robotics/robotics/ros2_ws/install/setup.bash}"
+DOMAIN_ID="${R1_SIM_SMOKE_DOMAIN_ID:-79}"
+GAZEBO_PORT="${R1_SIM_SMOKE_GAZEBO_PORT:-11349}"
+START_TIMEOUT="${R1_SIM_SMOKE_START_TIMEOUT_SEC:-30}"
+
+die() {
+  echo "[FAIL] $*" >&2
+  exit 1
+}
+
+[[ -f /opt/ros/humble/setup.bash ]] || die 'ROS 2 Humble setup.bash is missing'
+[[ -f "${LEGACY_WS_SETUP}" ]] || die "R1 description workspace not found: ${LEGACY_WS_SETUP}"
+[[ -f "${WS_DIR}/install/setup.bash" ]] || die "ROS workspace is not built: ${WS_DIR}/install/setup.bash"
+command -v setsid >/dev/null 2>&1 || die 'setsid is required'
+command -v timeout >/dev/null 2>&1 || die 'timeout is required'
+
+if [[ ! "${DOMAIN_ID}" =~ ^[0-9]+$ ]] || (( DOMAIN_ID > 232 )); then
+  die 'R1_SIM_SMOKE_DOMAIN_ID must be an integer from 0 to 232'
+fi
+if [[ ! "${GAZEBO_PORT}" =~ ^[0-9]+$ ]] || (( GAZEBO_PORT < 1024 || GAZEBO_PORT > 65535 )); then
+  die 'R1_SIM_SMOKE_GAZEBO_PORT must be an integer from 1024 to 65535'
+fi
+if [[ ! "${START_TIMEOUT}" =~ ^[1-9][0-9]*$ ]]; then
+  die 'R1_SIM_SMOKE_START_TIMEOUT_SEC must be a positive integer'
+fi
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${LEGACY_WS_SETUP}"
+source "${WS_DIR}/install/setup.bash"
+set -u
+
+export ROS_DOMAIN_ID="${DOMAIN_ID}"
+export ROS_LOCALHOST_ONLY=1
+export GAZEBO_MASTER_URI="http://127.0.0.1:${GAZEBO_PORT}"
+
+SMOKE_TMP_DIR="$(mktemp -d -t r1-sim-smoke.XXXXXX)"
+LOG_DIR="${PROJECT_DIR}/logs/sim"
+mkdir -p "${LOG_DIR}"
+LOG_FILE="${LOG_DIR}/smoke-$(date +%Y%m%d-%H%M%S).log"
+CALIBRATION_FILE="${SMOKE_TMP_DIR}/body-calibration.json"
+LAUNCH_PID=''
+BASE_GAZEBO_PIDS=()
+for _gazebo_binary in gazebo gzserver gzclient; do
+  while IFS= read -r _gazebo_pid; do
+    [[ -n "${_gazebo_pid}" ]] && BASE_GAZEBO_PIDS+=("${_gazebo_pid}")
+  done < <(pgrep -x "${_gazebo_binary}" || true)
+done
+
+is_base_gazebo_pid() {
+  local candidate="$1"
+  local baseline
+  for baseline in "${BASE_GAZEBO_PIDS[@]}"; do
+    [[ "${candidate}" == "${baseline}" ]] && return 0
+  done
+  return 1
+}
+
+cleanup_orphaned_gazebo() {
+  local binary pid
+  for binary in gazebo gzserver gzclient; do
+    while IFS= read -r pid; do
+      [[ -n "${pid}" ]] || continue
+      if ! is_base_gazebo_pid "${pid}"; then
+        kill -INT "${pid}" 2>/dev/null || true
+      fi
+    done < <(pgrep -x "${binary}" || true)
+  done
+  # Give Gazebo a moment to leave its own process group, then use TERM only
+  # for a process that was created by this test and ignored the safe stop.
+  sleep 0.5
+  for binary in gazebo gzserver gzclient; do
+    while IFS= read -r pid; do
+      [[ -n "${pid}" ]] || continue
+      if ! is_base_gazebo_pid "${pid}"; then
+        kill -TERM "${pid}" 2>/dev/null || true
+      fi
+    done < <(pgrep -x "${binary}" || true)
+  done
+}
+
+cleanup() {
+  local status=$?
+  trap - INT TERM EXIT
+  if [[ -n "${LAUNCH_PID}" ]] && kill -0 "${LAUNCH_PID}" 2>/dev/null; then
+    kill -INT -- "-${LAUNCH_PID}" 2>/dev/null || true
+    for _ in {1..20}; do
+      kill -0 "${LAUNCH_PID}" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -TERM -- "-${LAUNCH_PID}" 2>/dev/null || true
+    wait "${LAUNCH_PID}" 2>/dev/null || true
+  fi
+  cleanup_orphaned_gazebo
+  rm -rf -- "${SMOKE_TMP_DIR}"
+  exit "${status}"
+}
+trap cleanup INT TERM EXIT
+
+echo "R1 simulation smoke test: domain=${DOMAIN_ID}, gazebo=${GAZEBO_MASTER_URI}"
+echo "Log: ${LOG_FILE}"
+
+setsid ros2 launch r1_telepresence_sim telepresence_sim.launch.py \
+  display:=false \
+  hardware_enabled:=false \
+  headset_relative_enabled:=true \
+  calibration_file:="${CALIBRATION_FILE}" \
+  >"${LOG_FILE}" 2>&1 &
+LAUNCH_PID=$!
+
+deadline=$((SECONDS + START_TIMEOUT))
+wait_for_log() {
+  local pattern="$1"
+  while (( SECONDS < deadline )); do
+    if sed -r 's/\x1B\[[0-9;]*[[:alpha:]]//g' "${LOG_FILE}" \
+      | grep -Fq "${pattern}"; then
+      echo "[OK] ${pattern}"
+      return 0
+    fi
+    if ! kill -0 "${LAUNCH_PID}" 2>/dev/null; then
+      tail -80 "${LOG_FILE}" >&2 || true
+      die "simulation launch exited while waiting for: ${pattern}"
+    fi
+    sleep 0.5
+  done
+  tail -80 "${LOG_FILE}" >&2 || true
+  die "timed out waiting for: ${pattern}"
+}
+
+# The node's startup line is written after URDF/IK initialization and is more
+# deterministic than ROS graph discovery while Gazebo is still spawning.
+wait_for_log 'R1 kinematics control started in safe state'
+wait_for_log 'simulation whole-body planner ready'
+
+# Wait for all spawners to finish.  Merely seeing /joint_states is not enough:
+# Gazebo may have created the topic while controller_manager is still loading.
+wait_for_log 'Configured and activated arm_trajectory_controller'
+wait_for_log 'Configured and activated joint_state_broadcaster'
+wait_for_log 'Configured and activated waist_hold_controller'
+wait_for_log 'Configured and activated leg_trajectory_controller'
+
+topics="$(ros2 topic list --no-daemon --spin-time 1.0 2>/dev/null)"
+for topic in \
+  /r1/sim/cmd_vel \
+  /joint_states \
+  /vr/teleop/active \
+  /leg_trajectory_controller/joint_trajectory \
+  /leg_trajectory_controller/controller_state \
+  /r1/telepresence/leg_targets \
+  /r1_kinematics_control/debug/arm_trajectory \
+  /r1/telepresence/whole_body_targets; do
+  if grep -Fxq "${topic}" <<<"${topics}"; then
+    echo "[OK] topic ${topic}"
+  else
+    die "required topic is missing: ${topic}"
+  fi
+done
+
+param=''
+for _ in {1..20}; do
+  param="$(ros2 param get --no-daemon --spin-time 0.5 \
+    /r1_kinematics_control headset_relative_enabled 2>&1 || true)"
+  if grep -Eqi 'true' <<<"${param}"; then
+    break
+  fi
+  # DDS graph discovery can lag behind the controller-spawner log by a few
+  # hundred milliseconds on a busy desktop; do not turn that race into a
+  # false-negative smoke failure.
+  sleep 0.25
+done
+if grep -Eqi 'true' <<<"${param}"; then
+  echo '[OK] headset-relative mode is enabled'
+else
+  die "headset-relative mode is not enabled: ${param}"
+fi
+
+sample="$(timeout 5 ros2 topic echo --once /r1/sim/cmd_vel 2>/dev/null || true)"
+[[ -n "${sample}" ]] || die 'no /r1/sim/cmd_vel sample received from the deadman gate'
+linear_x="$(awk '
+  /^linear:/ {in_linear=1; next}
+  in_linear && /^  x:/ {print $2; exit}
+' <<<"${sample}")"
+[[ -n "${linear_x}" ]] || die 'could not parse linear.x from /r1/sim/cmd_vel sample'
+if awk -v value="${linear_x}" 'BEGIN {exit !(value + 0 == 0)}'; then
+  echo "[OK] deadman-safe /r1/sim/cmd_vel sample has linear.x=${linear_x}"
+else
+  die "startup /r1/sim/cmd_vel was not zero: linear.x=${linear_x}"
+fi
+
+# Exercise the complete simulation-only leg path.  A single Python ROS node
+# publishes the deadman and stick command with deterministic timing, avoiding
+# CLI discovery races while preserving the same topics as the real bridge.
+python3 - <<'PY'
+import math
+import time
+
+import rclpy
+from geometry_msgs.msg import TwistStamped
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool
+
+rclpy.init()
+node = rclpy.create_node('r1_sim_smoke_driver')
+qos = QoSProfile(
+    depth=1,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.VOLATILE,
+)
+active_pub = node.create_publisher(Bool, '/vr/teleop/active', qos)
+cmd_pub = node.create_publisher(TwistStamped, '/vr/cmd_vel', qos)
+active_targets = []
+released_targets = []
+whole_body_targets = []
+released = False
+
+def on_targets(message):
+    values = [float(value) for value in message.position]
+    if not released:
+        active_targets.append(values)
+    else:
+        released_targets.append(values)
+
+node.create_subscription(JointState, '/r1/telepresence/leg_targets', on_targets, qos)
+
+def on_whole_body(message):
+    values = [float(value) for value in message.position]
+    if not released:
+        whole_body_targets.append(values)
+
+node.create_subscription(
+    JointState, '/r1/telepresence/whole_body_targets', on_whole_body, qos
+)
+start = time.monotonic()
+discovery_deadline = start + 2.0
+while time.monotonic() < discovery_deadline:
+    if node.count_subscribers('/vr/cmd_vel') and node.count_subscribers('/r1/telepresence/leg_targets'):
+        break
+    rclpy.spin_once(node, timeout_sec=0.05)
+
+command_deadline = time.monotonic() + 1.8
+while time.monotonic() < command_deadline:
+    active_pub.publish(Bool(data=True))
+    command = TwistStamped()
+    command.twist.linear.x = 0.30
+    cmd_pub.publish(command)
+    rclpy.spin_once(node, timeout_sec=0.01)
+
+released = True
+active_pub.publish(Bool(data=False))
+release_deadline = time.monotonic() + 0.5
+while time.monotonic() < release_deadline:
+    rclpy.spin_once(node, timeout_sec=0.01)
+
+node.destroy_node()
+rclpy.shutdown()
+
+if not any(any(math.fabs(value) > 0.01 for value in sample) for sample in active_targets):
+    raise SystemExit('active stick command did not produce a leg target')
+print('[OK] active stick command produced non-zero leg targets')
+if not any(
+    any(math.fabs(value) > 0.01 for value in sample)
+    for sample in whole_body_targets
+):
+    raise SystemExit('active stick command did not produce a whole-body target')
+print('[OK] active stick command produced a whole-body target')
+if not released_targets or not all(
+    math.fabs(value) < 1.0e-6 for sample in released_targets for value in sample
+):
+    raise SystemExit('deadman release did not return neutral leg targets')
+print('[OK] deadman release returned leg targets to neutral')
+PY
+
+echo '[PASS] local simulation smoke test passed'

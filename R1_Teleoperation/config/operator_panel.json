@@ -1,0 +1,15 @@
+{
+  "project_dir": "/home/unitree/Unitree_Project/R1_Teleoperation",
+  "robot_ip": "192.168.123.161",
+  "pc2_ip": "192.168.123.164",
+  "robot_interface": "enxb4b024be59fe",
+  "laptop_robot_ip": "192.168.123.162",
+  "ros_domain_id": 89,
+  "vr_headset_ip": "",
+  "video_url": "http://192.168.8.9:8080/",
+  "logs_dir": "logs",
+  "dry_run": true,
+  "allow_live": false,
+  "video_profile": "low-latency",
+  "locomotion_profile": "slow-safe"
+}

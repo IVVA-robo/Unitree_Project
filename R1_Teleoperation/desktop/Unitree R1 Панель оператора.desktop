@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Unitree R1 Панель оператора
+Comment=Русская панель диагностики и управления Unitree R1
+Exec=/home/unitree/Unitree_Project/R1_Teleoperation/scripts/r1-operator-panel
+Path=/home/unitree/Unitree_Project/R1_Teleoperation
+Terminal=false
+Categories=Utility;
+Icon=/home/unitree/Unitree_Project/R1_Teleoperation/assets/icons/unitree-r1-robot.png
+StartupNotify=true

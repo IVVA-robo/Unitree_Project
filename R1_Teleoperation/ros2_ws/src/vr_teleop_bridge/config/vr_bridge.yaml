@@ -1,0 +1,21 @@
+vr_teleop_bridge:
+  ros__parameters:
+    bind_address: "0.0.0.0"
+    udp_port: 9090
+    # Pico discovery probe/response. The bridge never receives robot commands
+    # on this port; it only advertises the current laptop UDP endpoint.
+    discovery_port: 9091
+    # Set this to the Pico's fixed IP after initial tests, e.g. "192.168.8.120".
+    allowed_source_ip: ""
+    tracking_frame: "vr_tracking"
+    packet_timeout_sec: 0.25
+    deadzone: 0.15
+    # Conservative intent limits for initial simulation/testing.
+    max_forward_mps: 0.35
+    max_lateral_mps: 0.25
+    max_yaw_rps: 0.60
+    forward_sign: 1.0
+    lateral_sign: -1.0
+    yaw_sign: -1.0
+    max_position_m: 5.0
+    max_datagram_bytes: 4096

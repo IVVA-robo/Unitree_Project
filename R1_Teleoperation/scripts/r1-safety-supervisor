@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Start only the local software safety latch.  This process has no Unitree SDK
+# dependency and cannot send an actuator command.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_SETUP="${PROJECT_DIR}/ros2_ws/install/setup.bash"
+if [[ ! -f "${WORKSPACE_SETUP}" ]]; then
+  WORKSPACE_SETUP="${PROJECT_DIR}/install/setup.bash"
+fi
+
+die() {
+  echo "[FAIL] $*" >&2
+  exit 1
+}
+
+[[ -f /opt/ros/humble/setup.bash ]] || die 'ROS 2 Humble setup.bash is missing'
+[[ -f "${WORKSPACE_SETUP}" ]] || die "workspace is not built: ${WORKSPACE_SETUP}"
+
+DOMAIN_ID="${R1_LIVE_ROS_DOMAIN_ID:-88}"
+[[ "${DOMAIN_ID}" =~ ^[0-9]+$ ]] && (( 10#${DOMAIN_ID} <= 232 )) || \
+  die 'R1_LIVE_ROS_DOMAIN_ID must be an integer from 0 to 232'
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${WORKSPACE_SETUP}"
+# shellcheck source=r1-physical-ros-env
+source "${SCRIPT_DIR}/r1-physical-ros-env"
+set -u
+
+export ROS_DOMAIN_ID="$((10#${DOMAIN_ID}))"
+export ROS_LOCALHOST_ONLY=1
+echo "R1 local safety supervisor: ROS domain ${ROS_DOMAIN_ID}; no hardware writer is started."
+exec ros2 launch r1_teleop_safety r1_safety_supervisor.launch.py "$@"

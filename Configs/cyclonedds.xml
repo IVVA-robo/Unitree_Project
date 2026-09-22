@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<CycloneDDS>
+    <Domain>
+        <General>
+            <Interfaces>
+                <NetworkInterface name="enxb4b024be59fe"/>
+            </Interfaces>
+        </General>
+    </Domain>
+</CycloneDDS>

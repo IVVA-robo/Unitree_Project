@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Safe Gazebo launcher: it is intentionally isolated from the robot-facing DDS
+# network and never accepts a hardware-enabled override.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WS_DIR="${PROJECT_DIR}/ros2_ws"
+LEGACY_WS_SETUP="${R1_LEGACY_WS_SETUP:-${PROJECT_DIR}/../Legacy_Robotics/robotics/ros2_ws/install/setup.bash}"
+
+if [[ -f /opt/ros/humble/setup.bash ]]; then
+  # ROS setup scripts are not nounset-clean.
+  set +u
+  source /opt/ros/humble/setup.bash
+  set -u
+fi
+if [[ -f "${LEGACY_WS_SETUP}" ]]; then
+  # The R1 description/URDF is maintained in the legacy workspace.  Source it
+  # before this workspace so the simulation launch can resolve the package.
+  set +u
+  source "${LEGACY_WS_SETUP}"
+  set -u
+else
+  echo "R1 description workspace not found: ${LEGACY_WS_SETUP}" >&2
+  echo "Set R1_LEGACY_WS_SETUP to an installed ROS setup.bash if needed." >&2
+  exit 1
+fi
+if [[ -f "${WS_DIR}/install/setup.bash" ]]; then
+  set +u
+  source "${WS_DIR}/install/setup.bash"
+  set -u
+else
+  echo "ROS workspace is not built: ${WS_DIR}/install/setup.bash" >&2
+  echo "Run: cd ${WS_DIR} && colcon build --symlink-install" >&2
+  exit 1
+fi
+
+export ROS_DOMAIN_ID="${R1_SIM_DOMAIN_ID:-77}"
+export ROS_LOCALHOST_ONLY=1
+export GAZEBO_MASTER_URI="http://127.0.0.1:${R1_SIM_GAZEBO_PORT:-11347}"
+
+DISPLAY_MODE="${R1_SIM_DISPLAY:-false}"
+HEADSET_RELATIVE="${R1_SIM_HEADSET_RELATIVE:-true}"
+MODEL_Z="${R1_SIM_MODEL_Z:-0.25}"
+CALIBRATION_FILE="${R1_SIM_CALIBRATION_FILE:-${HOME}/.ros/r1_telepresence_sim_body_calibration.json}"
+BASE_GAZEBO_PIDS=()
+for _gazebo_binary in gazebo gzserver gzclient; do
+  while IFS= read -r _gazebo_pid; do
+    [[ -n "${_gazebo_pid}" ]] && BASE_GAZEBO_PIDS+=("${_gazebo_pid}")
+  done < <(pgrep -x "${_gazebo_binary}" || true)
+done
+
+is_base_gazebo_pid() {
+  local candidate="$1"
+  local baseline
+  for baseline in "${BASE_GAZEBO_PIDS[@]}"; do
+    [[ "${candidate}" == "${baseline}" ]] && return 0
+  done
+  return 1
+}
+
+cleanup_orphaned_gazebo() {
+  local binary pid
+  for binary in gazebo gzserver gzclient; do
+    while IFS= read -r pid; do
+      [[ -n "${pid}" ]] || continue
+      if ! is_base_gazebo_pid "${pid}"; then
+        kill -INT "${pid}" 2>/dev/null || true
+      fi
+    done < <(pgrep -x "${binary}" || true)
+  done
+  sleep 0.5
+  for binary in gazebo gzserver gzclient; do
+    while IFS= read -r pid; do
+      [[ -n "${pid}" ]] || continue
+      if ! is_base_gazebo_pid "${pid}"; then
+        kill -TERM "${pid}" 2>/dev/null || true
+      fi
+    done < <(pgrep -x "${binary}" || true)
+  done
+}
+
+case "${DISPLAY_MODE}" in
+  true|false) ;;
+  *) echo "R1_SIM_DISPLAY must be true or false" >&2; exit 2 ;;
+esac
+case "${HEADSET_RELATIVE}" in
+  true|false) ;;
+  *) echo "R1_SIM_HEADSET_RELATIVE must be true or false" >&2; exit 2 ;;
+esac
+
+echo "R1 simulation: domain=${ROS_DOMAIN_ID}, gazebo=${GAZEBO_MASTER_URI}, "\
+  "display=${DISPLAY_MODE}, hardware_enabled=false"
+
+# Gazebo Classic starts gzserver/gzclient below a helper process.  Put the
+# complete launch tree into its own process group so Ctrl-C cannot leave those
+# local children behind.  The group contains no robot-facing process.
+setsid ros2 launch r1_telepresence_sim telepresence_sim.launch.py \
+  display:="${DISPLAY_MODE}" \
+  hardware_enabled:=false \
+  model_z:="${MODEL_Z}" \
+  headset_relative_enabled:="${HEADSET_RELATIVE}" \
+  calibration_file:="${CALIBRATION_FILE}" &
+LAUNCH_PID=$!
+
+cleanup() {
+  local status=$?
+  trap - INT TERM EXIT
+  if kill -0 "${LAUNCH_PID}" 2>/dev/null; then
+    kill -INT -- "-${LAUNCH_PID}" 2>/dev/null || true
+    sleep 1
+    kill -TERM -- "-${LAUNCH_PID}" 2>/dev/null || true
+    wait "${LAUNCH_PID}" 2>/dev/null || true
+  fi
+  cleanup_orphaned_gazebo
+  exit "${status}"
+}
+
+trap cleanup INT TERM EXIT
+wait "${LAUNCH_PID}"

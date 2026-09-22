@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+#
+# Explicit live-intent gate. This validates the complete commissioning
+# acknowledgement, link, address, and read-only feedback contract. Its inert
+# SDK ABI probe can construct ArmSdk/LocoClient only inside a private
+# loopback-only namespace with no route to the robot. It never launches the
+# live writer, calls StandUp, or sends a movement command.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+die() {
+  echo "[BLOCKED] $*" >&2
+  echo 'No Unitree command was sent.' >&2
+  exit 2
+}
+
+if (( $# != 0 )); then
+  echo 'Usage: r1-robot-live-arm-check' >&2
+  echo 'This is a fail-closed acknowledgement check; it accepts no launch arguments.' >&2
+  exit 2
+fi
+
+require_exact() {
+  local name=$1 expected=$2 value=${!1-}
+  [[ "${value}" == "${expected}" ]] || die "${name}=${expected} is required"
+}
+
+require_exact ROBOT_DRY_RUN 0
+require_exact ROBOT_ENABLE_ACTUATION 1
+require_exact ROBOT_CONFIRM_OFF_CHARGER 1
+require_exact ROBOT_CONFIRM_CLEAR_AREA 1
+require_exact ROBOT_CONFIRM_ESTOP_READY 1
+require_exact ROBOT_CONFIRM_COMMISSIONING 1
+
+TOKEN=${ROBOT_COMMISSIONING_TOKEN-}
+[[ ${#TOKEN} -ge 16 ]] \
+  || die 'ROBOT_COMMISSIONING_TOKEN must contain at least 16 characters'
+
+VR_SOURCE_IP=${ROBOT_VR_SOURCE_IP-}
+python3 - "${VR_SOURCE_IP}" <<'PY' || exit 2
+import ipaddress
+import sys
+
+try:
+    address = ipaddress.ip_address(sys.argv[1])
+except ValueError:
+    print('[BLOCKED] ROBOT_VR_SOURCE_IP must be a valid fixed IPv4 address', file=sys.stderr)
+    print('No Unitree command was sent.', file=sys.stderr)
+    raise SystemExit(2)
+private_v4 = tuple(ipaddress.ip_network(prefix) for prefix in (
+    '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
+if address.version != 4 or not any(address in subnet for subnet in private_v4) \
+        or address.is_loopback or address.is_multicast or address.is_unspecified:
+    print('[BLOCKED] ROBOT_VR_SOURCE_IP must be a private unicast IPv4 address', file=sys.stderr)
+    print('No Unitree command was sent.', file=sys.stderr)
+    raise SystemExit(2)
+PY
+
+INTERFACE=${R1_LIVE_NETWORK_INTERFACE:-enxb4b024be59fe}
+[[ "${INTERFACE}" =~ ^[[:alnum:]_.-]{1,15}$ ]] \
+  || die 'invalid R1_LIVE_NETWORK_INTERFACE'
+ip link show dev "${INTERFACE}" >/dev/null 2>&1 \
+  || die "network interface is absent: ${INTERFACE}"
+[[ "$(cat "/sys/class/net/${INTERFACE}/carrier" 2>/dev/null || printf 0)" == 1 ]] \
+  || die "${INTERFACE} has NO-CARRIER; connect R1 control/LAN RJ45"
+
+DOMAIN_ID=${R1_LIVE_ROS_DOMAIN_ID:-88}
+[[ "${DOMAIN_ID}" =~ ^[0-9]+$ ]] && ((10#${DOMAIN_ID} <= 232)) \
+  || die 'R1_LIVE_ROS_DOMAIN_ID must be 0..232'
+
+if pgrep -af 'r1_live_writer_node' >/dev/null 2>&1; then
+  die 'a live-writer process already exists; stop and review that session first'
+fi
+
+echo 'R1 LIVE ARM CHECK (READ-ONLY)'
+echo "  interface=${INTERFACE} domain=$((10#${DOMAIN_ID})) fixed_vr_source=${VR_SOURCE_IP}"
+echo '  all acknowledgement values are present; validating fresh read-only LowState.'
+
+R1_SDK_NETWORK_INTERFACE="${INTERFACE}" \
+R1_SDK_ROS_DOMAIN_ID="$((10#${DOMAIN_ID}))" \
+  "${SCRIPT_DIR}/r1-sdk-preflight"
+
+echo '[PASS] live acknowledgement and read-only feedback gates passed.'
+echo 'No live writer, prepare, stand, or motion command was started.'
+echo 'The inert SDK client probe ran only inside a private loopback namespace.'

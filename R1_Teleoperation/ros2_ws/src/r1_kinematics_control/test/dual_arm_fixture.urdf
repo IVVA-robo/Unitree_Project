@@ -1,0 +1,52 @@
+<?xml version="1.0"?>
+<robot name="dual_arm_fixture">
+  <link name="torso_link"/>
+  <link name="left_shoulder_link"/>
+  <link name="left_upper_arm_link"/>
+  <link name="left_forearm_link"/>
+  <link name="left_hand_link"/>
+  <link name="right_shoulder_link"/>
+  <link name="right_upper_arm_link"/>
+  <link name="right_forearm_link"/>
+  <link name="right_hand_link"/>
+
+  <joint name="left_shoulder_yaw" type="revolute">
+    <parent link="torso_link"/><child link="left_shoulder_link"/>
+    <origin xyz="0 0.20 0.40"/><axis xyz="0 0 1"/>
+    <limit lower="-2.5" upper="2.5" effort="20" velocity="2"/>
+  </joint>
+  <joint name="left_shoulder_pitch" type="revolute">
+    <parent link="left_shoulder_link"/><child link="left_upper_arm_link"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.5" upper="2.5" effort="20" velocity="2"/>
+  </joint>
+  <joint name="left_elbow_pitch" type="revolute">
+    <parent link="left_upper_arm_link"/><child link="left_forearm_link"/>
+    <origin xyz="0.30 0 0"/><axis xyz="0 1 0"/>
+    <limit lower="-2.5" upper="2.5" effort="20" velocity="2"/>
+  </joint>
+  <joint name="left_tool" type="fixed">
+    <parent link="left_forearm_link"/><child link="left_hand_link"/>
+    <origin xyz="0.30 0 0"/>
+  </joint>
+
+  <joint name="right_shoulder_yaw" type="revolute">
+    <parent link="torso_link"/><child link="right_shoulder_link"/>
+    <origin xyz="0 -0.20 0.40"/><axis xyz="0 0 1"/>
+    <limit lower="-2.5" upper="2.5" effort="20" velocity="2"/>
+  </joint>
+  <joint name="right_shoulder_pitch" type="revolute">
+    <parent link="right_shoulder_link"/><child link="right_upper_arm_link"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.5" upper="2.5" effort="20" velocity="2"/>
+  </joint>
+  <joint name="right_elbow_pitch" type="revolute">
+    <parent link="right_upper_arm_link"/><child link="right_forearm_link"/>
+    <origin xyz="0.30 0 0"/><axis xyz="0 1 0"/>
+    <limit lower="-2.5" upper="2.5" effort="20" velocity="2"/>
+  </joint>
+  <joint name="right_tool" type="fixed">
+    <parent link="right_forearm_link"/><child link="right_hand_link"/>
+    <origin xyz="0.30 0 0"/>
+  </joint>
+</robot>

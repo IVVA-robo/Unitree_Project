@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#05080b">
+  <meta name="color-scheme" content="dark">
+  <title>R1 Robot POV</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main id="app" class="app signal-lost" data-transport="connecting">
+    <section id="viewport" class="viewport" aria-label="Видео с камер робота">
+      <canvas id="displayCanvas"></canvas>
+      <video id="webrtcVideo" autoplay muted playsinline disablepictureinpicture></video>
+      <img id="mjpegImage" alt="" aria-hidden="true">
+
+      <div class="vignette" aria-hidden="true"></div>
+      <div class="scanline" aria-hidden="true"></div>
+
+      <header class="topbar chrome">
+        <div class="brand" aria-label="R1 Robot POV">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" role="img">
+              <path d="M5 10.5 16 4l11 6.5v11L16 28 5 21.5z"></path>
+              <circle cx="12" cy="16" r="2.2"></circle>
+              <circle cx="20" cy="16" r="2.2"></circle>
+            </svg>
+          </span>
+          <span class="brand-copy">
+            <strong>R1</strong>
+            <small>ROBOT POV</small>
+          </span>
+        </div>
+
+        <div id="connectionPill" class="connection-pill is-connecting" role="status">
+          <span class="pulse-dot" aria-hidden="true"></span>
+          <span id="connectionText">ПОДКЛЮЧЕНИЕ</span>
+        </div>
+
+        <button id="qrButton" class="icon-button" type="button" aria-label="Показать QR-код подключения" title="Подключение">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 4h6v6H4zm2 2v2h2V6zm8-2h6v6h-6zm2 2v2h2V6zM4 14h6v6H4zm2 2v2h2v-2zm8-2h2v2h-2zm4 0h2v4h-2zm-4 4h4v2h-4zm6 2h-2v-2h2z"></path>
+          </svg>
+        </button>
+      </header>
+
+      <aside class="telemetry chrome" aria-label="Состояние видеопотока">
+        <div class="telemetry-item">
+          <span>ИСТОЧНИК</span>
+          <strong id="sourceValue">—</strong>
+        </div>
+        <div class="telemetry-item">
+          <span>РАЗРЕШЕНИЕ</span>
+          <strong id="resolutionValue">—</strong>
+        </div>
+        <div class="telemetry-item">
+          <span>FPS</span>
+          <strong id="fpsValue">—</strong>
+        </div>
+        <div class="telemetry-item">
+          <span>ЗАДЕРЖКА</span>
+          <strong id="latencyValue">—</strong>
+        </div>
+        <div class="telemetry-item">
+          <span>СЕТЬ</span>
+          <strong id="networkValue">—</strong>
+        </div>
+        <div class="telemetry-item">
+          <span>ПОВТОРЫ</span>
+          <strong id="reconnectValue">0</strong>
+        </div>
+        <div class="telemetry-item">
+          <span>DROP</span>
+          <strong id="droppedValue">0</strong>
+        </div>
+        <div class="telemetry-item">
+          <span>РЕЖИМ</span>
+          <strong id="modeValue">—</strong>
+        </div>
+        <div class="telemetry-item">
+          <span>WEBXR</span>
+          <strong id="webxrValue">—</strong>
+        </div>
+      </aside>
+
+      <div id="noSignal" class="no-signal" role="status" aria-live="polite">
+        <div class="signal-icon" aria-hidden="true">
+          <svg viewBox="0 0 48 48">
+            <path d="M8 14.5h32v22H8z"></path>
+            <path d="m16 8 8 6.5L32 8"></path>
+            <path d="M3.5 42.5 44.5 1.5"></path>
+          </svg>
+        </div>
+        <h1 id="noSignalTitle">Подключение к камере</h1>
+        <p id="noSignalDetail">Проверяем локальный видеопоток…</p>
+        <button id="retryButton" class="secondary-button" type="button">Повторить сейчас</button>
+      </div>
+
+      <div class="bottom-stack chrome">
+        <div class="mode-hint" id="modeHint">WebRTC в локальной сети</div>
+        <nav class="control-dock" aria-label="Настройки просмотра">
+          <label class="select-control">
+            <span>КАЧЕСТВО</span>
+            <select id="profileSelect" aria-label="Профиль качества">
+              <option value="high">High</option>
+              <option value="balanced" selected>Balanced</option>
+              <option value="low-latency">Low latency</option>
+              <option value="bad-wifi">Bad Wi-Fi</option>
+            </select>
+          </label>
+
+          <span class="dock-divider" aria-hidden="true"></span>
+
+          <label class="select-control">
+            <span>ИЗОБРАЖЕНИЕ</span>
+            <select id="layoutSelect" aria-label="Режим изображения">
+              <option value="auto" selected>Auto</option>
+              <option value="mono">Mono</option>
+              <option value="sbs">Stereo SBS</option>
+              <option value="tb">Stereo top-bottom</option>
+            </select>
+          </label>
+
+          <button id="swapButton" class="dock-button" type="button" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7-4 4 4 4m-4-4h14M17 17l4-4-4-4m4 4H7"></path></svg>
+            <span>Поменять глаза</span>
+          </button>
+
+          <button id="xrButton" class="dock-button accent" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8.5A2.5 2.5 0 0 1 5.5 6h13A2.5 2.5 0 0 1 21 8.5v7a2.5 2.5 0 0 1-2.5 2.5h-3.2l-2-3h-2.6l-2 3H5.5A2.5 2.5 0 0 1 3 15.5z"></path><circle cx="8" cy="11.5" r="1.7"></circle><circle cx="16" cy="11.5" r="1.7"></circle></svg>
+            <span>VR</span>
+          </button>
+
+          <button id="fullscreenButton" class="dock-button" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5m13-5h5v5M8 21H3v-5m13 5h5v-5"></path></svg>
+            <span>На весь экран</span>
+          </button>
+
+          <button id="overlayButton" class="dock-button" type="button" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM7 9h10M7 13h6"></path></svg>
+            <span>Оверлей</span>
+          </button>
+        </nav>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="qrDialog" class="qr-dialog">
+    <button id="qrCloseButton" class="dialog-close" type="button" aria-label="Закрыть">×</button>
+    <div class="qr-eyebrow">ЛОКАЛЬНОЕ ПОДКЛЮЧЕНИЕ</div>
+    <h2>Откройте Robot POV</h2>
+    <p>Подключите устройство к тому же Wi-Fi и отсканируйте код.</p>
+    <div class="qr-frame"><img src="/qr.png" alt="QR-код адреса Robot POV"></div>
+    <code id="viewerUrl"></code>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <canvas id="xrCanvas" class="xr-canvas" aria-hidden="true"></canvas>
+  <script src="/app.js" defer></script>
+</body>
+</html>

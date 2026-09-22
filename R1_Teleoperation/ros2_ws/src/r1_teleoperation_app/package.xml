@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>r1_teleoperation_app</name>
+  <version>0.1.0</version>
+  <description>Single safe launch entry point for R1 VR teleoperation simulation.</description>
+  <maintainer email="unitree@example.com">unitree</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rmw_fastrtps_cpp</exec_depend>
+  <exec_depend>r1_kinematics_control</exec_depend>
+  <exec_depend>r1_hardware_adapter</exec_depend>
+  <exec_depend>r1_live_writer</exec_depend>
+  <exec_depend>r1_robot_pov</exec_depend>
+  <exec_depend>r1_teleop_safety</exec_depend>
+  <exec_depend>r1_sdk_transport</exec_depend>
+  <exec_depend>r1_telepresence_sim</exec_depend>
+  <exec_depend>vr_teleop_bridge</exec_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Start the separate fail-closed physical head ownership micro-probe graph.
+# Merely starting it does not release kill, call StandUp, claim ArmSdk, or move
+# the head. Full physical recenter remains suspended.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ $# -eq 0 ]] || {
+  echo 'Usage: r1-head-ownership-probe-session' >&2
+  exit 2
+}
+exec "${SCRIPT_DIR}/r1-live-session" head-probe

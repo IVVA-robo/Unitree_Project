@@ -1,0 +1,28 @@
+=== ОСНОВНЫЕ КОМАНДЫ ДЛЯ UNITREE R1 ===
+
+1. Переход в рабочую область ROS 2:
+cd /home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws
+
+2. Сборка пакета с описанием робота:
+colcon build --packages-select unitree_r1_description
+
+3. Обновление переменных окружения (привязка путей):
+source install/setup.bash
+
+4. Запуск чистой симуляции через launch-файл:
+ros2 launch unitree_r1_description vr_demo.launch.py
+
+5. Запуск скрипта-оркестратора (мозг: датчики, моторы, VR-мост):
+/home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/start_vr_brain.sh
+
+6. Запуск эмулятора VR-контроллеров (тестовые плавные движения):
+python3 /home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/vr_sim.py
+
+7. Запуск основного скрипта VR-моста (приемник UDP-пакетов):
+python3 /home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/vr_bridge.py
+
+8. Принудительная очистка/остановка всех процессов симулятора и ROS 2:
+killall -9 gzserver gzclient rviz2 robot_state_publisher joint_state_publisher joint_state_publisher_gui
+pkill -f vr_bridge.py
+pkill -f vr_sim.py
+pkill -f joint_state_publisher

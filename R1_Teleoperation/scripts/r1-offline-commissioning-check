@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Complete software-only gate for the next physical commissioning review.
+# It deliberately omits r1-sdk-preflight and every physical/live launcher.
+# The complete build/test/smoke process runs inside a verified private network
+# namespace containing only loopback.  This is intentionally broader than the
+# ABI probe's own namespace: a future test regression still cannot reach a
+# robot-facing Ethernet or Wi-Fi interface.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SCRIPT_PATH="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
+INTERNAL_ARGUMENT='--inside-r1-offline-private-network'
+
+fail() {
+  printf '[BLOCKED] %s\n' "$*" >&2
+  printf 'No robot-facing process or command was started.\n' >&2
+  exit 2
+}
+
+command -v make >/dev/null 2>&1 || fail 'make is required'
+command -v ip >/dev/null 2>&1 || fail 'iproute2 is required'
+command -v readlink >/dev/null 2>&1 || fail 'readlink is required'
+command -v readelf >/dev/null 2>&1 || fail 'binutils/readelf is required'
+command -v rg >/dev/null 2>&1 || fail 'ripgrep is required'
+command -v unshare >/dev/null 2>&1 || fail 'unshare is required'
+
+# The public entry point cannot execute a single test on the host network.
+# Retain the caller namespace descriptor so the internal marker cannot be
+# spoofed by invoking this script with the private argument manually.
+if [[ "${1:-}" != "${INTERNAL_ARGUMENT}" ]]; then
+  [[ $# -eq 0 ]] || fail 'usage: r1-offline-commissioning-check'
+  exec 9< /proc/self/ns/net || fail 'could not retain caller network namespace identity'
+  exec unshare --user --map-root-user --net -- "${SCRIPT_PATH}" "${INTERNAL_ARGUMENT}"
+fi
+shift
+[[ $# -eq 0 ]] || fail 'unexpected argument after private-network entry'
+
+current_network_namespace="$(readlink -- /proc/self/ns/net)" || \
+  fail 'could not identify current network namespace'
+caller_network_namespace="$(readlink -- /proc/self/fd/9)" || \
+  fail 'missing caller network namespace identity'
+[[ "${current_network_namespace}" == net:\[*\] ]] || \
+  fail 'invalid current network namespace identity'
+[[ "${caller_network_namespace}" == net:\[*\] ]] || \
+  fail 'invalid caller network namespace identity'
+[[ "${current_network_namespace}" != "${caller_network_namespace}" ]] || \
+  fail 'offline checks are not in a private network namespace'
+exec 9<&-
+
+ip link set dev lo up || fail 'could not bring up private loopback'
+non_loopback_interfaces="$(
+  ip -o link show | awk -F': ' \
+    '{name=$2; sub(/@.*/, "", name); if (name != "lo") print name}'
+)" || fail 'could not enumerate private network interfaces'
+[[ -z "${non_loopback_interfaces}" ]] || \
+  fail "private namespace exposes non-loopback interface(s): ${non_loopback_interfaces//$'\n'/, }"
+ip link show dev lo 2>/dev/null | grep -Eq '<[^>]*\bUP\b[^>]*>' || \
+  fail 'private loopback interface is not up'
+
+robot_processes() {
+  local processes
+  processes="$(ps -eo pid=,args= 2>/dev/null || true)"
+  printf '%s\n' "${processes}" | rg -i \
+    'r1_live_writer_node|r1_sdk_transport|r1_arm_sdk_traffic_observer|r1_sdk_abi_probe|r1_safety_supervisor|r1_arm_sdk_dds_example|r1_loco_client|ArmSdk|LocoClient|rt/(arm_sdk|lowcmd)|(^|[[:space:]])sport([[:space:]]|$)' \
+    || true
+}
+
+existing="$(robot_processes)"
+[[ -z ${existing} ]] || {
+  printf '%s\n' "${existing}" >&2
+  fail 'a robot-facing or SDK process already exists; stop and review it first'
+}
+
+# Defense in depth for any child command. The mock smoke also applies its own
+# closed environment and private network namespace.
+export ROBOT_DRY_RUN=1
+export ROBOT_ENABLE_ACTUATION=0
+export ROBOT_CONFIRM_OFF_CHARGER=0
+export ROBOT_CONFIRM_CLEAR_AREA=0
+export ROBOT_CONFIRM_ESTOP_READY=0
+export ROBOT_CONFIRM_COMMISSIONING=0
+export ROBOT_COMMISSIONING_TOKEN=
+export ROBOT_VR_SOURCE_IP=
+unset R1_PHYSICAL_SDK_SESSION
+
+requested_sdk_root="${R1_UNITREE_SDK_ROOT:-/home/unitree/Unitree_Project/Legacy_Robotics/robotics/unitree_sdk/unitree_sdk2}"
+[[ "${requested_sdk_root}" == /* ]] || fail 'R1_UNITREE_SDK_ROOT must be absolute'
+R1_UNITREE_SDK_ROOT="$(readlink -e -- "${requested_sdk_root}")" || \
+  fail "Unitree SDK root does not exist: ${requested_sdk_root}"
+[[ -d "${R1_UNITREE_SDK_ROOT}" ]] || \
+  fail "Unitree SDK root is not a directory: ${R1_UNITREE_SDK_ROOT}"
+export R1_UNITREE_SDK_ROOT
+case "$(uname -m)" in
+  x86_64|amd64) sdk_arch=x86_64 ;;
+  aarch64|arm64) sdk_arch=aarch64 ;;
+  *) fail "unsupported Unitree SDK architecture: $(uname -m)" ;;
+esac
+vendor_dds_directory="${R1_UNITREE_SDK_ROOT}/thirdparty/lib/${sdk_arch}"
+for library in libddsc.so.0 libddscxx.so.0; do
+  [[ -f "${vendor_dds_directory}/${library}" ]] || \
+    fail "Unitree DDS runtime is missing: ${vendor_dds_directory}/${library}"
+done
+
+audit_installed_sdk_paths() {
+  local package executable cache launch_file binary dynamic observer_binary observer_dynamic
+  for package in r1_sdk_transport r1_live_writer; do
+    case "${package}" in
+      r1_sdk_transport) executable=r1_sdk_transport ;;
+      r1_live_writer) executable=r1_live_writer_node ;;
+    esac
+    cache="${PROJECT_DIR}/ros2_ws/build/${package}/CMakeCache.txt"
+    binary="${PROJECT_DIR}/ros2_ws/install/${package}/lib/${package}/${executable}"
+    [[ -f "${cache}" ]] || fail "missing CMake cache after build: ${cache}"
+    grep -Fxq "UNITREE_SDK_ROOT:PATH=${R1_UNITREE_SDK_ROOT}" "${cache}" || \
+      fail "${package} retained a stale UNITREE_SDK_ROOT cache entry"
+    [[ -x "${binary}" ]] || fail "missing installed SDK consumer: ${binary}"
+    dynamic="$(readelf -d -- "${binary}")" || \
+      fail "readelf could not inspect ${binary}"
+    grep -Fq "${vendor_dds_directory}" <<<"${dynamic}" || \
+      fail "${package} RUNPATH does not contain the selected vendor DDS directory"
+  done
+
+  observer_binary="${PROJECT_DIR}/ros2_ws/install/r1_sdk_transport/lib/r1_sdk_transport/r1_arm_sdk_traffic_observer"
+  [[ -x "${observer_binary}" ]] || fail "missing installed read-only observer: ${observer_binary}"
+  observer_dynamic="$(readelf -d -- "${observer_binary}")" || \
+    fail 'readelf could not inspect the read-only ArmSdk observer'
+  grep -Fq "${vendor_dds_directory}" <<<"${observer_dynamic}" || \
+    fail 'ArmSdk observer RUNPATH does not contain the selected vendor DDS directory'
+  "${observer_binary}" --help >/dev/null || \
+    fail 'installed ArmSdk observer inert help path failed'
+
+  launch_file="${PROJECT_DIR}/ros2_ws/install/r1_sdk_transport/share/r1_sdk_transport/launch/r1_sdk_transport.launch.py"
+  [[ -f "${launch_file}" ]] || fail "missing installed transport launch: ${launch_file}"
+  grep -Fxq "VENDOR_DDS_DIRECTORY = '${vendor_dds_directory}'" "${launch_file}" || \
+    fail 'installed r1_sdk_transport launch retained a stale vendor DDS directory'
+
+  RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
+  ROS_LOCALHOST_ONLY=1 \
+  LD_LIBRARY_PATH="${vendor_dds_directory}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+    "${PROJECT_DIR}/ros2_ws/install/r1_sdk_transport/lib/r1_sdk_transport/r1_sdk_transport" \
+      --abi-check-only || fail 'installed r1_sdk_transport rejected the selected DDS runtime'
+  echo '[OK] both installed SDK consumers use one selected vendor DDS directory.'
+}
+
+echo 'R1 OFFLINE COMMISSIONING CHECK'
+echo 'Network namespace: verified loopback-only (no robot-facing interface exists).'
+echo 'No Ethernet preflight, physical reader, live writer, StandUp, or command path is allowed.'
+
+make -C "${PROJECT_DIR}" \
+  R1_UNITREE_SDK_ROOT="${R1_UNITREE_SDK_ROOT}" r1-teleoperation-build
+audit_installed_sdk_paths
+make -C "${PROJECT_DIR}" r1-teleoperation-check
+make -C "${PROJECT_DIR}" r1-sdk-abi-probe
+make -C "${PROJECT_DIR}" r1-live-writer-mock-smoke
+make -C "${PROJECT_DIR}" r1-head-ownership-probe-mock-smoke
+make -C "${PROJECT_DIR}" teleop-dry-run-smoke
+make -C "${PROJECT_DIR}" r1-sim-smoke
+
+remaining="$(robot_processes)"
+[[ -z ${remaining} ]] || {
+  printf '%s\n' "${remaining}" >&2
+  fail 'an SDK process survived the offline checks'
+}
+
+echo '[PASS] offline commissioning checks passed; no robot-facing process remains.'
+echo 'This result is not authorization for physical motion.'

@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Request the bounded seed/ownership/tiny-yaw/return/release state machine from
+# an already prepared, post-release/re-press, probe-only physical session. This
+# script cannot launch a writer, release kill, call StandUp, or recenter the
+# head. Any ambiguous request or incomplete cleanup reasserts both software
+# kills before the script exits.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_SETUP="${PROJECT_DIR}/ros2_ws/install/setup.bash"
+[[ -f "${WORKSPACE_SETUP}" ]] || WORKSPACE_SETUP="${PROJECT_DIR}/install/setup.bash"
+
+die() {
+  echo "[BLOCKED] $*" >&2
+  echo 'Head ownership probe was not confirmed complete.' >&2
+  exit 2
+}
+
+[[ $# -eq 0 ]] || die 'usage: r1-robot-head-ownership-probe'
+[[ -f /opt/ros/humble/setup.bash ]] || die 'ROS 2 Humble is unavailable'
+[[ -f "${WORKSPACE_SETUP}" ]] || die "workspace is not built: ${WORKSPACE_SETUP}"
+
+require_exact() {
+  local name=$1 expected=$2 value=${!1-}
+  [[ "${value}" == "${expected}" ]] || die "${name}=${expected} is required"
+}
+require_exact ROBOT_DRY_RUN 0
+require_exact ROBOT_ENABLE_ACTUATION 1
+require_exact ROBOT_CONFIRM_OFF_CHARGER 1
+require_exact ROBOT_CONFIRM_CLEAR_AREA 1
+require_exact ROBOT_CONFIRM_ESTOP_READY 1
+require_exact ROBOT_CONFIRM_COMMISSIONING 1
+require_exact ROBOT_CONFIRM_HEAD_OWNERSHIP_PROBE 1
+TOKEN=${ROBOT_COMMISSIONING_TOKEN-}
+[[ ${#TOKEN} -ge 16 ]] \
+  || die 'ROBOT_COMMISSIONING_TOKEN must contain at least 16 characters'
+[[ -n ${ROBOT_VR_SOURCE_IP-} ]] || die 'ROBOT_VR_SOURCE_IP is required'
+
+DOMAIN_ID=${R1_LIVE_ROS_DOMAIN_ID:-88}
+[[ "${DOMAIN_ID}" =~ ^[0-9]+$ ]] && ((10#${DOMAIN_ID} <= 232)) \
+  || die 'R1_LIVE_ROS_DOMAIN_ID must be 0..232'
+INTERFACE=${R1_LIVE_NETWORK_INTERFACE:-enxb4b024be59fe}
+[[ "${INTERFACE}" =~ ^[[:alnum:]_.-]{1,15}$ ]] \
+  || die 'invalid R1_LIVE_NETWORK_INTERFACE'
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${WORKSPACE_SETUP}"
+# shellcheck source=r1-physical-ros-env
+source "${SCRIPT_DIR}/r1-physical-ros-env"
+set -u
+export ROS_DOMAIN_ID="$((10#${DOMAIN_ID}))"
+export ROS_LOCALHOST_ONLY=1
+
+get_writer_param() {
+  local name=$1 kind=$2 value attempt pattern
+  case ${kind} in
+    boolean) pattern='^Boolean value is: (true|false)$' ;;
+    double) pattern='^Double value is: [-+0-9.eE]+$' ;;
+    string) pattern='^String value is: .+$' ;;
+    *) return 2 ;;
+  esac
+  for attempt in 1 2 3 4; do
+    value="$(timeout 6s ros2 param get /r1_live_writer "${name}" \
+      --no-daemon --spin-time 1.0 2>/dev/null || true)"
+    if grep -Eqi "${pattern}" <<<"${value}"; then
+      printf '%s\n' "${value}"
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+require_writer_param() {
+  local name=$1 kind=$2 expected=$3 value
+  value="$(get_writer_param "${name}" "${kind}")" \
+    || die "live writer parameter is unavailable: ${name}"
+  grep -Fqi -- "${expected}" <<<"${value}" \
+    || die "live writer parameter ${name} must be ${expected}: ${value}"
+}
+
+require_writer_param transport string 'string value is: sdk'
+for parameter in \
+  send_commands enable_prepare head_absolute_envelope_confirmed enable_head \
+  head_recenter_enabled head_ownership_probe_only \
+  head_ownership_probe_confirmed; do
+  require_writer_param "${parameter}" boolean 'boolean value is: true'
+done
+require_writer_param head_recenter_confirmed boolean 'boolean value is: false'
+require_writer_param enable_locomotion boolean 'boolean value is: false'
+
+probe_step="$(get_writer_param head_probe_step_rad double)" \
+  || die 'live writer parameter is unavailable: head_probe_step_rad'
+python3 - "${probe_step}" <<'PY' || die 'head_probe_step_rad must be in (0, 0.005]'
+import re
+import sys
+
+match = re.fullmatch(r'Double value is: ([-+0-9.eE]+)', sys.argv[1].strip())
+if match is None:
+    raise SystemExit(2)
+value = float(match.group(1))
+if not 0.0 < value <= 0.005:
+    raise SystemExit(2)
+PY
+
+deadman="$(timeout 4s ros2 topic echo --once --full-length \
+  /vr/teleop/active std_msgs/msg/Bool --no-daemon 2>/dev/null || true)"
+grep -Eq 'data:[[:space:]]*true' <<<"${deadman}" \
+  || die 'hold the left Grip: no fresh Deadman=true sample was received'
+
+PROBE_REQUESTED=false
+PROBE_CLEANED_UP=false
+abort_probe_if_needed() {
+  [[ ${PROBE_REQUESTED} == true && ${PROBE_CLEANED_UP} == false ]] || return 0
+  set +e
+  echo '[SAFETY] probe result/cleanup is incomplete; requesting writer and supervisor kill.' >&2
+  timeout 6s ros2 service call \
+    /r1/live_writer/kill std_srvs/srv/Trigger '{}' >/dev/null 2>&1
+  timeout 6s ros2 service call \
+    /r1/safety/emergency_stop std_srvs/srv/Trigger '{}' >/dev/null 2>&1
+  set -e
+}
+trap abort_probe_if_needed EXIT
+trap 'exit 130' INT TERM
+
+# The session is already prepared and both software kills are clear at this
+# point.  Treat the final traffic observation as part of the ambiguous probe
+# boundary so every failure or signal reasserts both kills.  This closes the
+# gap between the earlier prepare-time preflight and the service request below.
+PROBE_REQUESTED=true
+echo 'Running the final read-only ArmSdk traffic gate immediately before the probe...'
+set +e
+R1_SDK_NETWORK_INTERFACE="${INTERFACE}" \
+  "${SCRIPT_DIR}/r1-arm-sdk-traffic-check" \
+    --interface "${INTERFACE}" --duration-sec 6.0 \
+    --fresh-sec 0.5 --action-fresh-sec 3.5 --min-samples 3 \
+    --expected-writers 2
+arm_sdk_final_gate_status=$?
+set -e
+((arm_sdk_final_gate_status == 0)) \
+  || die "final ArmSdk traffic gate failed closed (exit ${arm_sdk_final_gate_status})"
+echo '[OK] final ArmSdk traffic gate is idle; requesting only the bounded probe.'
+
+# From this point onward, ambiguous service delivery is treated as active until
+# a fresh terminal status proves weight=0 release, local/global kill and disarm.
+python3 - <<'PY'
+import re
+import time
+
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import Bool, String
+from std_srvs.srv import Trigger
+
+
+class ProbeMonitor(Node):
+    def __init__(self):
+        super().__init__('r1_head_ownership_probe_monitor')
+        latched = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.statuses = []
+        self.armed = []
+        self.kill = []
+        self.create_subscription(
+            String, '/r1/live_writer/status',
+            lambda message: self.statuses.append(message.data), latched,
+        )
+        self.create_subscription(
+            Bool, '/r1/live_writer/armed',
+            lambda message: self.armed.append(message.data), latched,
+        )
+        self.create_subscription(
+            Bool, '/r1/safety/kill',
+            lambda message: self.kill.append(message.data), latched,
+        )
+        self.client = self.create_client(
+            Trigger, '/r1/live_writer/probe_head_ownership'
+        )
+
+
+def spin_until(node, predicate, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        rclpy.spin_once(node, timeout_sec=0.05)
+        if predicate():
+            return True
+    return predicate()
+
+
+rclpy.init()
+node = ProbeMonitor()
+try:
+    if not node.client.wait_for_service(timeout_sec=6.0):
+        raise RuntimeError('probe service is unavailable')
+
+    # Receive a baseline from all three transient-local streams before recording
+    # markers. armed and kill are periodic, so a whole-stream quiet window would
+    # never complete; KeepLast(1) plus an extra drain interval consumes their
+    # retained samples. Fresh true->false / false->true edges are required below.
+    baseline_deadline = time.monotonic() + 3.0
+    while time.monotonic() < baseline_deadline:
+        rclpy.spin_once(node, timeout_sec=0.05)
+        baseline_ready = bool(node.statuses and node.armed and node.kill)
+        if baseline_ready:
+            break
+    if not (node.statuses and node.armed and node.kill):
+        raise RuntimeError(
+            'could not establish status/armed/kill transient-local baseline'
+        )
+    drain_deadline = time.monotonic() + 0.30
+    while time.monotonic() < drain_deadline:
+        rclpy.spin_once(node, timeout_sec=0.05)
+    if node.kill[-1] is not False:
+        raise RuntimeError('central kill is not freshly clear before probe request')
+    if node.armed[-1] is not False:
+        raise RuntimeError('probe-only writer unexpectedly armed before request')
+    status_marker = len(node.statuses)
+    armed_marker = len(node.armed)
+    kill_marker = len(node.kill)
+
+    future = node.client.call_async(Trigger.Request())
+    if not spin_until(node, future.done, 8.0) or future.result() is None:
+        raise RuntimeError('probe service delivery/result is ambiguous')
+    response = future.result()
+    print(
+        f'[INFO] probe service: success={response.success} '
+        f'message={response.message}'
+    )
+    if not response.success:
+        raise RuntimeError('writer rejected head ownership probe')
+
+    required_events = {
+        'head_ownership_probe=pending_fresh_seed': False,
+        'head_ownership_probe=zero_weight_discovery': False,
+        'head_ownership_probe=weight_ramp_started': False,
+        'head_ownership_probe=full_weight_seed_hold': False,
+        'head_ownership_probe=verifying_outbound_feedback': False,
+        'head_ownership_probe=outbound_feedback_confirmed': False,
+        'head_ownership_probe=confirming_seed_return': False,
+    }
+    terminal = ''
+    printed = set()
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        rclpy.spin_once(node, timeout_sec=0.05)
+        fresh = node.statuses[status_marker:]
+        for status in fresh:
+            if 'head_ownership_probe=' in status and status not in printed:
+                print(f'[STATUS] {status}')
+                printed.add(status)
+            for event in required_events:
+                if event in status:
+                    required_events[event] = True
+            if 'fail_closed reason=head_ownership_probe_failed' in status:
+                raise RuntimeError(status)
+            if 'head_ownership_probe=passed terminal=true' in status:
+                terminal = status
+        if terminal:
+            break
+
+    if not terminal:
+        raise RuntimeError('timed out waiting for a fresh terminal probe status')
+    missing = [event for event, seen in required_events.items() if not seen]
+    if missing:
+        raise RuntimeError('probe status sequence is incomplete: ' + ', '.join(missing))
+    for token in (
+        'no_recenter=true',
+        'release_complete=true',
+        'kill_latched=true',
+    ):
+        if token not in terminal:
+            raise RuntimeError(f'terminal probe status is missing {token!r}: {terminal}')
+    if re.search(r'head_release=.*weight=0', terminal) is None:
+        raise RuntimeError(
+            'terminal probe status does not confirm ArmSdk weight=0 release: '
+            + terminal
+        )
+
+    # safe_stop publishes armed=false and asks the independent supervisor to
+    # latch kill before emitting its terminal status. Accept only fresh events
+    # from this request, never retained values that preceded it.
+    spin_until(
+        node,
+        lambda: (
+            any(value is False for value in node.armed[armed_marker:])
+            and any(value is True for value in node.kill[kill_marker:])
+        ),
+        4.0,
+    )
+    fresh_armed = node.armed[armed_marker:]
+    try:
+        armed_true_index = fresh_armed.index(True)
+    except ValueError as exception:
+        raise RuntimeError('writer never published fresh armed=true during probe') from exception
+    if not any(value is False for value in fresh_armed[armed_true_index + 1:]):
+        raise RuntimeError('writer did not publish fresh armed=false after probe')
+    if not any(value is True for value in node.kill[kill_marker:]):
+        raise RuntimeError('central safety supervisor did not publish kill=true after probe')
+
+    print('[PASS] probe returned to its measured seed, released ArmSdk to weight=0, and latched kill.')
+finally:
+    node.destroy_node()
+    rclpy.shutdown()
+PY
+
+PROBE_CLEANED_UP=true
+trap - EXIT INT TERM
+echo 'The head was not recentered. Stop this session and verify stationary q/dq read-only.'

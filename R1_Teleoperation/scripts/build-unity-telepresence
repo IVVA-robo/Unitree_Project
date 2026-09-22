@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+UNITY_BIN="${UNITREE_UNITY_BIN:-/home/unitree/Unity/Hub/Editor/2022.3.44f1/Editor/Unity}"
+UNITY_PROJECT="${UNITREE_UNITY_PROJECT:-/home/unitree/Unitree_Project/Unity_Projects/Unitree_VR_Controller}"
+UNITY_AAPT="${UNITREE_AAPT:-${UNITY_BIN%/Editor/Unity}/Editor/Data/PlaybackEngines/AndroidPlayer/SDK/build-tools/34.0.0/aapt}"
+
+MODE="${1:-build}"
+if [[ "${MODE}" != "build" && "${MODE}" != "validate" ]]; then
+  echo "Usage: $0 [build|validate]" >&2
+  exit 2
+fi
+
+if [[ ! -x "${UNITY_BIN}" ]]; then
+  echo "Unity Editor was not found: ${UNITY_BIN}" >&2
+  exit 1
+fi
+if [[ ! -d "${UNITY_PROJECT}/Assets" ]]; then
+  echo "Unity project was not found: ${UNITY_PROJECT}" >&2
+  exit 1
+fi
+
+# Use the active Wi-Fi address unless the caller pins UNITREE_LAPTOP_HOST.
+LAPTOP_HOST="${UNITREE_LAPTOP_HOST:-}"
+if [[ -z "${LAPTOP_HOST}" ]]; then
+  if [[ "${UNITREE_LAN_DISCOVERY:-}" == mdns ]]; then
+    LAPTOP_HOST="$(hostname -s).local"
+  else
+    LAPTOP_HOST="$(ip -4 -o addr show wlp4s0 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}')"
+  fi
+fi
+if [[ "${LAPTOP_HOST}" =~ \.local$ ]]; then
+  : # mDNS keeps the video endpoint stable when the laptop DHCP address changes.
+elif [[ ! "${LAPTOP_HOST}" =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.) ]]; then
+  echo "UNITREE_LAPTOP_HOST must be a private-LAN IPv4 address or a .local name; got '${LAPTOP_HOST}'." >&2
+  exit 1
+fi
+
+export UNITREE_LAPTOP_HOST="${LAPTOP_HOST}"
+export ROBOT_POV_PROFILE="${ROBOT_POV_PROFILE:-bad-wifi}"
+export UNITREE_COMBINED_APK_PATH="${UNITREE_COMBINED_APK_PATH:-${UNITY_PROJECT}/Builds/CombinedDemo/UnitreeR1TelepresenceDemo_${LAPTOP_HOST}.apk}"
+
+LOG_DIR="${PROJECT_DIR}/logs/unity"
+mkdir -p "${LOG_DIR}" "$(dirname "${UNITREE_COMBINED_APK_PATH}")"
+LOG_PATH="${LOG_DIR}/combined-${MODE}-$(date +%Y%m%d-%H%M%S).log"
+
+if [[ "${MODE}" == "validate" ]]; then
+  METHOD="RobotPov.Editor.RobotPovCombinedDemoBuild.ValidateCombinedBuildBatch"
+else
+  METHOD="RobotPov.Editor.RobotPovCombinedDemoBuild.BuildAndroidBatch"
+fi
+
+echo "Unity combined ${MODE}: host=${UNITREE_LAPTOP_HOST}, profile=${ROBOT_POV_PROFILE}"
+echo "Log: ${LOG_PATH}"
+"${UNITY_BIN}" \
+  -batchmode \
+  -nographics \
+  -quit \
+  -projectPath "${UNITY_PROJECT}" \
+  -executeMethod "${METHOD}" \
+  -logFile "${LOG_PATH}"
+
+if [[ "${MODE}" == "validate" ]]; then
+  echo "Combined scene validation passed."
+  exit 0
+fi
+
+if [[ ! -s "${UNITREE_COMBINED_APK_PATH}" ]]; then
+  echo "Unity reported success, but the APK is missing or empty." >&2
+  exit 1
+fi
+
+sha256sum "${UNITREE_COMBINED_APK_PATH}" | tee "${UNITREE_COMBINED_APK_PATH}.sha256"
+if [[ -x "${UNITY_AAPT}" ]]; then
+  "${UNITY_AAPT}" dump badging "${UNITREE_COMBINED_APK_PATH}" \
+    > "${UNITREE_COMBINED_APK_PATH}.badging.txt"
+  "${UNITY_AAPT}" dump permissions "${UNITREE_COMBINED_APK_PATH}" \
+    > "${UNITREE_COMBINED_APK_PATH}.permissions.txt"
+fi
+
+echo "Combined APK: ${UNITREE_COMBINED_APK_PATH}"

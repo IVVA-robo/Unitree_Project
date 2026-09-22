@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REQUIREMENTS="${PROJECT_DIR}/ros2_ws/src/r1_robot_pov/requirements.txt"
+WHEELHOUSE="${PROJECT_DIR}/.cache/robot-pov-wheelhouse"
+MANIFEST="${WHEELHOUSE}/SHA256SUMS"
+REQUIREMENTS_HASH="${WHEELHOUSE}/requirements.sha256"
+PLATFORM_FILE="${WHEELHOUSE}/platform.txt"
+COMPLETE_MARKER="${WHEELHOUSE}/.complete"
+
+usage() {
+  printf 'Usage: %s [--offline|--online]\n' "${0##*/}"
+}
+
+MODE=auto
+case "${1:-}" in
+  '') ;;
+  --offline) MODE=offline ;;
+  --online) MODE=online ;;
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
+if [[ $# -gt 1 ]]; then
+  usage >&2
+  exit 2
+fi
+
+current_requirements_hash() {
+  sha256sum "${REQUIREMENTS}" | awk '{print $1}'
+}
+
+platform_fingerprint() {
+  python3 -c 'import platform, sys, sysconfig; print(f"{platform.python_implementation()}-{sys.version_info.major}.{sys.version_info.minor}-{sysconfig.get_platform()}")'
+}
+
+cache_is_current() {
+  [[ -f "${COMPLETE_MARKER}" && -s "${MANIFEST}" \
+    && -s "${REQUIREMENTS_HASH}" && -s "${PLATFORM_FILE}" ]] || return 1
+  [[ "$(tr -d '[:space:]' < "${REQUIREMENTS_HASH}")" == "$(current_requirements_hash)" ]] \
+    || return 1
+  [[ "$(tr -d '[:space:]' < "${PLATFORM_FILE}")" == "$(platform_fingerprint)" ]]
+}
+
+verify_cache() {
+  local manifest_count
+  local wheel_count
+  if ! cache_is_current; then
+    printf 'Offline wheel cache is missing or does not match requirements.txt.\n' >&2
+    printf 'Run ./scripts/cache-robot-pov-deps while online first.\n' >&2
+    return 1
+  fi
+  (
+    cd "${WHEELHOUSE}"
+    sha256sum --check --quiet SHA256SUMS
+  )
+  manifest_count="$(wc -l < "${MANIFEST}")"
+  wheel_count="$(find "${WHEELHOUSE}" -maxdepth 1 -type f -name '*.whl' | wc -l)"
+  if [[ "${manifest_count}" != "${wheel_count}" ]]; then
+    printf 'Offline wheel cache contains files outside its checksum manifest.\n' >&2
+    return 1
+  fi
+}
+
+install_offline() {
+  verify_cache
+  python3 -m pip install --user --no-index \
+    --find-links "${WHEELHOUSE}" --requirement "${REQUIREMENTS}"
+}
+
+if [[ "${MODE}" == offline ]]; then
+  install_offline
+elif [[ "${MODE}" == online ]]; then
+  python3 -m pip install --user --requirement "${REQUIREMENTS}"
+elif cache_is_current; then
+  install_offline
+elif compgen -G "${WHEELHOUSE}/*.whl" >/dev/null; then
+  printf 'An incomplete/stale wheel cache exists; refusing an implicit network fallback.\n' >&2
+  printf 'Refresh it, pass --offline to diagnose it, or pass --online explicitly.\n' >&2
+  exit 1
+else
+  printf 'No offline cache found; downloading dependencies (one-time setup).\n'
+  python3 -m pip install --user --requirement "${REQUIREMENTS}"
+fi
+
+python3 - <<'PY'
+import aiohttp
+import aiortc
+import av
+import cv2
+import numpy
+import qrcode
+from PIL import Image
+
+print('Robot POV Python dependencies import successfully.')
+PY

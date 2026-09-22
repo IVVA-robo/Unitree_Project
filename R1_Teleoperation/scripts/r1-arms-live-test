@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Start the fail-closed physical writer with VR headset-relative arm IK only.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ $# -eq 0 ]] || { echo 'Usage: r1-arms-live-test' >&2; exit 2; }
+exec "${SCRIPT_DIR}/r1-live-session" arms

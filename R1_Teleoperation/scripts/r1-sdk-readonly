@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Read-only physical-R1 telemetry launcher.  It never starts the Python
+# hardware adapter and never creates an ArmSdk/LocoClient writer.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WS_DIR="${PROJECT_DIR}/ros2_ws"
+INTERFACE="${R1_SDK_NETWORK_INTERFACE:-enxb4b024be59fe}"
+DOMAIN_ID="${R1_SDK_ROS_DOMAIN_ID:-88}"
+
+die() {
+  echo "[FAIL] $*" >&2
+  exit 1
+}
+
+[[ -f /opt/ros/humble/setup.bash ]] || die 'ROS 2 Humble setup.bash is missing'
+INSTALL_SETUP="${WS_DIR}/install/setup.bash"
+if [[ ! -f "${INSTALL_SETUP}" ]]; then
+  INSTALL_SETUP="${PROJECT_DIR}/install/setup.bash"
+fi
+[[ -f "${INSTALL_SETUP}" ]] || die "workspace is not built: ${WS_DIR}/install/setup.bash"
+command -v ip >/dev/null 2>&1 || die 'ip command is required'
+ip link show "${INTERFACE}" >/dev/null 2>&1 || die "network interface not found: ${INTERFACE}"
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${INSTALL_SETUP}"
+# shellcheck source=r1-unitree-sdk-env
+source "${SCRIPT_DIR}/r1-unitree-sdk-env"
+set -u
+
+case "${DOMAIN_ID}" in
+  ''|*[!0-9]*) die 'R1_SDK_ROS_DOMAIN_ID must be an integer from 0 to 232' ;;
+esac
+(( DOMAIN_ID <= 232 )) || die 'R1_SDK_ROS_DOMAIN_ID must be 0..232'
+
+export ROS_DOMAIN_ID="${DOMAIN_ID}"
+export ROS_LOCALHOST_ONLY=1
+echo "R1 SDK transport: read-only LowState on ${INTERFACE} (ROS domain ${DOMAIN_ID})"
+echo 'No rt/arm_sdk, rt/lowcmd, sport, or other command writer is started.'
+exec ros2 launch r1_sdk_transport r1_sdk_transport.launch.py \
+  sdk_enabled:=true network_interface:="${INTERFACE}"

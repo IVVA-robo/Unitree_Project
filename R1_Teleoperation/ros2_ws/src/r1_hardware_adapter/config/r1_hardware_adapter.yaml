@@ -1,0 +1,18 @@
+r1_hardware_adapter:
+  ros__parameters:
+    # These values are intentionally fail-safe.  The package currently has no
+    # Unitree DDS writer and must never be used as a physical motor adapter.
+    hardware_enabled: false
+    dry_run: true
+    active_topic: "/vr/teleop/active"
+    arm_input_topic: "/arm_trajectory_controller/joint_trajectory"
+    velocity_input_topic: "/vr/safe_cmd_vel"
+    debug_topic_prefix: "/r1_hardware_adapter/debug"
+    active_timeout_sec: 1.5
+    command_timeout_sec: 0.25
+    max_forward_mps: 0.35
+    max_lateral_mps: 0.25
+    max_yaw_rps: 0.60
+    max_joint_step_rad: 0.15
+    max_arm_joints: 10
+

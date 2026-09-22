@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install the offline Russian Vosk model used by the R1 voice service.
+# Run this script on the robot (or copy it there) as root:
+#   sudo ./r1-install-vosk-ru
+# It never follows an HTML landing page silently: curl must receive a ZIP,
+# unzip -t validates it, and extraction is staged before the destination is
+# changed. An existing destination is preserved unless --replace is supplied.
+
+MODEL_URL="${VOSK_RU_URL:-https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip}"
+DEST="${VOSK_RU_DEST:-/opt/R1Service/models/vosk-ru}"
+CACHE="${VOSK_RU_CACHE:-/tmp/vosk-model-small-ru-0.22.zip}"
+REPLACE=false
+
+usage() {
+  cat <<'EOF'
+Usage: r1-install-vosk-ru [--replace]
+
+Downloads and installs vosk-model-small-ru-0.22 as /opt/R1Service/models/vosk-ru.
+The operation is offline at runtime after installation; only this download
+requires Internet access. Set VOSK_RU_URL, VOSK_RU_DEST or VOSK_RU_CACHE to
+override defaults.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --replace) REPLACE=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 64 ;;
+  esac
+done
+
+[[ $EUID -eq 0 ]] || {
+  echo 'Run as root, for example: sudo ./r1-install-vosk-ru' >&2
+  exit 1
+}
+command -v python3 >/dev/null || { echo 'python3 is required' >&2; exit 1; }
+command -v unzip >/dev/null || { echo 'unzip is required' >&2; exit 1; }
+
+mkdir -p "$(dirname "$CACHE")"
+echo "Downloading verified Vosk archive: $MODEL_URL"
+# A complete cache can be copied from the laptop over Ethernet/USB when the
+# robot itself has no Internet. Otherwise fetch exact HTTP ranges in parallel;
+# the public host can leave a large response stalled after 16 KiB on some
+# networks. Do not use wget against the model catalogue URL; that URL returns
+# index.html.
+if [[ -f "$CACHE" ]] && unzip -tq "$CACHE" >/dev/null 2>&1; then
+  echo "Using existing valid archive: $CACHE"
+else
+  python3 - "$MODEL_URL" "$CACHE" <<'PY'
+import concurrent.futures
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+url, destination = sys.argv[1:]
+chunk_size = 16 * 1024
+workers = 32
+
+def fetch(start, total):
+    end = min(total - 1, start + chunk_size - 1)
+    expected = end - start + 1
+    for attempt in range(6):
+        try:
+            # A unique query parameter prevents an intermediary from serving
+            # a cached range for a different offset.
+            request = urllib.request.Request(
+                url + ("&" if "?" in url else "?") + f"r1_chunk={start}",
+                headers={"Range": f"bytes={start}-{end}", "Accept-Encoding": "identity"},
+            )
+            with urllib.request.urlopen(request, timeout=30) as response:
+                body = response.read()
+                content_range = response.headers.get("Content-Range", "")
+            if len(body) != expected or not content_range.startswith(f"bytes {start}-{end}/"):
+                raise RuntimeError(
+                    f"bad range at {start}: len={len(body)} range={content_range!r}"
+                )
+            return start, body
+        except Exception:
+            if attempt == 5:
+                raise
+            time.sleep(0.25 * (attempt + 1))
+
+probe = urllib.request.Request(
+    url + ("&" if "?" in url else "?") + "r1_probe=0",
+    headers={"Range": "bytes=0-0", "Accept-Encoding": "identity"},
+)
+with urllib.request.urlopen(probe, timeout=30) as response:
+    content_range = response.headers.get("Content-Range", "")
+try:
+    total = int(content_range.rsplit("/", 1)[1])
+except (ValueError, IndexError):
+    raise RuntimeError(f"server did not return a usable Content-Range: {content_range!r}")
+if total < 1_000_000:
+    raise RuntimeError(f"unexpected model archive size: {total} bytes")
+
+temporary = destination + ".partial"
+with open(temporary, "wb") as output:
+    output.truncate(total)
+ranges = list(range(0, total, chunk_size))
+completed = 0
+with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+    futures = [pool.submit(fetch, start, total) for start in ranges]
+    with open(temporary, "r+b", buffering=0) as output:
+        for future in concurrent.futures.as_completed(futures):
+            start, body = future.result()
+            output.seek(start)
+            output.write(body)
+            completed += 1
+            if completed % 100 == 0 or completed == len(ranges):
+                print(f"downloaded {completed}/{len(ranges)} ranges", flush=True)
+os.replace(temporary, destination)
+print(f"downloaded {total} bytes to {destination}")
+PY
+fi
+
+mime="$(file -b --mime-type "$CACHE" 2>/dev/null || true)"
+[[ "$mime" == application/zip || "$mime" == application/x-zip-compressed ]] || {
+  echo "Downloaded file is not a ZIP (detected $mime); refusing installation" >&2
+  exit 1
+}
+unzip -tq "$CACHE"
+
+stage="$(mktemp -d /tmp/r1-vosk-ru.XXXXXX)"
+cleanup() { rm -rf -- "$stage"; }
+trap cleanup EXIT
+unzip -q "$CACHE" -d "$stage"
+model_dir="$(find "$stage" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+[[ -n "$model_dir" ]] || { echo 'Archive has no top-level model directory' >&2; exit 1; }
+[[ -d "$model_dir/am" && -d "$model_dir/conf" && -d "$model_dir/graph" ]] || {
+  echo 'Archive does not look like a Vosk model (am/conf/graph missing)' >&2
+  exit 1
+}
+
+if [[ -e "$DEST" ]]; then
+  $REPLACE || {
+    echo "Destination already exists: $DEST (use --replace only after inspection)" >&2
+    exit 2
+  }
+  backup="${DEST}.backup.$(date +%Y%m%d-%H%M%S)"
+  mv -- "$DEST" "$backup"
+  echo "Existing model moved to $backup"
+fi
+
+mkdir -p "$DEST"
+cp -a "$model_dir"/. "$DEST"/
+test -d "$DEST/am" -a -d "$DEST/conf" -a -d "$DEST/graph"
+printf '[OK] Vosk Russian model installed at %s\n' "$DEST"
+du -sh "$DEST"
+echo 'Restart the service and inspect: systemctl restart robot-voice-service.service'

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ $# -eq 0 ]] || { echo 'Usage: r1-head-recenter-session' >&2; exit 2; }
+echo '[BLOCKED] Full physical head recenter is suspended.' >&2
+echo 'Use r1-head-ownership-probe-session only after a new on-site approval.' >&2
+echo 'No Unitree command was sent.' >&2
+exit 2

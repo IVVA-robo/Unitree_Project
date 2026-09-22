@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Start one fail-closed physical-writer session.  This wrapper never fabricates
+# an acknowledgement: every live value must already be present in the caller's
+# environment.  The launched supervisor begins kill=true, so starting the
+# process is not itself permission for StandUp or motion.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_SETUP="${PROJECT_DIR}/ros2_ws/install/setup.bash"
+[[ -f "${WORKSPACE_SETUP}" ]] || WORKSPACE_SETUP="${PROJECT_DIR}/install/setup.bash"
+
+die() {
+  echo "[BLOCKED] $*" >&2
+  echo 'No Unitree command was sent.' >&2
+  exit 2
+}
+
+[[ $# -eq 1 ]] || die 'usage: r1-live-session head|arms|head-probe|locomotion|full'
+STAGE=$1
+HEAD_OWNERSHIP_PROBE=false
+case "${STAGE}" in
+  head) ENABLE_HEAD=true; ENABLE_ARMS=false; ENABLE_LOCOMOTION=false ;;
+  arms) ENABLE_HEAD=false; ENABLE_ARMS=true; ENABLE_LOCOMOTION=false ;;
+  head-probe)
+    ENABLE_HEAD=true
+    ENABLE_ARMS=false
+    ENABLE_LOCOMOTION=false
+    HEAD_OWNERSHIP_PROBE=true
+    ;;
+  recenter)
+    die 'full physical recenter is suspended; use the separately reviewed head-probe stage'
+    ;;
+  locomotion) ENABLE_HEAD=false; ENABLE_ARMS=false; ENABLE_LOCOMOTION=true ;;
+  # Combined operator mode is arms + legs. Physical head tracking remains a
+  # separate reviewed stage because the current R1 boot pose is not a proven
+  # safe tracking seed.
+  full) ENABLE_HEAD=false; ENABLE_ARMS=true; ENABLE_LOCOMOTION=true ;;
+  *) die 'stage must be head, arms, head-probe, locomotion, or full' ;;
+esac
+
+[[ -f /opt/ros/humble/setup.bash ]] || die 'ROS 2 Humble is unavailable'
+[[ -f "${WORKSPACE_SETUP}" ]] || die "workspace is not built: ${WORKSPACE_SETUP}"
+
+require_exact() {
+  local name=$1 expected=$2 value=${!1-}
+  [[ "${value}" == "${expected}" ]] || die "${name}=${expected} is required"
+}
+
+require_exact ROBOT_DRY_RUN 0
+require_exact ROBOT_ENABLE_ACTUATION 1
+require_exact ROBOT_CONFIRM_OFF_CHARGER 1
+require_exact ROBOT_CONFIRM_CLEAR_AREA 1
+require_exact ROBOT_CONFIRM_ESTOP_READY 1
+require_exact ROBOT_CONFIRM_COMMISSIONING 1
+if [[ ${HEAD_OWNERSHIP_PROBE} == true ]]; then
+  require_exact ROBOT_CONFIRM_HEAD_OWNERSHIP_PROBE 1
+fi
+
+TOKEN=${ROBOT_COMMISSIONING_TOKEN-}
+[[ ${#TOKEN} -ge 16 ]] || die 'ROBOT_COMMISSIONING_TOKEN must contain at least 16 characters'
+VR_SOURCE_IP=${ROBOT_VR_SOURCE_IP-}
+python3 - "${VR_SOURCE_IP}" <<'PY' || exit 2
+import ipaddress
+import sys
+
+try:
+    address = ipaddress.ip_address(sys.argv[1])
+except ValueError:
+    print('[BLOCKED] ROBOT_VR_SOURCE_IP must be a valid fixed IPv4 address', file=sys.stderr)
+    print('No Unitree command was sent.', file=sys.stderr)
+    raise SystemExit(2)
+private_v4 = tuple(ipaddress.ip_network(prefix) for prefix in (
+    '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
+if address.version != 4 or not any(address in subnet for subnet in private_v4) \
+        or address.is_loopback or address.is_multicast or address.is_unspecified:
+    print('[BLOCKED] ROBOT_VR_SOURCE_IP must be a private unicast IPv4 address', file=sys.stderr)
+    print('No Unitree command was sent.', file=sys.stderr)
+    raise SystemExit(2)
+PY
+
+INTERFACE=${R1_LIVE_NETWORK_INTERFACE:-enxb4b024be59fe}
+[[ "${INTERFACE}" =~ ^[[:alnum:]_.-]{1,15}$ ]] || die 'invalid R1_LIVE_NETWORK_INTERFACE'
+ip link show dev "${INTERFACE}" >/dev/null 2>&1 || die "network interface is absent: ${INTERFACE}"
+[[ "$(cat "/sys/class/net/${INTERFACE}/carrier" 2>/dev/null || printf 0)" == 1 ]] \
+  || die "${INTERFACE} has NO-CARRIER; connect R1 control/LAN RJ45"
+
+DOMAIN_ID=${R1_LIVE_ROS_DOMAIN_ID:-88}
+UDP_PORT=${R1_LIVE_UDP_PORT:-9090}
+[[ "${DOMAIN_ID}" =~ ^[0-9]+$ ]] && ((10#${DOMAIN_ID} <= 232)) \
+  || die 'R1_LIVE_ROS_DOMAIN_ID must be 0..232'
+[[ "${UDP_PORT}" =~ ^[0-9]+$ ]] \
+  && ((10#${UDP_PORT} >= 1 && 10#${UDP_PORT} <= 65535)) \
+  || die 'R1_LIVE_UDP_PORT must be 1..65535'
+
+if pgrep -af 'r1_live_writer_node' >/dev/null 2>&1; then
+  die 'an r1_live_writer_node process already exists; stop/review it first'
+fi
+if command -v ss >/dev/null 2>&1 \
+  && ss -H -lunp 2>/dev/null | grep -Eq "([.:]|\\])${UDP_PORT}[[:space:]]"; then
+  die "UDP port ${UDP_PORT} is already in use; stop the old VR bridge first"
+fi
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${WORKSPACE_SETUP}"
+# Fast DDS owns the ROS graph; Unitree keeps its matched CycloneDDS pair.
+# shellcheck source=r1-unitree-sdk-env
+source "${SCRIPT_DIR}/r1-unitree-sdk-env"
+set -u
+export ROS_DOMAIN_ID="$((10#${DOMAIN_ID}))"
+export ROS_LOCALHOST_ONLY=1
+# Consumed by r1_live_writer before rclcpp::init so a physical SDK launch can
+# reject the wrong RMW before ROS creates any CycloneDDS participant. This is
+# a safety marker, not an authorization gate.
+export R1_PHYSICAL_SDK_SESSION=1
+
+START_READER=true
+READER_NODE_PRESENT=false
+READER_SERVICE_PRESENT=false
+READER_PARAM=''
+for attempt in 1 2 3 4; do
+  reader_nodes="$(timeout 3s ros2 node list --no-daemon --spin-time 0.5 2>/dev/null || true)"
+  grep -Fxq '/r1_sdk_transport' <<<"${reader_nodes}" \
+    && READER_NODE_PRESENT=true
+  READER_PARAM="$(timeout 3s ros2 param get /r1_sdk_transport sdk_enabled \
+    --no-daemon 2>/dev/null || true)"
+  [[ ${READER_PARAM,,} == *'boolean value is: true'* ]] \
+    && READER_SERVICE_PRESENT=true
+  [[ ${READER_NODE_PRESENT} == true && ${READER_SERVICE_PRESENT} == true ]] \
+    && break
+  sleep 0.25
+done
+
+fresh_finite_reader_sample() {
+  local state_dump echo_status name_count position_count bad_value
+  set +e
+  state_dump="$(timeout 4s ros2 topic echo --once --full-length \
+    --qos-reliability reliable --qos-durability volatile \
+    /r1/sdk/joint_states \
+    sensor_msgs/msg/JointState --no-daemon 2>&1)"
+  echo_status=$?
+  set -e
+  ((echo_status == 0)) || return 1
+  name_count="$(printf '%s\n' "${state_dump}" | awk '
+    /^name:[[:space:]]*$/ {in_names=1; next}
+    /^position:[[:space:]]*$/ {in_names=0}
+    in_names && /^[[:space:]]*-[[:space:]]+/ {count++}
+    END {print count+0}')"
+  position_count="$(printf '%s\n' "${state_dump}" | awk '
+    /^position:[[:space:]]*$/ {in_positions=1; next}
+    /^(velocity|effort):[[:space:]]*$/ {in_positions=0}
+    in_positions && /^[[:space:]]*-[[:space:]]+/ {count++}
+    END {print count+0}')"
+  bad_value="$(printf '%s\n' "${state_dump}" | awk '
+    /^position:[[:space:]]*$/ {in_positions=1; next}
+    /^(velocity|effort):[[:space:]]*$/ {in_positions=0}
+    in_positions && tolower($0) ~ /(nan|inf)/ {found=1}
+    END {print found+0}')"
+  [[ ${name_count} -eq 26 && ${position_count} -eq 26 && ${bad_value} -eq 0 ]]
+}
+
+if [[ ${READER_NODE_PRESENT} == true || ${READER_SERVICE_PRESENT} == true ]]; then
+  [[ ${READER_NODE_PRESENT} == true && ${READER_SERVICE_PRESENT} == true ]] \
+    || die 'inconsistent/stale /r1_sdk_transport discovery; stop it or wait for DDS cleanup'
+  reader_type="$(timeout 3s ros2 topic type /r1/sdk/joint_states \
+    --no-daemon 2>/dev/null || true)"
+  [[ ${reader_type} == *'sensor_msgs/msg/JointState'* ]] \
+    || die 'existing /r1_sdk_transport has no JointState publisher'
+  fresh_finite_reader_sample \
+    || die 'existing /r1_sdk_transport produced no fresh finite 26-joint sample'
+  START_READER=false
+fi
+
+# A direct call to this launcher may not bypass the mandatory feedback-only
+# commissioning check. If a reader was accepted above, --no-reader validates
+# that exact live process. Otherwise this helper creates only a temporary
+# LowState subscriber and tears it down before returning; the launch then owns
+# the new long-lived reader.
+echo 'Running mandatory read-only SDK preflight before live graph startup...'
+preflight_args=()
+[[ ${START_READER} == false ]] && preflight_args+=(--no-reader)
+R1_SDK_NETWORK_INTERFACE="${INTERFACE}" \
+R1_SDK_ROS_DOMAIN_ID="$((10#${DOMAIN_ID}))" \
+  "${SCRIPT_DIR}/r1-sdk-preflight" "${preflight_args[@]}"
+
+START_SUPERVISOR=true
+if timeout 3s ros2 node list --no-daemon 2>/dev/null \
+  | grep -qx '/r1_safety_supervisor'; then
+  START_SUPERVISOR=false
+fi
+
+if [[ ${START_SUPERVISOR} == false ]]; then
+  echo 'Reusing an existing supervisor only after reasserting its startup kill...'
+  set +e
+  kill_response="$(timeout 8s ros2 service call \
+    /r1/safety/emergency_stop std_srvs/srv/Trigger '{}' 2>&1)"
+  kill_status=$?
+  set -e
+  printf '%s\n' "${kill_response}"
+  if ((kill_status != 0)) || ! grep -Eq \
+    'success[[:space:]]*=[[:space:]]*True|success:[[:space:]]*true' \
+    <<<"${kill_response}"; then
+    die 'existing safety supervisor did not confirm startup kill'
+  fi
+fi
+
+echo 'R1 PHYSICAL WRITER SESSION (still fail-closed at startup)'
+echo "  stage=${STAGE} domain=${ROS_DOMAIN_ID} interface=${INTERFACE}"
+echo "  fixed VR source=${VR_SOURCE_IP} transport=sdk profile=slow-safe"
+echo "  reuse reader=$([[ ${START_READER} == false ]] && echo true || echo false)"
+echo '  supervisor starts with kill=true; prepare and kill release are separate explicit steps.'
+
+exec ros2 launch r1_teleoperation_app r1_teleop_live.launch.py \
+  ros_domain_id:="${ROS_DOMAIN_ID}" \
+  network_interface:="${INTERFACE}" \
+  udp_port:="$((10#${UDP_PORT}))" \
+  vr_source_ip:="${VR_SOURCE_IP}" \
+  start_readonly_reader:="${START_READER}" \
+  start_safety_supervisor:="${START_SUPERVISOR}" \
+  enable_head:="${ENABLE_HEAD}" \
+  enable_arms:="${ENABLE_ARMS}" \
+  head_absolute_envelope_confirmed:="${ENABLE_HEAD}" \
+  head_recenter_enabled:="${HEAD_OWNERSHIP_PROBE}" \
+  head_recenter_confirmed:=false \
+  head_ownership_probe_only:=true \
+  head_ownership_probe_confirmed:="${HEAD_OWNERSHIP_PROBE}" \
+  enable_locomotion:="${ENABLE_LOCOMOTION}" \
+  enable_prepare:=true \
+  transport:=sdk \
+  send_commands:=true \
+  commissioning_confirmed:=true \
+  commissioning_token:="${TOKEN}" \
+  profile:=slow-safe

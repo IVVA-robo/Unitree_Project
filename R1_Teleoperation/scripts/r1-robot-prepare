@@ -1,0 +1,402 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Prepare is intentionally a client of an already-running live session. It
+# cannot create a writer itself. The operator must hold Deadman while this
+# command runs; any failed step reasserts both writer and supervisor kill.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_SETUP="${PROJECT_DIR}/ros2_ws/install/setup.bash"
+[[ -f "${WORKSPACE_SETUP}" ]] || WORKSPACE_SETUP="${PROJECT_DIR}/install/setup.bash"
+
+die() {
+  echo "[BLOCKED] $*" >&2
+  echo 'Prepare/StandUp was not requested.' >&2
+  exit 2
+}
+
+[[ $# -eq 0 ]] || die 'usage: r1-robot-prepare'
+[[ -f /opt/ros/humble/setup.bash ]] || die 'ROS 2 Humble is unavailable'
+[[ -f "${WORKSPACE_SETUP}" ]] || die "workspace is not built: ${WORKSPACE_SETUP}"
+
+require_exact() {
+  local name=$1 expected=$2 value=${!1-}
+  [[ "${value}" == "${expected}" ]] || die "${name}=${expected} is required"
+}
+require_exact ROBOT_DRY_RUN 0
+require_exact ROBOT_ENABLE_ACTUATION 1
+require_exact ROBOT_CONFIRM_OFF_CHARGER 1
+require_exact ROBOT_CONFIRM_CLEAR_AREA 1
+require_exact ROBOT_CONFIRM_ESTOP_READY 1
+require_exact ROBOT_CONFIRM_COMMISSIONING 1
+TOKEN=${ROBOT_COMMISSIONING_TOKEN-}
+[[ ${#TOKEN} -ge 16 ]] \
+  || die 'ROBOT_COMMISSIONING_TOKEN must contain at least 16 characters'
+[[ -n ${ROBOT_VR_SOURCE_IP-} ]] || die 'ROBOT_VR_SOURCE_IP is required'
+
+DOMAIN_ID=${R1_LIVE_ROS_DOMAIN_ID:-88}
+[[ "${DOMAIN_ID}" =~ ^[0-9]+$ ]] && ((10#${DOMAIN_ID} <= 232)) \
+  || die 'R1_LIVE_ROS_DOMAIN_ID must be 0..232'
+INTERFACE=${R1_LIVE_NETWORK_INTERFACE:-enxb4b024be59fe}
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${WORKSPACE_SETUP}"
+# Match the already-running physical graph without loading Unitree SDK in this
+# service client.
+# shellcheck source=r1-physical-ros-env
+source "${SCRIPT_DIR}/r1-physical-ros-env"
+set -u
+export ROS_DOMAIN_ID="$((10#${DOMAIN_ID}))"
+export ROS_LOCALHOST_ONLY=1
+
+# `ros2 service type` is daemon-backed on Humble and can fail with a stale
+# XML-RPC daemon (`rclpy.ok()` fault) even while the live services are healthy.
+# Discover the complete typed graph directly instead.  Require all four
+# services in the same snapshot so an incomplete discovery result cannot
+# release either software kill.
+service_exists() {
+  local name=$1 type=$2
+  grep -Fqx -- "${name} [${type}]" <<<"${service_graph}"
+}
+required_service_graph_ready() {
+  service_exists /r1/live_writer/prepare std_srvs/srv/Trigger \
+    && service_exists /r1/live_writer/reset_kill std_srvs/srv/Trigger \
+    && service_exists /r1/live_writer/kill std_srvs/srv/Trigger \
+    && service_exists /r1/safety/set_kill std_srvs/srv/SetBool
+}
+
+service_graph=''
+for attempt in 1 2 3 4; do
+  if ! service_graph="$(timeout 6s ros2 service list --no-daemon \
+      --spin-time 1.0 --show-types 2>/dev/null)"; then
+    service_graph=''
+  fi
+  required_service_graph_ready && break
+  sleep 0.25
+done
+for service in \
+  /r1/live_writer/prepare \
+  /r1/live_writer/reset_kill \
+  /r1/live_writer/kill; do
+  service_exists "${service}" std_srvs/srv/Trigger \
+    || die "required live-session service is absent: ${service}"
+done
+service_exists /r1/safety/set_kill std_srvs/srv/SetBool \
+  || die 'safety supervisor service is absent: /r1/safety/set_kill'
+
+get_live_writer_param() {
+  local name=$1 expected_kind=$2 value attempt pattern
+  case ${expected_kind} in
+    string) pattern='^String value is: .+$' ;;
+    boolean) pattern='^Boolean value is: (true|false)$' ;;
+    *) return 2 ;;
+  esac
+  # A fresh no-daemon client can occasionally finish DDS discovery before the
+  # already-running writer is visible.  Retry only the read-only query; never
+  # treat a missing/partial result as permission to continue.
+  for attempt in 1 2 3 4; do
+    value="$(timeout 6s ros2 param get /r1_live_writer "${name}" \
+      --no-daemon --spin-time 1.0 2>/dev/null || true)"
+    if grep -Eqi -- "${pattern}" <<<"${value}"; then
+      printf '%s\n' "${value}"
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+require_param() {
+  local name=$1 expected_kind=$2 expected=$3 value
+  if ! value="$(get_live_writer_param "${name}" "${expected_kind}")"; then
+    die "live writer parameter ${name} is unavailable or not ${expected_kind}"
+  fi
+  grep -Fqi -- "${expected}" <<<"${value}" \
+    || die "live writer parameter ${name} is not ${expected}: ${value:-unavailable}"
+}
+require_param transport string 'string value is: sdk'
+require_param send_commands boolean 'boolean value is: true'
+require_param enable_prepare boolean 'boolean value is: true'
+require_param profile string 'string value is: slow-safe'
+
+if ! head_enabled="$(get_live_writer_param enable_head boolean)"; then
+  die 'live writer parameter enable_head is unavailable or not boolean'
+fi
+if ! locomotion_enabled="$(get_live_writer_param enable_locomotion boolean)"; then
+  die 'live writer parameter enable_locomotion is unavailable or not boolean'
+fi
+if ! arms_enabled="$(get_live_writer_param enable_arms boolean)"; then
+  die 'live writer parameter enable_arms is unavailable or not boolean'
+fi
+if ! arm_topic_param="$(get_live_writer_param arm_topic string)"; then
+  die 'live writer parameter arm_topic is unavailable or not string'
+fi
+if ! head_recenter_enabled="$(get_live_writer_param head_recenter_enabled boolean)"; then
+  die 'live writer parameter head_recenter_enabled is unavailable or not boolean'
+fi
+if ! grep -Fqi 'boolean value is: true' <<<"${head_enabled}" \
+  && ! grep -Fqi 'boolean value is: true' <<<"${arms_enabled}" \
+  && ! grep -Fqi 'boolean value is: true' <<<"${locomotion_enabled}"; then
+  die 'live writer has neither head, arms, nor locomotion enabled'
+fi
+if grep -Fqi 'boolean value is: true' <<<"${head_enabled}"; then
+  require_param head_absolute_envelope_confirmed boolean \
+    'boolean value is: true'
+  if grep -Fqi 'boolean value is: true' <<<"${head_recenter_enabled}"; then
+    require_exact ROBOT_CONFIRM_HEAD_OWNERSHIP_PROBE 1
+    require_param head_recenter_confirmed boolean 'boolean value is: false'
+    require_param head_ownership_probe_only boolean 'boolean value is: true'
+    require_param head_ownership_probe_confirmed boolean 'boolean value is: true'
+    head_probe_mode=true
+  else
+    head_probe_mode=false
+  fi
+fi
+
+echo 'Running strict feedback preflight against the live session reader...'
+R1_SDK_NETWORK_INTERFACE="${INTERFACE}" \
+R1_SDK_ROS_DOMAIN_ID="${ROS_DOMAIN_ID}" \
+  "${SCRIPT_DIR}/r1-sdk-preflight" --no-reader
+
+echo 'Observing the live VR/control graph without releasing kill...'
+set +e
+vr_preflight_output="$(ros2 run r1_teleop_safety r1_teleop_preflight \
+  --interface "${INTERFACE}" \
+  --robot-ip "${R1_LIVE_CONTROL_IP:-192.168.123.161}" \
+  --observe-seconds 2.0 \
+  --require-vr \
+  --locomotion-mode slow-safe 2>&1)"
+vr_preflight_status=$?
+set -e
+printf '%s\n' "${vr_preflight_output}"
+if ((vr_preflight_status != 0 && vr_preflight_status != 2)) \
+  || ! grep -Fq 'No Unitree SDK writer' <<<"${vr_preflight_output}"; then
+  die 'VR/control graph preflight failed'
+fi
+
+if grep -Fqi 'boolean value is: true' <<<"${head_enabled}"; then
+  head_status="$(timeout 4s ros2 topic echo --once \
+    /r1_hardware_adapter/debug/head/status std_msgs/msg/String \
+    --field data --no-daemon 2>/dev/null || true)"
+  grep -Eqi 'calibrated=(true|True)' <<<"${head_status}" \
+    || die 'head neutral is not calibrated; call /r1/head/calibrate_neutral first'
+  head_command="$(timeout 4s ros2 topic echo --once --full-length \
+    /r1_hardware_adapter/debug/head/joint_trajectory \
+    trajectory_msgs/msg/JointTrajectory --no-daemon 2>/dev/null || true)"
+  [[ -n ${head_command} ]] || die 'fresh bounded head command was not observed'
+
+  # Check the physical head before releasing either software kill. Five fresh
+  # named q/dq samples prevent an off-centre or still-moving head from reaching
+  # StandUp only to fail later at the ArmSdk seed boundary.
+  set +e
+  head_seed_check="$(timeout 6s python3 - "${head_probe_mode}" <<'PY'
+import math
+import sys
+import time
+
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import JointState
+
+
+class HeadSeedCheck(Node):
+    def __init__(self):
+        super().__init__('r1_head_seed_precheck')
+        qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
+        self.samples = []
+        self.failure = ''
+        self.create_subscription(
+            JointState, '/r1/sdk/joint_states', self.on_state, qos
+        )
+
+    def on_state(self, message):
+        if self.failure or len(self.samples) >= 5:
+            return
+        if (len(message.name) != len(message.position)
+                or len(message.name) != len(message.velocity)
+                or len(set(message.name)) != len(message.name)):
+            self.failure = 'malformed name/position/velocity arrays'
+            return
+        position = dict(zip(message.name, message.position))
+        velocity = dict(zip(message.name, message.velocity))
+        required = ('head_yaw_joint', 'head_pitch_joint')
+        if any(name not in position or name not in velocity for name in required):
+            self.failure = 'head joints are missing from JointState'
+            return
+        values = (
+            position['head_yaw_joint'], position['head_pitch_joint'],
+            velocity['head_yaw_joint'], velocity['head_pitch_joint'],
+        )
+        if not all(math.isfinite(value) for value in values):
+            self.failure = 'head q/dq contains NaN or Inf'
+            return
+        self.samples.append(values)
+
+
+rclpy.init()
+node = HeadSeedCheck()
+deadline = time.monotonic() + 4.0
+try:
+    while not node.failure and len(node.samples) < 5 \
+            and time.monotonic() < deadline:
+        rclpy.spin_once(node, timeout_sec=0.1)
+finally:
+    node.destroy_node()
+    rclpy.shutdown()
+
+if node.failure:
+    print(f'[BLOCKED] physical head feedback rejected: {node.failure}')
+    raise SystemExit(2)
+if len(node.samples) < 5:
+    print('[BLOCKED] fewer than five fresh physical head samples arrived')
+    raise SystemExit(2)
+
+yaw, pitch, yaw_velocity, pitch_velocity = node.samples[-1]
+probe_mode = sys.argv[1].lower() == 'true'
+yaw_limit = 2.0071 if probe_mode else 0.35
+pitch_limit = 0.6283 if probe_mode else 0.25
+if any(abs(sample[0]) > yaw_limit or abs(sample[1]) > pitch_limit
+       for sample in node.samples):
+    print(
+        '[BLOCKED] physical head is outside the accepted seed envelope: '
+        f'yaw={yaw:.6f} pitch={pitch:.6f}; '
+        f'limits yaw={yaw_limit:.4f} pitch={pitch_limit:.4f} rad. '
+        'Normal tracking cannot start from this pose. The separately reviewed '
+        'ownership micro-probe may diagnose axis/ownership but will not recenter it.'
+    )
+    raise SystemExit(3)
+if any(abs(sample[2]) > 0.05 or abs(sample[3]) > 0.05
+       for sample in node.samples):
+    print(
+        '[BLOCKED] physical head is not stationary enough to seed: '
+        f'yaw_dq={yaw_velocity:.6f} pitch_dq={pitch_velocity:.6f}; '
+        'limit=0.05 rad/s.'
+    )
+    raise SystemExit(3)
+if (max(sample[0] for sample in node.samples)
+        - min(sample[0] for sample in node.samples) > 0.01
+        or max(sample[1] for sample in node.samples)
+        - min(sample[1] for sample in node.samples) > 0.01):
+    print('[BLOCKED] physical head position changed across the seed samples')
+    raise SystemExit(3)
+
+print(
+    '[OK] physical head seed is stable and accepted for '
+    f'{"ownership micro-probe" if probe_mode else "normal tracking"}: '
+    f'yaw={yaw:.6f} pitch={pitch:.6f} '
+    f'yaw_dq={yaw_velocity:.6f} pitch_dq={pitch_velocity:.6f}'
+)
+PY
+)"
+  head_seed_status=$?
+  set -e
+  printf '%s\n' "${head_seed_check}"
+  ((head_seed_status == 0)) \
+    || die 'physical head seed precheck failed before kill release'
+fi
+if grep -Fqi 'boolean value is: true' <<<"${locomotion_enabled}"; then
+  locomotion_command="$(timeout 4s ros2 topic echo --once --full-length \
+    /r1/locomotion_dry_run/debug/cmd_vel \
+    geometry_msgs/msg/TwistStamped --no-daemon 2>/dev/null || true)"
+  [[ -n ${locomotion_command} ]] || die 'fresh bounded locomotion command was not observed'
+fi
+if grep -Fqi 'boolean value is: true' <<<"${arms_enabled}"; then
+  arm_topic="${arm_topic_param#*: }"
+  arm_command="$(timeout 5s ros2 topic echo --once --full-length \
+    "${arm_topic}" trajectory_msgs/msg/JointTrajectory \
+    --no-daemon 2>/dev/null || true)"
+  [[ -n ${arm_command} ]] || die "fresh arm IK command was not observed on ${arm_topic}; run /vr/calibrate_body and keep both controllers visible"
+  grep -Fq 'left_shoulder_pitch_joint' <<<"${arm_command}" \
+    || die "arm IK command on ${arm_topic} does not contain the R1 arm joint set"
+fi
+
+deadman="$(timeout 4s ros2 topic echo --once --full-length \
+  /vr/teleop/active std_msgs/msg/Bool --no-daemon 2>/dev/null || true)"
+grep -Eq 'data:[[:space:]]*true' <<<"${deadman}" \
+  || die 'hold Deadman: no fresh true sample was received'
+
+# Close the time-of-check/time-of-use window left by the longer graph, head
+# seed, and Deadman checks above.  The live writer has not been authorized to
+# publish ArmSdk frames yet, so any LowCmd sample, non-idle/missing action
+# state, observer error, or signal interruption must block before either
+# software kill is released.  Preserve the observer's exact result for the
+# log, but intentionally accept only its single unambiguous idle code (0).
+echo 'Repeating the read-only ArmSdk traffic gate immediately before kill release...'
+set +e
+R1_SDK_NETWORK_INTERFACE="${INTERFACE}" \
+  "${SCRIPT_DIR}/r1-arm-sdk-traffic-check" \
+    --interface "${INTERFACE}" --duration-sec 6.0 \
+    --fresh-sec 0.5 --action-fresh-sec 3.5 --min-samples 3 \
+    --expected-writers 1
+arm_sdk_final_gate_status=$?
+set -e
+((arm_sdk_final_gate_status == 0)) \
+  || die "final ArmSdk traffic gate failed closed (exit ${arm_sdk_final_gate_status})"
+echo '[OK] final ArmSdk traffic gate is idle; proceeding to the explicit kill-release step.'
+
+call_trigger() {
+  local service=$1 response
+  response="$(timeout 8s ros2 service call "${service}" std_srvs/srv/Trigger '{}' 2>&1)" || {
+    printf '%s\n' "${response}" >&2
+    return 1
+  }
+  printf '%s\n' "${response}"
+  grep -Eq 'success[[:space:]]*=[[:space:]]*True|success:[[:space:]]*true' <<<"${response}"
+}
+
+wait_for_prepare_confirmation() {
+  local deadline=$((SECONDS + 15)) status
+  while ((SECONDS < deadline)); do
+    status="$(timeout 3s ros2 topic echo --once \
+      /r1/live_writer/status std_msgs/msg/String --field data \
+      --no-daemon 2>/dev/null || true)"
+    [[ -n ${status} ]] && printf 'writer status: %s\n' "${status}"
+    if grep -Eq \
+      'prepare_result=.*[[:space:]]prepare_rearm=await_deadman_release|prepared=true.*prepare_rearm=await_deadman_release' \
+      <<<"${status}"; then
+      return 0
+    fi
+    if grep -Eq \
+      'fail_closed reason=prepare_|prepare_cancelled|prepare_in_progress=false.*prepared=false.*kill_clear=false' \
+      <<<"${status}"; then
+      return 1
+    fi
+    sleep 0.2
+  done
+  echo '[BLOCKED] timed out waiting for stable FSM 4/811 locomotion prepare confirmation' >&2
+  return 1
+}
+
+emergency_relock() {
+  set +e
+  timeout 5s ros2 service call /r1/live_writer/kill std_srvs/srv/Trigger '{}' >/dev/null 2>&1
+  timeout 5s ros2 service call /r1/safety/emergency_stop std_srvs/srv/Trigger '{}' >/dev/null 2>&1
+  set -e
+}
+trap emergency_relock ERR
+trap 'emergency_relock; exit 130' INT TERM
+
+echo 'Releasing the software kill for this acknowledged commissioning step...'
+release="$(timeout 8s ros2 service call /r1/safety/set_kill \
+  std_srvs/srv/SetBool '{data: false}' 2>&1)" || {
+  printf '%s\n' "${release}" >&2
+  false
+}
+printf '%s\n' "${release}"
+grep -Eq 'success[[:space:]]*=[[:space:]]*True|success:[[:space:]]*true' <<<"${release}"
+
+sleep 0.3
+call_trigger /r1/live_writer/reset_kill
+call_trigger /r1/live_writer/prepare
+wait_for_prepare_confirmation
+trap - ERR INT TERM
+
+echo '[OK] official R1 StandUp is confirmed by stable FSM 4 and Start by stable locomotion FSM 811.'
+echo 'Now release Deadman.'
+echo 'If locomotion is enabled, keep the stick neutral until the writer observes a fresh zero command.'
+echo 'Then press Deadman again; head-only mode skips the neutral-velocity gate.'
+echo 'Only fresh commands received after that new press can be sent.'
+echo 'Run make robot-stop or use the physical E-stop at any unexpected behavior.'

@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Start the local, internet-independent endpoints used by the Pico APK.
+# The r1 mode starts only the UDP bridge and video-only Unitree camera source;
+# it never starts r1_hardware_adapter, r1_live_writer, Sport, ArmSdk, or a
+# locomotion/head command path.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SOURCE_PACKAGE="${PROJECT_DIR}/ros2_ws/src/r1_robot_pov"
+
+MODE="${1:-r1}"
+case "${MODE}" in
+  r1|unitree)
+    export R1_TELEOP_START_BRIDGE=true
+    export R1_TELEOP_START_SIMULATION=false
+    export R1_TELEOP_START_VIDEO=true
+    export R1_TELEOP_VIDEO_SOURCE=unitree
+    export R1_TELEOP_VIDEO_ENV_FILE="${SOURCE_PACKAGE}/config/robot_pov.r1.env"
+    export R1_TELEOP_VIDEO_PROFILE="${R1_TELEOP_VIDEO_PROFILE:-low-latency}"
+    export R1_TELEOP_VIDEO_LAYOUT=mono
+    ;;
+  mock)
+    export R1_TELEOP_START_BRIDGE=true
+    export R1_TELEOP_START_SIMULATION=false
+    export R1_TELEOP_START_VIDEO=true
+    export R1_TELEOP_VIDEO_SOURCE=mock
+    export R1_TELEOP_VIDEO_ENV_FILE="${SOURCE_PACKAGE}/config/robot_pov.mock.env"
+    export R1_TELEOP_VIDEO_PROFILE="${R1_TELEOP_VIDEO_PROFILE:-low-latency}"
+    ;;
+  sim|simulation)
+    export R1_TELEOP_START_BRIDGE=true
+    export R1_TELEOP_START_SIMULATION=true
+    export R1_TELEOP_START_VIDEO=true
+    export R1_TELEOP_VIDEO_SOURCE=ros
+    export R1_TELEOP_VIDEO_ENV_FILE="${SOURCE_PACKAGE}/config/robot_pov.sim.env"
+    export R1_TELEOP_VIDEO_PROFILE="${R1_TELEOP_VIDEO_PROFILE:-low-latency}"
+    ;;
+  -h|--help)
+    cat <<'EOF'
+Usage: r1-offline-session [r1|mock|sim]
+
+r1    bridge + Unitree video-only source; safe while R1 is off and reconnects
+      when the static Ethernet link and videohub become available.
+mock  bridge + local generated POV frames; no robot or camera required.
+sim   existing Gazebo/ROS dry-run stack; hardware_enabled remains false.
+EOF
+    exit 0
+    ;;
+  *)
+    echo "unknown mode: ${MODE} (use r1, mock, or sim)" >&2
+    exit 2
+    ;;
+esac
+
+export R1_TELEOP_VIDEO_MDNS="${R1_TELEOP_VIDEO_MDNS:-true}"
+export R1_TELEOP_DOMAIN_ID="${R1_TELEOP_DOMAIN_ID:-81}"
+export R1_TELEOP_UDP_PORT="${R1_TELEOP_UDP_PORT:-9090}"
+export R1_TELEOP_VIDEO_PORT="${R1_TELEOP_VIDEO_PORT:-8080}"
+export R1_TELEOP_VIDEO_HOST="${R1_TELEOP_VIDEO_HOST:-0.0.0.0}"
+export R1_TELEOP_DISPLAY="${R1_TELEOP_DISPLAY:-false}"
+export R1_TELEOP_HEADSET_RELATIVE="${R1_TELEOP_HEADSET_RELATIVE:-true}"
+export ROBOT_POV_MDNS_NAME="${R1_TELEOP_MDNS_NAME:-$(hostname -s).local}"
+
+if [[ "${MODE}" == r1 || "${MODE}" == unitree ]]; then
+  echo 'R1 offline LAN session: video-only Unitree source; robot command paths are disabled.'
+elif [[ "${MODE}" == mock ]]; then
+  echo 'R1 offline LAN session: mock video source; no robot is required.'
+else
+echo 'R1 offline LAN session: Gazebo dry-run; hardware_enabled=false.'
+fi
+echo "Pico control endpoint: UDP discovery 9091, command stream ${R1_TELEOP_UDP_PORT}."
+echo "Pico POV endpoint: http://${ROBOT_POV_MDNS_NAME}:${R1_TELEOP_VIDEO_PORT}/ when Avahi is available."
+
+exec "${SCRIPT_DIR}/r1-teleoperation"

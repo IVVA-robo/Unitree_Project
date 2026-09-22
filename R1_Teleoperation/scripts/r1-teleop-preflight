@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Read-only R1 teleoperation preflight. It never starts a Unitree SDK client.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+INSTALL_SETUP="${PROJECT_DIR}/ros2_ws/install/setup.bash"
+if [[ ! -f "${INSTALL_SETUP}" ]]; then
+  INSTALL_SETUP="${PROJECT_DIR}/install/setup.bash"
+fi
+
+[[ -f /opt/ros/humble/setup.bash ]] || {
+  echo '[FAIL] ROS 2 Humble setup.bash is missing' >&2
+  exit 1
+}
+[[ -f "${INSTALL_SETUP}" ]] || {
+  echo "[FAIL] workspace is not built: ${INSTALL_SETUP}" >&2
+  exit 1
+}
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${INSTALL_SETUP}"
+set -u
+
+export ROS_DOMAIN_ID="${R1_TELEOP_HARDWARE_DOMAIN_ID:-89}"
+export ROS_LOCALHOST_ONLY=1
+export ROBOT_DRY_RUN="${ROBOT_DRY_RUN:-1}"
+export ROBOT_ENABLE_ACTUATION="${ROBOT_ENABLE_ACTUATION:-0}"
+export ROBOT_CONFIRM_OFF_CHARGER="${ROBOT_CONFIRM_OFF_CHARGER:-0}"
+export ROBOT_CONFIRM_CLEAR_AREA="${ROBOT_CONFIRM_CLEAR_AREA:-0}"
+export ROBOT_CONFIRM_ESTOP_READY="${ROBOT_CONFIRM_ESTOP_READY:-0}"
+
+echo 'R1 teleop preflight is read-only: no motor, stand, or locomotion command.'
+exec ros2 run r1_teleop_safety r1_teleop_preflight "$@"

@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REQUIREMENTS="${PROJECT_DIR}/ros2_ws/src/r1_robot_pov/requirements.txt"
+WHEELHOUSE="${PROJECT_DIR}/.cache/robot-pov-wheelhouse"
+MANIFEST="${WHEELHOUSE}/SHA256SUMS"
+REQUIREMENTS_HASH="${WHEELHOUSE}/requirements.sha256"
+PLATFORM_FILE="${WHEELHOUSE}/platform.txt"
+COMPLETE_MARKER="${WHEELHOUSE}/.complete"
+
+mkdir -p "${WHEELHOUSE}"
+rm -f "${COMPLETE_MARKER}"
+python3 -m pip download --only-binary=:all: \
+  --dest "${WHEELHOUSE}" --requirement "${REQUIREMENTS}"
+
+VERIFY_DIR="$(mktemp -d)"
+trap 'rm -rf -- "${VERIFY_DIR}"' EXIT
+python3 -m pip download --no-index --only-binary=:all: \
+  --find-links "${WHEELHOUSE}" --dest "${VERIFY_DIR}" \
+  --requirement "${REQUIREMENTS}"
+
+(
+  cd "${WHEELHOUSE}"
+  find . -maxdepth 1 -type f -name '*.whl' -printf '%f\0' \
+    | sort -z \
+    | xargs -0 -r sha256sum -- > SHA256SUMS
+)
+sha256sum "${REQUIREMENTS}" | awk '{print $1}' > "${REQUIREMENTS_HASH}"
+python3 -c 'import platform, sys, sysconfig; print(f"{platform.python_implementation()}-{sys.version_info.major}.{sys.version_info.minor}-{sysconfig.get_platform()}")' \
+  > "${PLATFORM_FILE}"
+printf 'complete\n' > "${COMPLETE_MARKER}"
+printf 'Offline wheel cache ready: %s\n' "${WHEELHOUSE}"

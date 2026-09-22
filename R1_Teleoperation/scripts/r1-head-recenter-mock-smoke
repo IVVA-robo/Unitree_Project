@@ -1,0 +1,604 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Compatibility filename for end-to-end MockTransport coverage of the bounded
+# head ownership micro-probe. Full physical recenter is suspended. The graph
+# runs in a private network namespace containing only loopback, so even an
+# accidental transport regression cannot reach the R1.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_SETUP="${PROJECT_DIR}/ros2_ws/install/setup.bash"
+SCRIPT_PATH="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
+INTERNAL_ARGUMENT='--inside-r1-head-probe-private-network'
+
+die() {
+  echo "[FAIL] $*" >&2
+  exit 1
+}
+
+command -v ip >/dev/null 2>&1 || die 'iproute2 is required'
+command -v python3 >/dev/null 2>&1 || die 'python3 is required'
+command -v readlink >/dev/null 2>&1 || die 'readlink is required'
+command -v unshare >/dev/null 2>&1 || die 'unshare is required'
+[[ -f /opt/ros/humble/setup.bash ]] || die 'ROS 2 Humble is unavailable'
+[[ -f "${WORKSPACE_SETUP}" ]] || die "workspace is not built: ${WORKSPACE_SETUP}"
+
+# Retain the caller namespace FD so the internal argument cannot be spoofed.
+if [[ "${1:-}" != "${INTERNAL_ARGUMENT}" ]]; then
+  [[ $# -eq 0 ]] || die 'usage: r1-head-recenter-mock-smoke'
+  exec 9< /proc/self/ns/net || die 'could not retain caller network namespace'
+  exec unshare --user --map-root-user --net -- "${SCRIPT_PATH}" "${INTERNAL_ARGUMENT}"
+fi
+shift
+[[ $# -eq 0 ]] || die 'unexpected argument after private-network entry'
+
+current_network_namespace="$(readlink -- /proc/self/ns/net)" || \
+  die 'could not identify current network namespace'
+caller_network_namespace="$(readlink -- /proc/self/fd/9)" || \
+  die 'missing caller network namespace identity'
+[[ "${current_network_namespace}" != "${caller_network_namespace}" ]] || \
+  die 'probe smoke is not in a private network namespace'
+exec 9<&-
+ip link set dev lo up || die 'could not bring up private loopback'
+
+unexpected_interfaces="$(
+  ip -o link show | awk -F': ' \
+    '{name=$2; sub(/@.*/, "", name); if (name != "lo") print name}'
+)"
+[[ -z "${unexpected_interfaces}" ]] || \
+  die "private namespace exposes non-loopback interfaces: ${unexpected_interfaces//$'\n'/, }"
+ip link show dev lo | grep -Eq '<[^>]*\bUP\b[^>]*>' || \
+  die 'private loopback interface is not up'
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${WORKSPACE_SETUP}"
+set -u
+
+export ROS_DOMAIN_ID=232
+export ROS_LOCALHOST_ONLY=1
+WRITER_PREFIX="$(ros2 pkg prefix r1_live_writer)" || \
+  die 'r1_live_writer is not installed'
+WRITER_CONFIG="${WRITER_PREFIX}/share/r1_live_writer/config/r1_live_writer.yaml"
+[[ -f "${WRITER_CONFIG}" ]] || die "writer config is missing: ${WRITER_CONFIG}"
+
+echo 'R1 head ownership-probe smoke: loopback-only MockTransport; no robot/SDK path.'
+echo 'Compatibility note: the old recenter mock filename now tests only the bounded probe.'
+
+python3 - "${WRITER_CONFIG}" <<'PY'
+import math
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool, String
+from std_srvs.srv import SetBool, Trigger
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+
+CONFIG = sys.argv[1]
+TOKEN = 'mock-head-ownership-probe-token-2026'
+VR_IP = '192.168.250.43'
+STATE_TOPIC = '/r1/probe_mock/joint_states'
+HEAD_TOPIC = '/r1/probe_mock/head_input'
+SEED_YAW = 0.05
+SEED_PITCH = -0.03
+MAX_PROBE_STEP = 0.005
+
+writer_environment = os.environ.copy()
+writer_environment.update({
+    'ROBOT_DRY_RUN': '0',
+    'ROBOT_ENABLE_ACTUATION': '1',
+    'ROBOT_CONFIRM_OFF_CHARGER': '1',
+    'ROBOT_CONFIRM_CLEAR_AREA': '1',
+    'ROBOT_CONFIRM_ESTOP_READY': '1',
+    'ROBOT_CONFIRM_COMMISSIONING': '1',
+    'ROBOT_CONFIRM_HEAD_OWNERSHIP_PROBE': '1',
+    # The retired acknowledgement is deliberately absent: it must neither be
+    # needed nor be capable of authorizing the probe.
+    'ROBOT_COMMISSIONING_TOKEN': TOKEN,
+    'ROBOT_VR_SOURCE_IP': VR_IP,
+})
+writer_environment.pop('ROBOT_CONFIRM_HEAD_RECENTER', None)
+writer_environment.pop('R1_PHYSICAL_SDK_SESSION', None)
+
+writer_command = [
+    'ros2', 'run', 'r1_live_writer', 'r1_live_writer_node', '--ros-args',
+    '--params-file', CONFIG,
+    '-p', 'transport:=mock',
+    '-p', 'network_interface:=mock-only',
+    '-p', 'send_commands:=true',
+    '-p', 'enable_head:=true',
+    '-p', 'enable_locomotion:=false',
+    '-p', 'enable_prepare:=true',
+    '-p', 'commissioning_confirmed:=true',
+    '-p', f'commissioning_token:={TOKEN}',
+    '-p', f'expected_vr_source_ip:={VR_IP}',
+    '-p', 'profile:=slow-safe',
+    '-p', 'head_absolute_envelope_confirmed:=true',
+    '-p', 'head_recenter_enabled:=true',
+    '-p', 'head_recenter_confirmed:=false',
+    '-p', 'head_ownership_probe_only:=true',
+    '-p', 'head_ownership_probe_confirmed:=true',
+    '-p', f'head_topic:={HEAD_TOPIC}',
+    '-p', f'joint_state_topic:={STATE_TOPIC}',
+]
+supervisor_command = [
+    'ros2', 'run', 'r1_teleop_safety', 'r1_safety_supervisor',
+]
+supervisor = subprocess.Popen(
+    supervisor_command,
+    env=writer_environment,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True,
+    start_new_session=True,
+)
+supervisor_output = []
+
+writer = subprocess.Popen(
+    writer_command,
+    env=writer_environment,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True,
+    start_new_session=True,
+)
+writer_output = []
+
+
+def drain_writer_output():
+    assert writer.stdout is not None
+    for line in writer.stdout:
+        writer_output.append(line.rstrip())
+
+
+threading.Thread(target=drain_writer_output, daemon=True).start()
+
+
+def drain_supervisor_output():
+    assert supervisor.stdout is not None
+    for line in supervisor.stdout:
+        supervisor_output.append(line.rstrip())
+
+
+threading.Thread(target=drain_supervisor_output, daemon=True).start()
+
+rclpy.init()
+node = Node('r1_head_ownership_probe_mock_harness')
+reliable = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
+latched = QoSProfile(
+    depth=10,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+)
+state_publisher = node.create_publisher(JointState, STATE_TOPIC, reliable)
+head_publisher = node.create_publisher(JointTrajectory, HEAD_TOPIC, reliable)
+deadman_publisher = node.create_publisher(Bool, '/vr/teleop/active', reliable)
+
+statuses = []
+armed_values = []
+kill_requests = []
+kill_values = []
+debug_targets = []
+latest_target = [SEED_YAW, SEED_PITCH]
+follow_debug_target = False
+record_targets = False
+
+
+def on_status(message):
+    statuses.append(message.data)
+
+
+def on_debug_head(message):
+    if not message.points or len(message.points[0].positions) != 2:
+        return
+    target = [
+        float(message.points[0].positions[0]),
+        float(message.points[0].positions[1]),
+    ]
+    # Preserve every active target for the post-run safety assertions, but feed
+    # back only a target inside the legal probe window. This prevents the
+    # fail-closed {0,0} diagnostic sentinel (or any unsafe regression) from
+    # being presented as simulated physical feedback.
+    target_in_probe_window = (
+        abs(target[1] - SEED_PITCH) <= 1.0e-6
+        and SEED_YAW - MAX_PROBE_STEP - 1.0e-6
+        <= target[0] <= SEED_YAW + 1.0e-6
+    )
+    if follow_debug_target and target_in_probe_window:
+        latest_target[:] = target
+    if record_targets:
+        debug_targets.append(tuple(target))
+
+
+node.create_subscription(String, '/r1/live_writer/status', on_status, latched)
+node.create_subscription(
+    JointTrajectory,
+    '/r1/live_writer/debug/head_command',
+    on_debug_head,
+    reliable,
+)
+node.create_subscription(
+    Bool,
+    '/r1/live_writer/armed',
+    lambda message: armed_values.append(message.data),
+    latched,
+)
+node.create_subscription(
+    Bool,
+    '/r1/safety/kill_request',
+    lambda message: kill_requests.append(message.data),
+    latched,
+)
+node.create_subscription(
+    Bool,
+    '/r1/safety/kill',
+    lambda message: kill_values.append(message.data),
+    latched,
+)
+
+clients = {
+    name: node.create_client(Trigger, name)
+    for name in (
+        '/r1/live_writer/reset_kill',
+        '/r1/live_writer/prepare',
+        '/r1/live_writer/recenter_head',
+        '/r1/live_writer/probe_head_ownership',
+    )
+}
+safety_client = node.create_client(SetBool, '/r1/safety/set_kill')
+
+joint_names = [
+    'left_shoulder_pitch_joint', 'left_shoulder_roll_joint',
+    'left_shoulder_yaw_joint', 'left_elbow_joint',
+    'left_wrist_roll_joint', 'right_shoulder_pitch_joint',
+    'right_shoulder_roll_joint', 'right_shoulder_yaw_joint',
+    'right_elbow_joint', 'right_wrist_roll_joint', 'waist_yaw_joint',
+    'head_pitch_joint', 'head_yaw_joint',
+]
+positions = [0.0] * len(joint_names)
+velocities = [0.0] * len(joint_names)
+
+
+def publish_inputs(deadman=True):
+    if follow_debug_target:
+        positions[12] = latest_target[0]
+        positions[11] = latest_target[1]
+
+    state = JointState()
+    state.header.stamp = node.get_clock().now().to_msg()
+    state.name = joint_names
+    state.position = positions
+    state.velocity = velocities
+    state_publisher.publish(state)
+
+    head = JointTrajectory()
+    head.header.stamp = node.get_clock().now().to_msg()
+    head.joint_names = ['head_yaw_joint', 'head_pitch_joint']
+    point = JointTrajectoryPoint()
+    point.positions = [0.0, 0.0]
+    head.points = [point]
+    head_publisher.publish(head)
+
+    deadman_message = Bool()
+    deadman_message.data = deadman
+    deadman_publisher.publish(deadman_message)
+
+
+def cycle(duration, deadman=True, predicate=None):
+    deadline = time.monotonic() + duration
+    while time.monotonic() < deadline:
+        if writer.poll() is not None:
+            raise RuntimeError(
+                'writer exited early:\n' + '\n'.join(writer_output[-50:])
+            )
+        publish_inputs(deadman)
+        rclpy.spin_once(node, timeout_sec=0.005)
+        if predicate is not None and predicate():
+            return True
+        time.sleep(0.015)
+    return bool(predicate is not None and predicate())
+
+
+def call_service(name, deadman=True):
+    client = clients[name]
+    if not client.wait_for_service(timeout_sec=8.0):
+        raise RuntimeError(f'service unavailable: {name}')
+    future = client.call_async(Trigger.Request())
+    deadline = time.monotonic() + 8.0
+    while time.monotonic() < deadline and not future.done():
+        publish_inputs(deadman)
+        rclpy.spin_once(node, timeout_sec=0.01)
+        time.sleep(0.01)
+    if not future.done() or future.result() is None:
+        raise RuntimeError(f'service did not return: {name}')
+    response = future.result()
+    print(
+        f'[INFO] {name}: success={response.success} '
+        f'message={response.message}'
+    )
+    return response
+
+
+def release_central_kill():
+    if not safety_client.wait_for_service(timeout_sec=8.0):
+        raise RuntimeError('service unavailable: /r1/safety/set_kill')
+    request = SetBool.Request()
+    request.data = False
+    future = safety_client.call_async(request)
+    deadline = time.monotonic() + 8.0
+    while time.monotonic() < deadline and not future.done():
+        publish_inputs(deadman=True)
+        rclpy.spin_once(node, timeout_sec=0.01)
+        time.sleep(0.01)
+    if not future.done() or future.result() is None:
+        raise RuntimeError('central kill release service did not return')
+    response = future.result()
+    print(
+        f'[INFO] /r1/safety/set_kill false: success={response.success} '
+        f'message={response.message}'
+    )
+    if not response.success:
+        raise AssertionError(response.message)
+    if not cycle(2.0, predicate=lambda: bool(kill_values) and not kill_values[-1]):
+        raise AssertionError('central supervisor did not publish kill=false')
+
+
+def status_since(marker, text):
+    return any(text in status for status in statuses[marker:])
+
+
+def status_value_since(marker, text):
+    return next(
+        (status for status in statuses[marker:] if text in status),
+        '',
+    )
+
+
+def wait_for_status(marker, text, duration=4.0, deadman=True):
+    if not cycle(
+        duration,
+        deadman=deadman,
+        predicate=lambda: status_since(marker, text),
+    ):
+        raise AssertionError(f'writer status did not contain {text!r}')
+
+
+def prepare_and_rearm(yaw, pitch):
+    global follow_debug_target, record_targets
+    follow_debug_target = False
+    record_targets = False
+    latest_target[:] = [yaw, pitch]
+    positions[12] = yaw
+    positions[11] = pitch
+    velocities[12] = 0.0
+    velocities[11] = 0.0
+    cycle(0.5)
+
+    release_central_kill()
+    reset = call_service('/r1/live_writer/reset_kill')
+    if not reset.success:
+        raise AssertionError(reset.message)
+    marker = len(statuses)
+    prepare = call_service('/r1/live_writer/prepare')
+    if not prepare.success:
+        raise AssertionError(prepare.message)
+    wait_for_status(marker, 'prepare_rearm=await_deadman_release')
+
+    marker = len(statuses)
+    wait_for_status(
+        marker,
+        'prepare_rearm=await_deadman_press',
+        deadman=False,
+    )
+    marker = len(statuses)
+    wait_for_status(marker, 'prepare_rearm=ready', deadman=True)
+    cycle(0.25, deadman=True)
+
+
+try:
+    cycle(0.5)
+
+    print('[TEST] legacy full physical recenter service is unconditionally suspended')
+    legacy_marker = len(statuses)
+    legacy = call_service('/r1/live_writer/recenter_head')
+    if legacy.success or 'full physical recenter is suspended' not in legacy.message:
+        raise AssertionError('legacy full recenter service was not rejected')
+    wait_for_status(
+        legacy_marker,
+        'head_recenter=blocked physical_full_recenter_suspended=true',
+    )
+    print('[OK] legacy recenter service failed closed without claiming output')
+
+    print('[TEST] bounded ownership probe discovers/ramp claims, moves <=0.005 rad, returns and releases')
+    prepare_and_rearm(SEED_YAW, SEED_PITCH)
+    probe_marker = len(statuses)
+    armed_marker = len(armed_values)
+    kill_marker = len(kill_requests)
+    central_kill_marker = len(kill_values)
+    response = call_service('/r1/live_writer/probe_head_ownership')
+    if not response.success or 'no recenter will be performed' not in response.message:
+        raise AssertionError(response.message)
+    wait_for_status(probe_marker, 'head_ownership_probe=zero_weight_discovery')
+    zero_status = status_value_since(
+        probe_marker, 'head_ownership_probe=zero_weight_discovery'
+    )
+    if 'weight=0' not in zero_status:
+        raise AssertionError(f'zero-weight discovery status is malformed: {zero_status}')
+
+    # Drain the reliable debug queue while feedback remains pinned to the seed.
+    # Otherwise a pre-request fail-closed {0,0} diagnostic could be consumed
+    # after follow mode starts and be mistaken for a probe command.
+    cycle(0.30)
+    debug_targets.clear()
+    follow_debug_target = True
+    record_targets = True
+    wait_for_status(
+        probe_marker,
+        'head_ownership_probe=passed terminal=true',
+        duration=12.0,
+    )
+    # The terminal status and final seed debug sample are different DDS topics;
+    # drain the reliable debug queue before closing the recording window.
+    follow_debug_target = False
+    cycle(0.2)
+    record_targets = False
+
+    required_statuses = (
+        'head_ownership_probe=weight_ramp_started',
+        'head_ownership_probe=full_weight_seed_hold',
+        'head_ownership_probe=verifying_outbound_feedback',
+        'head_ownership_probe=outbound_feedback_confirmed',
+        'head_ownership_probe=confirming_seed_return',
+        'head_ownership_probe=passed terminal=true no_recenter=true',
+    )
+    for expected in required_statuses:
+        if not status_since(probe_marker, expected):
+            raise AssertionError(f'probe status did not contain {expected!r}')
+    ramp_status = status_value_since(
+        probe_marker, 'head_ownership_probe=weight_ramp_started'
+    )
+    full_weight_status = status_value_since(
+        probe_marker, 'head_ownership_probe=full_weight_seed_hold'
+    )
+    if 'weight=0' not in ramp_status or 'weight=1' not in full_weight_status:
+        raise AssertionError(
+            f'weight discovery/ramp endpoints missing: {ramp_status} / {full_weight_status}'
+        )
+
+    terminal = status_value_since(
+        probe_marker, 'head_ownership_probe=passed terminal=true'
+    )
+    for expected in (
+        'kill_latched=true',
+        'release_complete=true',
+    ):
+        if expected not in terminal:
+            raise AssertionError(f'terminal cleanup status missing {expected!r}: {terminal}')
+    if 'head_release=mock ArmSdk weight release recorded' not in terminal:
+        raise AssertionError(
+            f'terminal probe status did not confirm mock weight=0 release: {terminal}'
+        )
+    if not any(kill_requests[kill_marker:]):
+        raise AssertionError('probe completion did not request the central kill')
+    if not any(kill_values[central_kill_marker:]):
+        raise AssertionError('central safety supervisor did not latch kill=true')
+    if not armed_values[armed_marker:] or armed_values[-1]:
+        raise AssertionError('writer remained armed after probe completion')
+
+    # safe_stop publishes {0,0} as its final diagnostic sentinel. Strip only
+    # trailing sentinels. Never filter an active out-of-range target: it must
+    # fail the assertions below rather than silently disappear.
+    probe_targets = list(debug_targets)
+    while probe_targets and all(
+        abs(value) <= 1.0e-12 for value in probe_targets[-1]
+    ):
+        probe_targets.pop()
+    if len(probe_targets) < 10:
+        raise AssertionError(f'too few bounded probe targets: {len(probe_targets)}')
+    for target in probe_targets:
+        if abs(target[1] - SEED_PITCH) > 1.0e-6:
+            raise AssertionError(f'probe changed pitch/non-probed target: {target}')
+        if target[0] > SEED_YAW + 1.0e-6 \
+                or target[0] < SEED_YAW - MAX_PROBE_STEP - 1.0e-6:
+            raise AssertionError(
+                f'probe target exceeded bounded direction/window: {target}'
+            )
+    excursions = [SEED_YAW - target[0] for target in probe_targets]
+    max_excursion = max(excursions)
+    if max_excursion > MAX_PROBE_STEP + 1.0e-6:
+        raise AssertionError(f'probe exceeded 0.005 rad: {max_excursion}')
+    if max_excursion < MAX_PROBE_STEP - 2.0e-4:
+        raise AssertionError(f'probe never reached its bounded step: {max_excursion}')
+    outward_index = excursions.index(max_excursion)
+    if not any(
+        abs(target[0] - SEED_YAW) <= 1.0e-6
+        and abs(target[1] - SEED_PITCH) <= 1.0e-6
+        for target in probe_targets[outward_index + 1:]
+    ):
+        raise AssertionError('probe did not command a return to the exact seed')
+    if abs(positions[12] - SEED_YAW) > 0.0015:
+        raise AssertionError(
+            f'feedback did not return to seed: {positions[12]} vs {SEED_YAW}'
+        )
+    print(
+        f'[OK] zero-weight discovery, ramp, {max_excursion:.6f} rad '
+        'out-and-back, weight release, disarm and kill all confirmed'
+    )
+
+    print('[TEST] excessive measured head velocity aborts and still releases/kills')
+    prepare_and_rearm(SEED_YAW, SEED_PITCH)
+    abort_marker = len(statuses)
+    kill_marker = len(kill_requests)
+    central_kill_marker = len(kill_values)
+    response = call_service('/r1/live_writer/probe_head_ownership')
+    if not response.success:
+        raise AssertionError(response.message)
+    wait_for_status(abort_marker, 'head_ownership_probe=zero_weight_discovery')
+    follow_debug_target = True
+    velocities[12] = 0.041
+    wait_for_status(
+        abort_marker,
+        'head_ownership_probe_failed cause=feedback_velocity_exceeded',
+        duration=3.0,
+    )
+    velocities[12] = 0.0
+    cycle(0.2)
+    abort_status = status_value_since(
+        abort_marker,
+        'fail_closed reason=head_ownership_probe_failed cause=feedback_velocity_exceeded',
+    )
+    if 'head_release=mock ArmSdk weight release recorded' not in abort_status:
+        raise AssertionError(f'probe abort did not release ownership: {abort_status}')
+    if not any(kill_requests[kill_marker:]):
+        raise AssertionError('probe abort did not request the central kill')
+    if not any(kill_values[central_kill_marker:]):
+        raise AssertionError('central supervisor did not latch kill after probe abort')
+    if not armed_values or armed_values[-1]:
+        raise AssertionError('writer remained armed after probe abort')
+    print('[OK] feedback overspeed failed closed with release, disarm and kill')
+    print('[PASS] head ownership-probe MockTransport smoke passed in loopback-only isolation')
+finally:
+    try:
+        node.destroy_node()
+    finally:
+        if rclpy.ok():
+            rclpy.shutdown()
+    if writer.poll() is None:
+        os.killpg(writer.pid, signal.SIGINT)
+        try:
+            writer.wait(timeout=6.0)
+        except subprocess.TimeoutExpired:
+            os.killpg(writer.pid, signal.SIGKILL)
+            writer.wait(timeout=2.0)
+    if supervisor.poll() is None:
+        os.killpg(supervisor.pid, signal.SIGINT)
+        try:
+            supervisor.wait(timeout=6.0)
+        except subprocess.TimeoutExpired:
+            os.killpg(supervisor.pid, signal.SIGKILL)
+            supervisor.wait(timeout=2.0)
+    if writer.returncode not in (0, -signal.SIGINT):
+        print('[INFO] writer tail:', file=sys.stderr)
+        print('\n'.join(writer_output[-80:]), file=sys.stderr)
+        if sys.exc_info()[0] is None:
+            raise RuntimeError(
+                f'writer exited unexpectedly with code {writer.returncode}'
+            )
+    if supervisor.returncode not in (0, -signal.SIGINT):
+        print('[INFO] supervisor tail:', file=sys.stderr)
+        print('\n'.join(supervisor_output[-80:]), file=sys.stderr)
+        if sys.exc_info()[0] is None:
+            raise RuntimeError(
+                f'supervisor exited unexpectedly with code {supervisor.returncode}'
+            )
+PY

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ $# -eq 0 ]] || {
+  echo '[BLOCKED] usage: r1-robot-head-recenter' >&2
+  echo 'No Unitree command was sent.' >&2
+  exit 2
+}
+
+echo '[BLOCKED] Full physical head recenter is suspended.' >&2
+echo 'Use r1-robot-head-ownership-probe only after a new on-site approval.' >&2
+echo 'The ownership probe does not recenter the head.' >&2
+echo 'No Unitree command was sent.' >&2
+exit 2

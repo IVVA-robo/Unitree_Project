@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# One-command, simulation-only R1 teleoperation launcher.  This wrapper keeps
+# the complete ROS/Gazebo tree in one process group so Ctrl-C stops the bridge,
+# video server, controllers and Gazebo children together.  It never starts the
+# hardware adapter and always passes hardware_enabled=false.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WS_DIR="${PROJECT_DIR}/ros2_ws"
+LEGACY_WS_SETUP="${R1_LEGACY_WS_SETUP:-${PROJECT_DIR}/../Legacy_Robotics/robotics/ros2_ws/install/setup.bash}"
+
+die() {
+  echo "[FAIL] $*" >&2
+  exit 1
+}
+
+[[ -f /opt/ros/humble/setup.bash ]] || die 'ROS 2 Humble setup.bash is missing'
+[[ -f "${LEGACY_WS_SETUP}" ]] || die "R1 description workspace not found: ${LEGACY_WS_SETUP}"
+[[ -f "${WS_DIR}/install/setup.bash" ]] || die "ROS workspace is not built: ${WS_DIR}/install/setup.bash"
+command -v setsid >/dev/null 2>&1 || die 'setsid is required'
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${LEGACY_WS_SETUP}"
+source "${WS_DIR}/install/setup.bash"
+set -u
+
+DOMAIN_ID="${R1_TELEOP_DOMAIN_ID:-81}"
+GAZEBO_PORT="${R1_TELEOP_GAZEBO_PORT:-11347}"
+DISPLAY_MODE="${R1_TELEOP_DISPLAY:-false}"
+HEADSET_RELATIVE="${R1_TELEOP_HEADSET_RELATIVE:-true}"
+MODEL_Z="${R1_TELEOP_MODEL_Z:-0.25}"
+CALIBRATION_FILE="${R1_TELEOP_CALIBRATION_FILE:-${HOME}/.ros/r1_telepresence_sim_body_calibration.json}"
+VIDEO_ENV_FILE="${R1_TELEOP_VIDEO_ENV_FILE:-${WS_DIR}/src/r1_robot_pov/config/robot_pov.sim.env}"
+VIDEO_SOURCE="${R1_TELEOP_VIDEO_SOURCE:-ros}"
+VIDEO_PROFILE="${R1_TELEOP_VIDEO_PROFILE:-low-latency}"
+VIDEO_TRANSPORT="${R1_TELEOP_VIDEO_TRANSPORT:-auto}"
+VIDEO_LAYOUT="${R1_TELEOP_VIDEO_LAYOUT:-stereo}"
+VIDEO_HOST="${R1_TELEOP_VIDEO_HOST:-0.0.0.0}"
+VIDEO_PORT="${R1_TELEOP_VIDEO_PORT:-8080}"
+UDP_PORT="${R1_TELEOP_UDP_PORT:-9090}"
+UDP_BIND_ADDRESS="${R1_TELEOP_UDP_BIND_ADDRESS:-0.0.0.0}"
+START_BRIDGE="${R1_TELEOP_START_BRIDGE:-true}"
+START_SIMULATION="${R1_TELEOP_START_SIMULATION:-true}"
+START_VIDEO="${R1_TELEOP_START_VIDEO:-true}"
+VIDEO_MDNS="${R1_TELEOP_VIDEO_MDNS:-false}"
+
+case "${DISPLAY_MODE}" in true|false) ;; *) die 'R1_TELEOP_DISPLAY must be true or false' ;; esac
+case "${HEADSET_RELATIVE}" in true|false) ;; *) die 'R1_TELEOP_HEADSET_RELATIVE must be true or false' ;; esac
+case "${START_BRIDGE}" in true|false) ;; *) die 'R1_TELEOP_START_BRIDGE must be true or false' ;; esac
+case "${START_SIMULATION}" in true|false) ;; *) die 'R1_TELEOP_START_SIMULATION must be true or false' ;; esac
+case "${START_VIDEO}" in true|false) ;; *) die 'R1_TELEOP_START_VIDEO must be true or false' ;; esac
+case "${VIDEO_MDNS}" in true|false) ;; *) die 'R1_TELEOP_VIDEO_MDNS must be true or false' ;; esac
+[[ "${DOMAIN_ID}" =~ ^[0-9]+$ ]] && (( DOMAIN_ID <= 232 )) || die 'R1_TELEOP_DOMAIN_ID must be 0..232'
+[[ "${GAZEBO_PORT}" =~ ^[0-9]+$ ]] && (( GAZEBO_PORT >= 1024 && GAZEBO_PORT <= 65535 )) || die 'R1_TELEOP_GAZEBO_PORT must be 1024..65535'
+[[ "${VIDEO_PORT}" =~ ^[0-9]+$ ]] && (( VIDEO_PORT >= 1 && VIDEO_PORT <= 65535 )) || die 'R1_TELEOP_VIDEO_PORT must be 1..65535'
+[[ "${UDP_PORT}" =~ ^[0-9]+$ ]] && (( UDP_PORT >= 1 && UDP_PORT <= 65535 )) || die 'R1_TELEOP_UDP_PORT must be 1..65535'
+[[ -f "${VIDEO_ENV_FILE}" ]] || die "video env file not found: ${VIDEO_ENV_FILE}"
+
+port_in_use() {
+  local port="$1"
+  command -v ss >/dev/null 2>&1 || return 1
+  ss -H -ltnup 2>/dev/null | grep -Eq "([.:]|\\])${port}[[:space:]]"
+}
+
+if [[ "${START_BRIDGE}" == true ]] && port_in_use "${UDP_PORT}"; then
+  die "UDP port ${UDP_PORT} is already in use; stop the old VR bridge or set R1_TELEOP_UDP_PORT"
+fi
+if [[ "${START_VIDEO}" == true ]] && port_in_use "${VIDEO_PORT}"; then
+  die "video port ${VIDEO_PORT} is already in use; stop the old POV server or set R1_TELEOP_VIDEO_PORT"
+fi
+if [[ "${START_SIMULATION}" == true ]] && port_in_use "${GAZEBO_PORT}"; then
+  die "Gazebo port ${GAZEBO_PORT} is already in use; stop the old simulation or set R1_TELEOP_GAZEBO_PORT"
+fi
+
+export ROS_DOMAIN_ID="${DOMAIN_ID}"
+export ROS_LOCALHOST_ONLY=1
+export GAZEBO_MASTER_URI="http://127.0.0.1:${GAZEBO_PORT}"
+
+echo "R1 teleoperation app (simulation-only)"
+echo "  ROS domain: ${ROS_DOMAIN_ID} | Gazebo: ${GAZEBO_MASTER_URI}"
+echo "  headset-relative: ${HEADSET_RELATIVE} | UDP: ${UDP_BIND_ADDRESS}:${UDP_PORT}"
+echo "  video: ${VIDEO_SOURCE} on ${VIDEO_HOST}:${VIDEO_PORT}"
+echo "  video mDNS: ${VIDEO_MDNS}"
+echo "  hardware_enabled=false (fixed by this wrapper)"
+
+BASE_GAZEBO_PIDS=()
+for _gazebo_binary in gazebo gzserver gzclient; do
+  while IFS= read -r _gazebo_pid; do
+    [[ -n "${_gazebo_pid}" ]] && BASE_GAZEBO_PIDS+=("${_gazebo_pid}")
+  done < <(pgrep -x "${_gazebo_binary}" || true)
+done
+
+is_base_gazebo_pid() {
+  local candidate="$1"
+  local baseline
+  for baseline in "${BASE_GAZEBO_PIDS[@]}"; do
+    [[ "${candidate}" == "${baseline}" ]] && return 0
+  done
+  return 1
+}
+
+cleanup_orphaned_gazebo() {
+  local binary pid
+  for binary in gazebo gzserver gzclient; do
+    while IFS= read -r pid; do
+      [[ -n "${pid}" ]] || continue
+      if ! is_base_gazebo_pid "${pid}"; then
+        kill -INT "${pid}" 2>/dev/null || true
+      fi
+    done < <(pgrep -x "${binary}" || true)
+  done
+  sleep 0.5
+  for binary in gazebo gzserver gzclient; do
+    while IFS= read -r pid; do
+      [[ -n "${pid}" ]] || continue
+      if ! is_base_gazebo_pid "${pid}"; then
+        kill -TERM "${pid}" 2>/dev/null || true
+      fi
+    done < <(pgrep -x "${binary}" || true)
+  done
+}
+
+setsid ros2 launch r1_teleoperation_app r1_teleoperation.launch.py \
+  ros_domain_id:="${DOMAIN_ID}" \
+  ros_localhost_only:=1 \
+  start_bridge:="${START_BRIDGE}" \
+  start_simulation:="${START_SIMULATION}" \
+  udp_bind_address:="${UDP_BIND_ADDRESS}" \
+  udp_port:="${UDP_PORT}" \
+  hardware_enabled:=false \
+  display:="${DISPLAY_MODE}" \
+  model_z:="${MODEL_Z}" \
+  headset_relative_enabled:="${HEADSET_RELATIVE}" \
+  calibration_file:="${CALIBRATION_FILE}" \
+  start_video:="${START_VIDEO}" \
+  video_env_file:="${VIDEO_ENV_FILE}" \
+  video_source:="${VIDEO_SOURCE}" \
+  video_profile:="${VIDEO_PROFILE}" \
+  video_transport:="${VIDEO_TRANSPORT}" \
+  video_layout:="${VIDEO_LAYOUT}" \
+  video_host:="${VIDEO_HOST}" \
+  video_port:="${VIDEO_PORT}" \
+  video_mdns:="${VIDEO_MDNS}" \
+  gazebo_port:="${GAZEBO_PORT}" &
+LAUNCH_PID=$!
+
+cleanup() {
+  local status=$?
+  trap - INT TERM EXIT
+  if kill -0 "${LAUNCH_PID}" 2>/dev/null; then
+    kill -INT -- "-${LAUNCH_PID}" 2>/dev/null || true
+    for _ in {1..30}; do
+      kill -0 "${LAUNCH_PID}" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -TERM -- "-${LAUNCH_PID}" 2>/dev/null || true
+    wait "${LAUNCH_PID}" 2>/dev/null || true
+  fi
+  cleanup_orphaned_gazebo
+  exit "${status}"
+}
+
+trap cleanup INT TERM EXIT
+wait "${LAUNCH_PID}"

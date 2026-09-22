@@ -1,0 +1,518 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Read-only commissioning preflight for the physical R1 path. This may start
+# r1-sdk-readonly temporarily; that helper subscribes to rt/lf/lowstate only.
+# A separate bounded subscriber also checks for active rt/arm_sdk samples.
+# Before touching the robot-facing interface, an inert ABI probe constructs
+# SDK clients inside a private loopback-only network namespace. It cannot see
+# the robot and invokes no command/RPC method.
+
+SCRIPT_DIR="$(cd "$(dirname "$BASH_SOURCE")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+WS_DIR="$PROJECT_DIR/ros2_ws"
+
+INTERFACE=enxb4b024be59fe
+[[ -n "${R1_SDK_NETWORK_INTERFACE-}" ]] && INTERFACE="$R1_SDK_NETWORK_INTERFACE"
+CONTROL_IP=192.168.123.161
+[[ -n "${R1_CONTROL_IP-}" ]] && CONTROL_IP="$R1_CONTROL_IP"
+DOMAIN_ID=88
+[[ -n "${R1_SDK_ROS_DOMAIN_ID-}" ]] && DOMAIN_ID="$R1_SDK_ROS_DOMAIN_ID"
+WAIT_SECONDS=8
+[[ -n "${R1_SDK_PREFLIGHT_WAIT_SECONDS-}" ]] && WAIT_SECONDS="$R1_SDK_PREFLIGHT_WAIT_SECONDS"
+START_READER=true
+# Some TP-Link USB 10/100 CDC Ethernet devices expose a synthetic `half`
+# duplex value even while the link is stable.  Keep the conservative default;
+# a commissioning operator may opt in explicitly after checking zero receive
+# errors and fresh robot telemetry.
+ALLOW_HALF_DUPLEX=${R1_SDK_ALLOW_HALF_DUPLEX:-0}
+
+RESULT=0
+READER_PID=""
+READER_STARTED=false
+TEMP_DIR=""
+
+usage() {
+  cat <<'EOF'
+Usage: r1-sdk-preflight [options]
+
+Read-only commissioning checks for the physical Unitree R1 SDK path.
+
+Options:
+  --interface NAME     Robot-facing Ethernet interface
+  --control-ip IPV4    Native R1 control/DDS address
+  --domain N           Isolated ROS_DOMAIN_ID (default 88)
+  --wait N             Seconds to wait for a fresh 26-joint sample (1..60)
+  --no-reader          Do not start r1-sdk-readonly automatically
+
+Environment:
+  R1_SDK_ALLOW_HALF_DUPLEX=1
+                       Explicitly allow a stable cdc_ether link that reports
+                       half-duplex. Receive-error, ping, telemetry, and all
+                       actuator interlocks remain mandatory.
+  -h, --help           Show this help
+
+The default run first performs a bounded SDK ABI init/teardown probe in a
+private loopback-only network namespace, then runs bounded read-only ArmSdk
+traffic/action-state subscribers and the read-only LowState subscriber. All
+readers are stopped before return. No arm, leg, sport, trajectory, StandUp, or
+low-level command is sent.
+EOF
+}
+
+mark_ok() { printf '[OK] %s\n' "$*"; }
+mark_warn() {
+  printf '[WARN] %s\n' "$*"
+  [[ $RESULT -eq 0 ]] && RESULT=2
+}
+mark_fail() { printf '[FAIL] %s\n' "$*" >&2; RESULT=1; }
+section() { printf '\n== %s ==\n' "$*"; }
+
+valid_ipv4() {
+  local address=$1 octet
+  local o1 o2 o3 o4 extra
+  IFS='.' read -r o1 o2 o3 o4 extra <<< "$address"
+  [[ -n $o1 && -n $o2 && -n $o3 && -n $o4 && -z $extra ]] || return 1
+  for octet in "$o1" "$o2" "$o3" "$o4"; do
+    [[ $octet =~ ^[0-9]{1,3}$ ]] || return 1
+    ((10#$octet <= 255)) || return 1
+  done
+}
+
+cleanup() {
+  local status=$?
+  local deadline
+  trap - EXIT INT TERM
+  if [[ $READER_STARTED == true && -n $READER_PID ]]; then
+    # r1-sdk-readonly execs ros2 launch, which owns a separate node process.
+    # Stop the dedicated session/process group so that a reparented
+    # r1_sdk_transport child cannot survive the temporary preflight.
+    kill -INT -- "-$READER_PID" >/dev/null 2>&1 || true
+    deadline=$((SECONDS + 5))
+    while kill -0 -- "-$READER_PID" >/dev/null 2>&1 \
+        && ((SECONDS < deadline)); do
+      sleep 0.10
+    done
+    if kill -0 -- "-$READER_PID" >/dev/null 2>&1; then
+      kill -TERM -- "-$READER_PID" >/dev/null 2>&1 || true
+      deadline=$((SECONDS + 3))
+      while kill -0 -- "-$READER_PID" >/dev/null 2>&1 \
+          && ((SECONDS < deadline)); do
+        sleep 0.10
+      done
+    fi
+    if kill -0 -- "-$READER_PID" >/dev/null 2>&1; then
+      kill -KILL -- "-$READER_PID" >/dev/null 2>&1 || true
+    fi
+    wait "$READER_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n $TEMP_DIR && -d $TEMP_DIR ]]; then
+    rm -rf -- "$TEMP_DIR"
+  fi
+  exit "$status"
+}
+trap cleanup EXIT INT TERM
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --interface) [[ $# -ge 2 ]] || { usage >&2; exit 1; }; INTERFACE=$2; shift 2 ;;
+    --control-ip) [[ $# -ge 2 ]] || { usage >&2; exit 1; }; CONTROL_IP=$2; shift 2 ;;
+    --domain) [[ $# -ge 2 ]] || { usage >&2; exit 1; }; DOMAIN_ID=$2; shift 2 ;;
+    --wait) [[ $# -ge 2 ]] || { usage >&2; exit 1; }; WAIT_SECONDS=$2; shift 2 ;;
+    --no-reader) START_READER=false; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+if [[ ! $INTERFACE =~ ^[[:alnum:]_.-]{1,15}$ ]]; then
+  printf 'Invalid interface name: %s\n' "$INTERFACE" >&2; exit 1
+fi
+if ! valid_ipv4 "$CONTROL_IP"; then
+  printf 'Invalid control IPv4 address: %s\n' "$CONTROL_IP" >&2; exit 1
+fi
+if [[ ! $DOMAIN_ID =~ ^[0-9]+$ ]] || ((10#$DOMAIN_ID > 232)); then
+  printf 'ROS domain must be an integer from 0 to 232: %s\n' "$DOMAIN_ID" >&2; exit 1
+fi
+if [[ ! $WAIT_SECONDS =~ ^([1-9]|[1-5][0-9]|60)$ ]]; then
+  printf 'Wait time must be an integer from 1 to 60 seconds.\n' >&2; exit 1
+fi
+
+for required in ip ros2 timeout python3 rg setsid; do
+  command -v "$required" >/dev/null 2>&1 || mark_fail "required command is unavailable: $required"
+done
+[[ $RESULT -eq 1 ]] && exit 1
+[[ -f /opt/ros/humble/setup.bash ]] || { mark_fail 'ROS 2 Humble setup.bash is missing'; exit 1; }
+
+INSTALL_SETUP=$WS_DIR/install/setup.bash
+[[ -f $INSTALL_SETUP ]] || INSTALL_SETUP=$PROJECT_DIR/install/setup.bash
+[[ -f $INSTALL_SETUP ]] || { mark_fail "workspace is not built: $WS_DIR/install/setup.bash"; exit 1; }
+
+set +u
+source /opt/ros/humble/setup.bash
+source "$INSTALL_SETUP"
+# The temporary/read-only SDK reader must use the same split DDS runtime as
+# the live graph; even feedback-only ChannelFactory initialization is unsafe
+# with the mixed ROS/vendor Cyclone ABI.
+# shellcheck source=r1-unitree-sdk-env
+source "$SCRIPT_DIR/r1-unitree-sdk-env"
+set -u
+export ROS_DOMAIN_ID=$DOMAIN_ID
+export ROS_LOCALHOST_ONLY=1
+
+printf 'R1 SDK commissioning preflight (READ-ONLY)\n'
+printf 'Interface: %s | control endpoint: %s | ROS domain: %s\n' \
+  "$INTERFACE" "$CONTROL_IP" "$DOMAIN_ID"
+
+section 'Isolated Unitree DDS ABI gate'
+echo 'The following probe has only private loopback; it cannot route to the robot.'
+if ros2 run r1_live_writer r1-sdk-abi-probe; then
+  mark_ok 'Fast DDS ROS + matched Unitree CycloneDDS init/teardown probe passed'
+else
+  mark_fail 'Unitree DDS ABI probe failed; refusing every physical SDK process'
+  exit 1
+fi
+
+section 'Robot-facing Ethernet'
+if ip -o link show dev "$INTERFACE" >/dev/null 2>&1; then
+  link_line="$(ip -br link show dev "$INTERFACE")"
+  printf '%s\n' "$link_line"
+  [[ "$link_line" == *' UP '* ]] && mark_ok "$INTERFACE is up" || mark_fail "$INTERFACE exists but is not up"
+  carrier="$(cat "/sys/class/net/$INTERFACE/carrier" 2>/dev/null || printf 0)"
+  [[ "$carrier" == 1 ]] \
+    && mark_ok "$INTERFACE carrier is present" \
+    || mark_fail "$INTERFACE has NO-CARRIER; connect the R1 control/LAN RJ45"
+  address_lines="$(ip -br -4 address show dev "$INTERFACE")"
+  if [[ -n $address_lines ]]; then
+    printf '%s\n' "$address_lines"
+    mark_ok 'robot-facing IPv4 address is configured'
+  else
+    mark_fail "$INTERFACE has no IPv4 address"
+  fi
+  if route_line="$(ip route get "$CONTROL_IP" oif "$INTERFACE" 2>/dev/null)"; then
+    printf 'route: %s\n' "$route_line"
+    mark_ok "route to $CONTROL_IP uses $INTERFACE"
+  else
+    mark_fail "no route to $CONTROL_IP through $INTERFACE"
+  fi
+else
+  mark_fail "network interface $INTERFACE does not exist"
+fi
+
+section 'Ethernet link health'
+NET_CLASS_DIR="/sys/class/net/$INTERFACE"
+if [[ -d $NET_CLASS_DIR ]]; then
+  link_speed="$(cat "$NET_CLASS_DIR/speed" 2>/dev/null || true)"
+  link_duplex="$(cat "$NET_CLASS_DIR/duplex" 2>/dev/null || true)"
+  driver_path="$(readlink -f "$NET_CLASS_DIR/device/driver" 2>/dev/null || true)"
+  driver_name=${driver_path##*/}
+  [[ -n $driver_name ]] || driver_name=unknown
+  printf 'link: speed=%sMb/s duplex=%s driver=%s\n' \
+    "${link_speed:-unknown}" "${link_duplex:-unknown}" "$driver_name"
+
+  if [[ $link_duplex == full ]]; then
+    mark_ok "$INTERFACE reports full-duplex"
+  elif [[ $ALLOW_HALF_DUPLEX == 1 && $driver_name == cdc_ether ]]; then
+    printf '[WARN] %s reports half-duplex; explicit cdc_ether override is enabled\n' \
+      "$INTERFACE"
+    mark_ok 'half-duplex override accepted provisionally; receive-error and telemetry gates remain mandatory'
+  else
+    mark_fail "$INTERFACE is not full-duplex (reported ${link_duplex:-unknown}); do not commission SDK writers"
+  fi
+
+  # A carrier bit alone is not proof of a usable DDS link. Sample the kernel
+  # counters for one second so broken USB adapters/PHY negotiation fail before
+  # the slower ROS checks. Any new receive error is unacceptable for the
+  # physical commissioning gate; healthy links normally report a zero delta.
+  rx_errors_before="$(cat "$NET_CLASS_DIR/statistics/rx_errors" 2>/dev/null || true)"
+  rx_length_before="$(cat "$NET_CLASS_DIR/statistics/rx_length_errors" 2>/dev/null || true)"
+  rx_packets_before="$(cat "$NET_CLASS_DIR/statistics/rx_packets" 2>/dev/null || true)"
+  sleep 1
+  rx_errors_after="$(cat "$NET_CLASS_DIR/statistics/rx_errors" 2>/dev/null || true)"
+  rx_length_after="$(cat "$NET_CLASS_DIR/statistics/rx_length_errors" 2>/dev/null || true)"
+  rx_packets_after="$(cat "$NET_CLASS_DIR/statistics/rx_packets" 2>/dev/null || true)"
+
+  if [[ $rx_errors_before =~ ^[0-9]+$ && $rx_errors_after =~ ^[0-9]+$ \
+      && $rx_length_before =~ ^[0-9]+$ && $rx_length_after =~ ^[0-9]+$ \
+      && $rx_packets_before =~ ^[0-9]+$ && $rx_packets_after =~ ^[0-9]+$ ]]; then
+    rx_errors_delta=$((10#$rx_errors_after - 10#$rx_errors_before))
+    rx_length_delta=$((10#$rx_length_after - 10#$rx_length_before))
+    rx_packets_delta=$((10#$rx_packets_after - 10#$rx_packets_before))
+    printf '1s receive sample: packets=%d errors=%d length_errors=%d\n' \
+      "$rx_packets_delta" "$rx_errors_delta" "$rx_length_delta"
+    if ((rx_errors_delta == 0)); then
+      mark_ok 'no new receive errors during the link-health sample'
+    else
+      mark_fail "receive errors increased by $rx_errors_delta in 1s (length_errors=$rx_length_delta); replace/fix the Ethernet adapter or PHY link"
+    fi
+  else
+    mark_fail 'kernel receive-error counters are unavailable; link health cannot be proven'
+  fi
+else
+  mark_fail "link-health sysfs path is absent for $INTERFACE"
+fi
+
+section 'Bounded control-endpoint probe'
+if command -v ping >/dev/null 2>&1; then
+  ping -I "$INTERFACE" -c 1 -W 1 "$CONTROL_IP" >/dev/null 2>&1 \
+    && mark_ok "$CONTROL_IP replies to one ICMP probe" \
+    || mark_fail "$CONTROL_IP did not reply to one ICMP probe"
+else
+  mark_warn 'ping is unavailable; ICMP check skipped'
+fi
+
+section 'Command-writer interlock'
+processes="$(ps -eo pid=,args= 2>/dev/null || true)"
+writer_processes="$(printf '%s\n' "$processes" | rg -i \
+  'r1_arm_sdk_dds_example|r1_loco_client|ArmSdk|LocoClient|rt/(arm_sdk|lowcmd)|(^|[[:space:]])sport([[:space:]]|$)' || true)"
+if [[ -n $writer_processes ]]; then
+  printf '%s\n' "$writer_processes"
+  mark_fail 'a known Unitree command-writer process appears to be running'
+else
+  mark_ok 'no known Unitree ArmSdk/LocoClient command process is running'
+fi
+
+section 'Remote ArmSdk sample-traffic gate'
+printf '%s\n' \
+  'Exactly one stable typed dormant writer is required; received LowCmd samples are not.'
+set +e
+"$SCRIPT_DIR/r1-arm-sdk-traffic-check" \
+  --interface "$INTERFACE" --duration-sec 6.0 --fresh-sec 0.5 \
+  --action-fresh-sec 3.5 --min-samples 3 --expected-writers 1
+arm_sdk_observer_status=$?
+set -e
+case "$arm_sdk_observer_status" in
+  0)
+    mark_ok 'one typed rt/arm_sdk writer stayed stable and sent no LowCmd sample'
+    ;;
+  10|11)
+    mark_fail 'remote rt/arm_sdk command traffic is present; do not start another arm writer'
+    ;;
+  12|13|14)
+    mark_fail 'built-in arm action state is missing, malformed, holding, or non-idle'
+    ;;
+  15)
+    mark_fail 'typed rt/arm_sdk writer match is missing, unexpected, unstable, or churning'
+    ;;
+  *)
+    mark_fail "rt/arm_sdk observer failed closed (exit $arm_sdk_observer_status)"
+    ;;
+esac
+
+section 'Read-only ROS transport'
+reader_node_present=false
+reader_service_present=false
+for attempt in 1 2 3 4; do
+  reader_nodes="$(timeout 3 ros2 node list --no-daemon --spin-time 0.5 2>/dev/null || true)"
+  grep -Fxq '/r1_sdk_transport' <<<"$reader_nodes" \
+    && reader_node_present=true
+  if timeout 3 ros2 param list /r1_sdk_transport --no-daemon >/dev/null 2>&1; then
+    reader_service_present=true
+  fi
+  [[ $reader_node_present == true && $reader_service_present == true ]] && break
+  sleep 0.25
+done
+
+if [[ $reader_node_present == true && $reader_service_present == true ]]; then
+  mark_ok 'existing /r1_sdk_transport node and parameter service are live'
+elif [[ $reader_node_present == true || $reader_service_present == true ]]; then
+  mark_fail 'inconsistent/stale /r1_sdk_transport discovery; refusing to start a duplicate reader'
+elif [[ $START_READER == true ]]; then
+  # A topic type alone is intentionally ignored here. DDS graph entries can
+  # outlive a reader process briefly, which previously suppressed startup and
+  # caused a false reuse decision with no fresh LowState publisher.
+  TEMP_DIR="$(mktemp -d /tmp/r1-sdk-preflight.XXXXXX)"
+  READER_LOG="$TEMP_DIR/reader.log"
+  printf '[INFO] Starting temporary read-only LowState reader...\n'
+  setsid "$SCRIPT_DIR/r1-sdk-readonly" >"$READER_LOG" 2>&1 &
+  READER_PID=$!
+  READER_STARTED=true
+  sleep 1
+  if kill -0 "$READER_PID" >/dev/null 2>&1; then
+    mark_ok "read-only reader started (pid $READER_PID)"
+  else
+    mark_fail 'read-only reader exited before checks could start'
+    sed -n '1,120p' "$READER_LOG" >&2 || true
+  fi
+else
+  mark_fail 'no live /r1_sdk_transport node exists and --no-reader was requested'
+fi
+
+# Query the exact topic directly. `ros2 topic list --no-daemon` can return an
+# incomplete graph while direct type/node/echo discovery already works, which
+# previously produced a false FAIL on a healthy physical feedback stream.
+topic_type=''
+discovery_deadline=$((SECONDS + WAIT_SECONDS))
+while ((SECONDS < discovery_deadline)); do
+  topic_type="$(timeout 4 ros2 topic type /r1/sdk/joint_states --no-daemon 2>/dev/null || true)"
+  [[ $topic_type == *'sensor_msgs/msg/JointState'* ]] && break
+  sleep 0.5
+done
+if [[ $topic_type == *'sensor_msgs/msg/JointState'* ]]; then
+  mark_ok '/r1/sdk/joint_states is present'
+  mark_ok '/r1/sdk/joint_states type is sensor_msgs/msg/JointState'
+else
+  mark_fail "/r1/sdk/joint_states was not discovered with its required type (reported ${topic_type:-unknown})"
+fi
+
+section 'Fresh 26-joint feedback'
+state_ok=false
+state_summary=''
+deadline=$((SECONDS + WAIT_SECONDS))
+while ((SECONDS < deadline)); do
+  set +e
+  state_dump="$(timeout 3 ros2 topic echo --once --full-length \
+    --qos-reliability reliable --qos-durability volatile \
+    /r1/sdk/joint_states \
+    sensor_msgs/msg/JointState --no-daemon 2>&1)"
+  echo_status=$?
+  set -e
+  if [[ $echo_status -eq 0 ]]; then
+    name_count="$(printf '%s\n' "$state_dump" | awk '
+      /^name:[[:space:]]*$/ {in_names=1; next}
+      /^position:[[:space:]]*$/ {in_names=0}
+      in_names && /^[[:space:]]*-[[:space:]]+/ {count++}
+      END {print count+0}')"
+    position_count="$(printf '%s\n' "$state_dump" | awk '
+      /^position:[[:space:]]*$/ {in_positions=1; next}
+      /^(velocity|effort):[[:space:]]*$/ {in_positions=0}
+      in_positions && /^[[:space:]]*-[[:space:]]+/ {count++}
+      END {print count+0}')"
+    bad_value="$(printf '%s\n' "$state_dump" | awk '
+      /^position:[[:space:]]*$/ {in_positions=1; next}
+      /^(velocity|effort):[[:space:]]*$/ {in_positions=0}
+      in_positions && tolower($0) ~ /(nan|inf)/ {found=1}
+      END {print found+0}')"
+    state_summary="names=$name_count positions=$position_count nonfinite=$bad_value"
+    printf '%s\n' "$state_summary"
+    if [[ $name_count -eq 26 && $position_count -eq 26 && $bad_value -eq 0 ]]; then
+      mark_ok 'live feedback is finite and contains all 26 physical joints'
+      state_ok=true
+      break
+    fi
+  fi
+  sleep 0.5
+done
+[[ $state_ok == true ]] || mark_fail "no fresh finite 26-joint sample arrived within ${WAIT_SECONDS}s"
+
+section 'Fresh motorstate health'
+health_type=''
+health_discovery_deadline=$((SECONDS + WAIT_SECONDS))
+while ((SECONDS < health_discovery_deadline)); do
+  health_type="$(timeout 4 ros2 topic type \
+    /r1/sdk_transport/motors_healthy --no-daemon 2>/dev/null || true)"
+  [[ $health_type == *'std_msgs/msg/Bool'* ]] && break
+  sleep 0.5
+done
+if [[ $health_type == *'std_msgs/msg/Bool'* ]]; then
+  mark_ok '/r1/sdk_transport/motors_healthy is present with type std_msgs/msg/Bool'
+else
+  mark_fail "/r1/sdk_transport/motors_healthy was not discovered with its required type (reported ${health_type:-unknown})"
+fi
+
+set +e
+motor_health_dump="$(timeout 4 ros2 topic echo --once --full-length \
+  --qos-reliability reliable --qos-durability volatile \
+  /r1/sdk_transport/motors_healthy \
+  std_msgs/msg/Bool --no-daemon 2>&1)"
+motor_health_code=$?
+set -e
+printf '%s\n' "$motor_health_dump"
+if [[ $motor_health_code -eq 0 && $motor_health_dump == *'data: true'* ]]; then
+  mark_ok 'fresh LowState reports motorstate=0 for all 26 configured slots'
+else
+  mark_fail 'fresh motors_healthy=true was not observed; motor fault telemetry blocks every physical writer'
+fi
+
+section 'Read-only robot mode diagnostics'
+# The transport publishes two diagnostic families on this topic: frequent
+# arm_debug updates and periodic lowstate summaries.  A single --once sample
+# can legitimately catch the former even while LowState is fresh.  Keep one
+# ROS discovery session alive for a bounded window and accept success as soon
+# as any received sample contains the required lowstate summary.
+set +e
+status_dump="$(timeout 4 ros2 topic echo --full-length \
+  /r1/sdk_transport/status std_msgs/msg/String --no-daemon 2>&1)"
+status_code=$?
+set -e
+if [[ ${status_dump} == *'lowstate=ok'* ]]; then
+  status_code=0
+fi
+if [[ $status_code -eq 0 && $status_dump == *'lowstate=ok'* ]]; then
+  printf '%s\n' "$status_dump"
+  if [[ $status_dump == *'motorstate_nonzero=0'* && $status_dump == *'motorstate=none'* ]]; then
+    mark_ok 'status independently confirms motorstate_nonzero=0'
+  else
+    mark_fail 'LowState status does not confirm motorstate_nonzero=0; review reported slot:code details'
+  fi
+  if [[ $status_dump == *'mode_pr_raw='* && $status_dump == *'mode_machine_raw='* ]]; then
+    mark_ok 'raw mode_pr/mode_machine feedback is visible (not interpreted as readiness)'
+  else
+    mark_warn 'LowState is fresh but raw mode bytes were unavailable'
+  fi
+else
+  printf '%s\n' "$status_dump"
+  mark_fail 'fresh /r1/sdk_transport/status lowstate=ok diagnostic was not observed'
+fi
+printf '%s\n' \
+  '[WARN] verified R1 LowState has no charging field; live motion remains blocked unless ROBOT_CONFIRM_OFF_CHARGER=1 is supplied by the on-site operator.'
+
+section 'Safety parameters'
+node_seen=false
+for attempt in 1 2 3 4; do
+  if timeout 3 ros2 param list /r1_sdk_transport --no-daemon >/dev/null 2>&1; then
+    node_seen=true
+    break
+  fi
+  sleep 0.5
+done
+if [[ $node_seen != true ]]; then
+  mark_fail '/r1_sdk_transport parameter service was not discovered'
+else
+  check_bool_param() {
+    local name=$1 expected=$2 result='' result_lc='' result_display attempt
+    for attempt in 1 2 3 4; do
+      result="$(timeout 3 ros2 param get /r1_sdk_transport "$name" --no-daemon 2>&1 || true)"
+      result_lc="$(printf '%s' "$result" | tr '[:upper:]' '[:lower:]')"
+      [[ $result_lc == *'boolean value is:'* ]] && break
+      sleep 0.25
+    done
+    result_display=$result
+    [[ -n $result_display ]] || result_display=unavailable
+    if [[ $expected == true && $result_lc == *'boolean value is: true'* ]]; then
+      mark_ok "$name=true"
+    elif [[ $expected == false && $result_lc == *'boolean value is: false'* ]]; then
+      mark_ok "$name=false"
+    else
+      printf '[INFO] %s: %s\n' "$name" "$result_display"
+      mark_fail "$name is not the required fail-closed value ($expected)"
+    fi
+  }
+  check_bool_param dry_run true
+  check_bool_param hardware_enabled false
+  check_bool_param commissioning_interlock false
+  check_bool_param arm_writer_enabled false
+  check_bool_param locomotion_writer_enabled false
+fi
+
+section 'ROS command topics'
+for forbidden in \
+  '/joint_trajectory_controller/joint_cmd' \
+  '/r1/hardware' \
+  '/r1/arm_cmd' \
+  '/r1/loco_cmd'; do
+  forbidden_type="$(timeout 4 ros2 topic type "$forbidden" --no-daemon 2>/dev/null || true)"
+  if [[ -n $forbidden_type ]]; then
+    mark_fail "command topic is present: $forbidden ($forbidden_type)"
+  else
+    mark_ok "no command topic $forbidden"
+  fi
+done
+
+section 'Result'
+case "$RESULT" in
+  0) printf 'PASS: physical R1 feedback path is ready for read-only review.\nNo actuator, locomotion, sport, or trajectory command was sent.\n' ;;
+  2) printf 'WARN: checks completed with warnings; do not proceed to a writer.\n' ;;
+  *) printf 'FAIL: commissioning preflight did not pass; keep hardware writers disabled.\n' ;;
+esac
+exit "$RESULT"

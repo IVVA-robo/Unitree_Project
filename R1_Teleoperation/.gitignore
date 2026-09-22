@@ -1,0 +1,15 @@
+build/
+install/
+log/
+__pycache__/
+.pytest_cache/
+*.pyc
+.cache/
+logs/robot_pov/
+logs/sim/
+ros2_ws/src/r1_robot_pov/config/robot_pov.venue.env
+ros2_ws/src/r1_robot_pov/config/robot_pov.local.env
+logs/
+*.log
+build/
+install/
