@@ -5,6 +5,8 @@
 - systemd — r1-operator-panel.service и r1-offline-session.service;
 - desktop — панель оператора и ярлык NoMachine;
 - calibration — r1_telepresence_sim_body_calibration.json из ~/.ros.
+- environment.json — версии выбранных ROS/system/Python-пакетов ноутбука;
+  это инвентаризация, не полный установщик офлайн-ОС.
 
 Это данные для сравнения/восстановления. Службы не перезапускались, файлы
 в ~/.config и на рабочем столе не изменялись. Пути абсолютные и относятся
