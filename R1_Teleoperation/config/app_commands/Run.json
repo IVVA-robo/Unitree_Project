@@ -1,0 +1,8 @@
+{
+  "label": "Run",
+  "service": "sport",
+  "api_id": 7101,
+  "parameter": "{\"data\":811}",
+  "binary_size": 0,
+  "source_capture": "/home/unitree/Unitree_Project/R1_Teleoperation/logs/app-command-captures/20260924-144755-Run.jsonl"
+}

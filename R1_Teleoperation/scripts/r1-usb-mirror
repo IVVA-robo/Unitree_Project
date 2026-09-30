@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRCPY="${ROOT}/../Tools/scrcpy-usb/scrcpy-linux-x86_64-v4.1/scrcpy"
+[[ -x "${SCRCPY}" ]] || { echo 'Local scrcpy 4.1 is missing.' >&2; exit 1; }
+# Reuse the installed ADB server; avoid a bundled different-version daemon.
+export ADB=/usr/bin/adb
+exec "${SCRCPY}" --select-usb --no-control --no-audio --max-size=1600 \
+  --max-fps=30 --video-bit-rate=4M --window-title='Pico USB — экран очков' "$@"

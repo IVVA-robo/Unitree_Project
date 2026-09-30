@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Call one ROS 2 Trigger service with a single monotonic deadline.
+
+This helper deliberately does not install rclpy's SIGINT/SIGTERM handlers.
+The stock ``ros2 service call`` CLI shuts its context down when GNU ``timeout``
+sends SIGTERM and can then report the misleading secondary error
+``rcl node's context is invalid``.  STOP/KILL need an unambiguous bounded
+result instead: accepted, rejected, unavailable, or timed out.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import time
+
+import rclpy
+from rclpy.context import Context
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.signals import SignalHandlerOptions
+from std_srvs.srv import Trigger
+
+
+def _remaining(deadline: float) -> float:
+    return max(0.0, deadline - time.monotonic())
+
+
+def _print_response(success: bool, message: str) -> None:
+    # Keep a stable, human-readable shape for shell logs and incident review.
+    print("response:")
+    print(f"  success: {'true' if success else 'false'}")
+    print(f"  message: {message}")
+
+
+def call_trigger(service_name: str, timeout_sec: float) -> int:
+    deadline = time.monotonic() + timeout_sec
+    context = Context()
+    node = None
+    executor = None
+    try:
+        rclpy.init(
+            args=None,
+            context=context,
+            signal_handler_options=SignalHandlerOptions.NO,
+        )
+        node = rclpy.create_node(
+            f"r1_bounded_trigger_{os.getpid()}", context=context
+        )
+        executor = SingleThreadedExecutor(context=context)
+        executor.add_node(node)
+        client = node.create_client(Trigger, service_name)
+
+        while _remaining(deadline) > 0.0:
+            if client.wait_for_service(
+                timeout_sec=min(0.10, _remaining(deadline))
+            ):
+                break
+        else:
+            print(
+                f"[UNAVAILABLE] {service_name} was not available within "
+                f"{timeout_sec:.3f}s",
+                file=sys.stderr,
+            )
+            return 2
+
+        future = client.call_async(Trigger.Request())
+        while not future.done() and _remaining(deadline) > 0.0:
+            executor.spin_once(timeout_sec=min(0.05, _remaining(deadline)))
+        if not future.done():
+            print(
+                f"[TIMEOUT] {service_name} did not respond within the "
+                f"{timeout_sec:.3f}s total deadline",
+                file=sys.stderr,
+            )
+            return 3
+
+        exception = future.exception()
+        if exception is not None:
+            print(
+                f"[ERROR] {service_name} call failed: {exception}",
+                file=sys.stderr,
+            )
+            return 4
+        response = future.result()
+        if response is None:
+            print(
+                f"[ERROR] {service_name} returned no response",
+                file=sys.stderr,
+            )
+            return 4
+        _print_response(bool(response.success), str(response.message))
+        return 0 if response.success else 1
+    except (KeyboardInterrupt, SystemExit):
+        print(f"[INTERRUPTED] {service_name} call interrupted", file=sys.stderr)
+        return 130
+    except Exception as exception:  # Keep STOP/KILL diagnostics deterministic.
+        print(
+            f"[ERROR] {service_name} client failed: {exception}",
+            file=sys.stderr,
+        )
+        return 4
+    finally:
+        if executor is not None:
+            if node is not None:
+                executor.remove_node(node)
+            executor.shutdown(timeout_sec=0.1)
+        if node is not None:
+            node.destroy_node()
+        if context.ok():
+            context.shutdown()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Bounded std_srvs/Trigger client for R1 STOP/KILL paths"
+    )
+    parser.add_argument("service_name")
+    parser.add_argument("timeout_sec", type=float)
+    arguments = parser.parse_args()
+    if not arguments.service_name.startswith("/"):
+        parser.error("service_name must be absolute")
+    if not 0.05 <= arguments.timeout_sec <= 30.0:
+        parser.error("timeout_sec must be in the range 0.05..30")
+    return call_trigger(arguments.service_name, arguments.timeout_sec)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

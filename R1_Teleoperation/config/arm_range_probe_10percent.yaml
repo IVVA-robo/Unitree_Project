@@ -1,0 +1,9 @@
+# One supervised arms-only session; never the default exhibition profile.
+r1_kinematics_control:
+  ros__parameters:
+    arm_range_probe_file: /home/unitree/Unitree_Project/R1_Teleoperation/config/operator_arm_range.preview.json
+    arm_range_probe_fraction: 0.10
+    max_joint_velocity_rad_s: 0.20
+r1_live_writer:
+  ros__parameters:
+    max_arm_joint_rate_rad_s: 0.20

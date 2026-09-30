@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+#
+# Run the isolated, forward-only, 1.5-second R1 status-127 diagnostic.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+[[ $# -eq 0 ]] || {
+  echo 'Usage: r1-locomotion-127-probe' >&2
+  exit 2
+}
+
+exec "${SCRIPT_DIR}/r1-live-auto-run" \
+  "${SCRIPT_DIR}/r1-live-session" locomotion-127-probe

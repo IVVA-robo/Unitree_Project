@@ -27,6 +27,18 @@ LAUNCH_PATH = (
 )
 PACKAGE_XML = Path(__file__).resolve().parents[1] / 'package.xml'
 PROJECT_LIVE_WRAPPER = LAUNCH_PATH.parents[4] / 'scripts' / 'r1-live-session'
+BRIDGE_LAUNCH = (
+    LAUNCH_PATH.parents[2]
+    / 'vr_teleop_bridge'
+    / 'launch'
+    / 'vr_bridge.launch.py'
+)
+KINEMATICS_LAUNCH = (
+    LAUNCH_PATH.parents[2]
+    / 'r1_kinematics_control'
+    / 'launch'
+    / 'r1_kinematics_control.launch.py'
+)
 
 
 def _load_launch_module():
@@ -86,6 +98,7 @@ def test_live_launch_defaults_cannot_send_commands():
     assert arguments['enable_arms'] == 'false'
     assert arguments['enable_locomotion'] == 'false'
     assert arguments['enable_prepare'] == 'false'
+    assert arguments['prepare_enter_locomotion'] == 'false'
     assert arguments['head_recenter_enabled'] == 'false'
     assert arguments['head_recenter_confirmed'] == 'false'
     assert arguments['head_ownership_probe_only'] == 'true'
@@ -95,8 +108,16 @@ def test_live_launch_defaults_cannot_send_commands():
     assert arguments['commissioning_confirmed'] == 'false'
     assert arguments['commissioning_token'] == ''
     assert arguments['vr_source_ip'] == ''
+    assert arguments['discovery_port'] == '9091'
     assert arguments['motor_health_topic'] == \
         '/r1/sdk_transport/motors_healthy'
+    assert arguments['shoulder_height_offset_m'] == '0.0'
+    assert arguments['shoulder_forward_offset_m'] == '-0.02'
+    assert arguments['shoulder_width_m'] == '0.40'
+    assert arguments['arm_motion_scale'] == '1.15'
+    assert arguments['max_forward_mps'] == '0.20'
+    assert arguments['max_lateral_mps'] == '0.12'
+    assert arguments['max_yaw_rps'] == '0.35'
     environment = {
         _text(action.name): _text(action.value)
         for action in description.entities
@@ -141,6 +162,64 @@ def test_staged_live_wrapper_explicitly_owns_reader_opt_in():
     assert 'start_readonly_reader:="${START_READER}"' in wrapper
     assert wrapper.index('"${SCRIPT_DIR}/r1-sdk-preflight"') \
         < wrapper.index('start_readonly_reader:="${START_READER}"')
+
+
+def test_exhibition_tuning_is_validated_and_forwarded_end_to_end():
+    """Panel tuning cannot raise the reviewed physical speed ceilings."""
+    wrapper = PROJECT_LIVE_WRAPPER.read_text(encoding='utf-8')
+    launch = LAUNCH_PATH.read_text(encoding='utf-8')
+
+    for required in (
+        'R1_SHOULDER_HEIGHT_OFFSET_M',
+        'R1_SHOULDER_FORWARD_OFFSET_M',
+        'R1_SHOULDER_WIDTH_M',
+        'R1_ARM_MOTION_SCALE',
+        'R1_TURN_SENSITIVITY',
+        'R1_LEG_SPEED_SCALE',
+        '0.20 * leg_scale',
+        '0.12 * leg_scale',
+        '0.35 * turn_scale',
+        'shoulder_height_offset_m:="${SHOULDER_HEIGHT_OFFSET_M}"',
+        'shoulder_forward_offset_m:="${SHOULDER_FORWARD_OFFSET_M}"',
+        'shoulder_width_m:="${SHOULDER_WIDTH_M}"',
+        'arm_motion_scale:="${ARM_MOTION_SCALE}"',
+        'max_forward_mps:="${MAX_FORWARD_MPS}"',
+        'max_lateral_mps:="${MAX_LATERAL_MPS}"',
+        'max_yaw_rps:="${MAX_YAW_RPS}"',
+    ):
+        assert required in wrapper
+
+    for argument in (
+        'shoulder_height_offset_m',
+        'shoulder_forward_offset_m',
+        'shoulder_width_m',
+        'arm_motion_scale',
+    ):
+        assert f"'{argument}': LaunchConfiguration(" in launch
+        assert f"                        '{argument}'" in launch
+    for argument in (
+        'max_forward_mps',
+        'max_lateral_mps',
+        'max_yaw_rps',
+    ):
+        assert launch.count(f"LaunchConfiguration('{argument}')") >= 2
+
+    bridge = BRIDGE_LAUNCH.read_text(encoding='utf-8')
+    for argument in ('max_forward_mps', 'max_lateral_mps', 'max_yaw_rps'):
+        assert f"DeclareLaunchArgument(\n            '{argument}'" in bridge
+        assert f"'{argument}': ParameterValue(" in bridge
+
+    kinematics = KINEMATICS_LAUNCH.read_text(encoding='utf-8')
+    for argument in (
+        'shoulder_height_offset_m',
+        'shoulder_forward_offset_m',
+        'shoulder_width_m',
+        'arm_motion_scale',
+        'max_forward_mps',
+        'max_lateral_mps',
+        'max_yaw_rps',
+    ):
+        assert argument in kinematics
 
 
 def test_loader_guard_runs_before_every_process_action():

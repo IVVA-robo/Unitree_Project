@@ -29,8 +29,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'active_topic',
-            default_value='/vr/teleop/active',
-            description='VR deadman Bool input topic',
+            default_value='/vr/locomotion/active',
+            description='VR locomotion authorization Bool input topic',
         ),
         DeclareLaunchArgument(
             'emergency_stop_topic',

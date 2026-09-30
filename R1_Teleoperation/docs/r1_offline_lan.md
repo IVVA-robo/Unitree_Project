@@ -55,10 +55,10 @@ systemctl --user stop r1-offline-session.service   # before a manual session
 ```
 
 Avahi publishes the laptop hostname (currently `IONOS-ROBOTS.local`) on the
-local LAN. The combined APK still
-contains UDP bridge discovery, so a changed Wi‑Fi DHCP address does not require
-rebuilding the control path. For a fully address-independent video endpoint,
-build the combined APK against the local name:
+local LAN. The combined APK contains UDP bridge discovery and the Robot POV
+receiver reuses the discovered host for video, so a changed Wi‑Fi DHCP address
+does not require rebuilding either the control or video path. For a fully
+address-independent fallback, build the combined APK against the local name:
 
 ```bash
 UNITREE_LAN_DISCOVERY=mdns \
@@ -66,10 +66,9 @@ UNITREE_COMBINED_APK_PATH=/home/unitree/Unitree_Project/Unity_Projects/Unitree_V
 ./scripts/build-unity-telepresence build
 ```
 
-If the Pico firmware cannot resolve mDNS, use the numeric URL printed by the
-Robot POV server, or omit `UNITREE_LAN_DISCOVERY=mdns` and build with the
-current Wi‑Fi address. Both transports
-remain LAN-only.
+If the Pico firmware cannot resolve mDNS or broadcast is blocked, the APK keeps
+the last build-time address as a fallback and retries automatically. Both
+transports remain LAN-only.
 
 The simulation remains a separate explicit mode:
 

@@ -33,12 +33,20 @@ require_exact ROBOT_CONFIRM_COMMISSIONING 1
 TOKEN=${ROBOT_COMMISSIONING_TOKEN-}
 [[ ${#TOKEN} -ge 16 ]] \
   || die 'ROBOT_COMMISSIONING_TOKEN must contain at least 16 characters'
-[[ -n ${ROBOT_VR_SOURCE_IP-} ]] || die 'ROBOT_VR_SOURCE_IP is required'
+if [[ ${ROBOT_CONFIRM_STATIC_PREPARE-0} != 1 ]]; then
+  [[ -n ${ROBOT_VR_SOURCE_IP-} ]] || die 'ROBOT_VR_SOURCE_IP is required'
+fi
 
 DOMAIN_ID=${R1_LIVE_ROS_DOMAIN_ID:-88}
 [[ "${DOMAIN_ID}" =~ ^[0-9]+$ ]] && ((10#${DOMAIN_ID} <= 232)) \
   || die 'R1_LIVE_ROS_DOMAIN_ID must be 0..232'
 INTERFACE=${R1_LIVE_NETWORK_INTERFACE:-enxb4b024be59fe}
+PRIMARY_CONTROL_IP=${R1_LIVE_CONTROL_IP:-${R1_CONTROL_IP:-192.168.123.161}}
+PC2_IP=${R1_PC2_IP:-${R1_ROBOT_IP:-192.168.123.164}}
+
+# shellcheck source=scripts/r1-network-autodetect
+source "${SCRIPT_DIR}/r1-network-autodetect"
+CONTROL_IP="$(r1_resolve_control_ip "${INTERFACE}" "${PRIMARY_CONTROL_IP}" "${PC2_IP}" || true)"
 
 set +u
 source /opt/ros/humble/setup.bash
@@ -86,26 +94,57 @@ done
 service_exists /r1/safety/set_kill std_srvs/srv/SetBool \
   || die 'safety supervisor service is absent: /r1/safety/set_kill'
 
+# Capture one coherent parameter snapshot.  The previous implementation
+# started a new DDS participant for every parameter; on a healthy physical
+# graph that added tens of seconds and could mix values from different
+# discovery snapshots.  This dump is read-only and is never printed because it
+# contains the commissioning token.
+parameter_dump=''
+for attempt in 1 2 3 4; do
+  parameter_dump="$(timeout 7s ros2 param dump /r1_live_writer \
+    --no-daemon --spin-time 1.5 2>/dev/null || true)"
+  if grep -Fq '/r1_live_writer:' <<<"${parameter_dump}" \
+      && grep -Eq '^[[:space:]]+commissioning_token:' \
+        <<<"${parameter_dump}"; then
+    break
+  fi
+  parameter_dump=''
+  sleep 0.25
+done
+[[ -n ${parameter_dump} ]] \
+  || die 'live writer parameter snapshot is unavailable'
+
+dump_scalar() {
+  local name=$1
+  awk -v key="${name}:" '
+    $1 == key {
+      $1 = ""
+      sub(/^[[:space:]]+/, "")
+      if (($0 ~ /^".*"$/) || ($0 ~ /^\047.*\047$/)) {
+        $0 = substr($0, 2, length($0) - 2)
+      }
+      print
+      found = 1
+      exit
+    }
+    END { if (!found) exit 1 }
+  ' <<<"${parameter_dump}"
+}
+
 get_live_writer_param() {
-  local name=$1 expected_kind=$2 value attempt pattern
+  local name=$1 expected_kind=$2 value
+  value="$(dump_scalar "${name}" 2>/dev/null || true)"
   case ${expected_kind} in
-    string) pattern='^String value is: .+$' ;;
-    boolean) pattern='^Boolean value is: (true|false)$' ;;
+    string)
+      [[ -n ${value} ]] || return 1
+      printf 'String value is: %s\n' "${value}"
+      ;;
+    boolean)
+      [[ ${value} == true || ${value} == false ]] || return 1
+      printf 'Boolean value is: %s\n' "${value}"
+      ;;
     *) return 2 ;;
   esac
-  # A fresh no-daemon client can occasionally finish DDS discovery before the
-  # already-running writer is visible.  Retry only the read-only query; never
-  # treat a missing/partial result as permission to continue.
-  for attempt in 1 2 3 4; do
-    value="$(timeout 6s ros2 param get /r1_live_writer "${name}" \
-      --no-daemon --spin-time 1.0 2>/dev/null || true)"
-    if grep -Eqi -- "${pattern}" <<<"${value}"; then
-      printf '%s\n' "${value}"
-      return 0
-    fi
-    sleep 0.25
-  done
-  return 1
 }
 
 require_param() {
@@ -121,11 +160,52 @@ require_param send_commands boolean 'boolean value is: true'
 require_param enable_prepare boolean 'boolean value is: true'
 require_param profile string 'string value is: slow-safe'
 
+if ! static_prepare_mode="$(get_live_writer_param static_prepare_mode boolean)"; then
+  die 'live writer parameter static_prepare_mode is unavailable or not boolean'
+fi
+if ! exhibition_session_mode="$(
+    get_live_writer_param exhibition_session_mode boolean)"; then
+  die 'live writer parameter exhibition_session_mode is unavailable or not boolean'
+fi
+
+FAST_PREPARE=false
+case ${R1_EXHIBITION_FAST_PREPARE-0} in
+  0) ;;
+  1)
+    # The fast path is limited to the panel's already-discovered exhibition
+    # graph and the exact writer created with this commissioning token.  It
+    # only removes duplicate process/discovery work; all current feedback,
+    # topic, traffic, KILL and prepare confirmations below remain mandatory.
+    if grep -Fqi 'boolean value is: true' <<<"${static_prepare_mode}"; then
+      require_exact ROBOT_CONFIRM_STATIC_PREPARE 1
+      grep -Fqi 'boolean value is: false' <<<"${exhibition_session_mode}" \
+        || die 'fast static prepare must not be an exhibition control writer'
+      for feature in enable_head enable_arms enable_locomotion prepare_enter_locomotion; do
+        require_param "${feature}" boolean 'boolean value is: false'
+      done
+    else
+      require_exact ROBOT_EXHIBITION_SESSION 1
+      grep -Fqi 'boolean value is: true' <<<"${exhibition_session_mode}" \
+        || die 'fast prepare requires exhibition_session_mode=true'
+    fi
+    writer_token="$(dump_scalar commissioning_token 2>/dev/null || true)"
+    [[ -n ${writer_token} && ${writer_token} == "${TOKEN}" ]] \
+      || die 'fast prepare token does not match the running live writer'
+    unset writer_token
+    FAST_PREPARE=true
+    ;;
+  *) die 'R1_EXHIBITION_FAST_PREPARE must be 0 or 1' ;;
+esac
+
 if ! head_enabled="$(get_live_writer_param enable_head boolean)"; then
   die 'live writer parameter enable_head is unavailable or not boolean'
 fi
 if ! locomotion_enabled="$(get_live_writer_param enable_locomotion boolean)"; then
   die 'live writer parameter enable_locomotion is unavailable or not boolean'
+fi
+if ! prepare_enter_locomotion="$(
+    get_live_writer_param prepare_enter_locomotion boolean)"; then
+  die 'live writer parameter prepare_enter_locomotion is unavailable or not boolean'
 fi
 if ! arms_enabled="$(get_live_writer_param enable_arms boolean)"; then
   die 'live writer parameter enable_arms is unavailable or not boolean'
@@ -139,8 +219,16 @@ fi
 if ! grep -Fqi 'boolean value is: true' <<<"${head_enabled}" \
   && ! grep -Fqi 'boolean value is: true' <<<"${arms_enabled}" \
   && ! grep -Fqi 'boolean value is: true' <<<"${locomotion_enabled}"; then
-  die 'live writer has neither head, arms, nor locomotion enabled'
+  grep -Fqi 'boolean value is: true' <<<"${static_prepare_mode}" \
+    || die 'featureless writer is allowed only in static_prepare_mode'
+  require_exact ROBOT_CONFIRM_STATIC_PREPARE 1
+  grep -Fqi 'boolean value is: false' <<<"${prepare_enter_locomotion}" \
+    || die 'static prepare must not request Start/FSM 811'
+else
+  grep -Fqi 'boolean value is: false' <<<"${static_prepare_mode}" \
+    || die 'static prepare writer must not enable head, arms, or locomotion'
 fi
+head_auto_center_required=false
 if grep -Fqi 'boolean value is: true' <<<"${head_enabled}"; then
   require_param head_absolute_envelope_confirmed boolean \
     'boolean value is: true'
@@ -155,18 +243,29 @@ if grep -Fqi 'boolean value is: true' <<<"${head_enabled}"; then
   fi
 fi
 
-echo 'Running strict feedback preflight against the live session reader...'
-R1_SDK_NETWORK_INTERFACE="${INTERFACE}" \
-R1_SDK_ROS_DOMAIN_ID="${ROS_DOMAIN_ID}" \
-  "${SCRIPT_DIR}/r1-sdk-preflight" --no-reader
+if [[ ${FAST_PREPARE} == true ]]; then
+  echo 'Using the current token-bound exhibition graph; duplicate SDK preflight is already complete.'
+else
+  echo 'Running strict feedback preflight against the live session reader...'
+  R1_SDK_NETWORK_INTERFACE="${INTERFACE}" \
+  R1_CONTROL_IP="${CONTROL_IP}" \
+  R1_SDK_ROS_DOMAIN_ID="${ROS_DOMAIN_ID}" \
+    "${SCRIPT_DIR}/r1-sdk-preflight" --no-reader
+fi
 
-echo 'Observing the live VR/control graph without releasing kill...'
+if grep -Fqi 'boolean value is: true' <<<"${static_prepare_mode}"; then
+  echo 'Observing the featureless static graph without releasing kill...'
+  require_vr_args=()
+else
+  echo 'Observing the live VR/control graph without releasing kill...'
+  require_vr_args=(--require-vr)
+fi
 set +e
 vr_preflight_output="$(ros2 run r1_teleop_safety r1_teleop_preflight \
   --interface "${INTERFACE}" \
-  --robot-ip "${R1_LIVE_CONTROL_IP:-192.168.123.161}" \
+  --robot-ip "${CONTROL_IP}" \
   --observe-seconds 2.0 \
-  --require-vr \
+  "${require_vr_args[@]}" \
   --locomotion-mode slow-safe 2>&1)"
 vr_preflight_status=$?
 set -e
@@ -191,7 +290,13 @@ if grep -Fqi 'boolean value is: true' <<<"${head_enabled}"; then
   # named q/dq samples prevent an off-centre or still-moving head from reaching
   # StandUp only to fail later at the ArmSdk seed boundary.
   set +e
-  head_seed_check="$(timeout 6s python3 - "${head_probe_mode}" <<'PY'
+  head_auto_center_mode=false
+  if grep -Fqi 'boolean value is: true' <<<"${exhibition_session_mode}" \
+      && [[ ${head_probe_mode} == false ]]; then
+    head_auto_center_mode=true
+  fi
+  head_seed_check="$(timeout 6s python3 - \
+    "${head_probe_mode}" "${head_auto_center_mode}" <<'PY'
 import math
 import sys
 import time
@@ -256,8 +361,19 @@ if len(node.samples) < 5:
 
 yaw, pitch, yaw_velocity, pitch_velocity = node.samples[-1]
 probe_mode = sys.argv[1].lower() == 'true'
-yaw_limit = 2.0071 if probe_mode else 0.35
-pitch_limit = 0.6283 if probe_mode else 0.25
+auto_center_mode = sys.argv[2].lower() == 'true'
+feedback_margin = 0.01
+if probe_mode:
+    yaw_limit = 2.0071
+    pitch_limit = 0.6283
+elif auto_center_mode:
+    # This margin accepts only LowState feedback at a servo stop. The live
+    # writer clamps every first and subsequent command to the official limits.
+    yaw_limit = 2.0071 + feedback_margin
+    pitch_limit = 0.6283 + feedback_margin
+else:
+    yaw_limit = 0.35
+    pitch_limit = 0.25
 if any(abs(sample[0]) > yaw_limit or abs(sample[1]) > pitch_limit
        for sample in node.samples):
     print(
@@ -283,12 +399,21 @@ if (max(sample[0] for sample in node.samples)
     print('[BLOCKED] physical head position changed across the seed samples')
     raise SystemExit(3)
 
-print(
-    '[OK] physical head seed is stable and accepted for '
-    f'{"ownership micro-probe" if probe_mode else "normal tracking"}: '
-    f'yaw={yaw:.6f} pitch={pitch:.6f} '
-    f'yaw_dq={yaw_velocity:.6f} pitch_dq={pitch_velocity:.6f}'
-)
+outside_tracking_window = abs(yaw) > 0.35 or abs(pitch) > 0.25
+if auto_center_mode and outside_tracking_window:
+    print(
+        '[AUTO_CENTER] stable physical head will be centered automatically '
+        'before arms and locomotion are enabled: '
+        f'yaw={yaw:.6f} pitch={pitch:.6f} '
+        f'yaw_dq={yaw_velocity:.6f} pitch_dq={pitch_velocity:.6f}'
+    )
+else:
+    print(
+        '[OK] physical head seed is stable and accepted for '
+        f'{"ownership micro-probe" if probe_mode else "normal tracking"}: '
+        f'yaw={yaw:.6f} pitch={pitch:.6f} '
+        f'yaw_dq={yaw_velocity:.6f} pitch_dq={pitch_velocity:.6f}'
+    )
 PY
 )"
   head_seed_status=$?
@@ -296,6 +421,9 @@ PY
   printf '%s\n' "${head_seed_check}"
   ((head_seed_status == 0)) \
     || die 'physical head seed precheck failed before kill release'
+  if grep -Fq '[AUTO_CENTER]' <<<"${head_seed_check}"; then
+    head_auto_center_required=true
+  fi
 fi
 if grep -Fqi 'boolean value is: true' <<<"${locomotion_enabled}"; then
   locomotion_command="$(timeout 4s ros2 topic echo --once --full-length \
@@ -313,10 +441,12 @@ if grep -Fqi 'boolean value is: true' <<<"${arms_enabled}"; then
     || die "arm IK command on ${arm_topic} does not contain the R1 arm joint set"
 fi
 
-deadman="$(timeout 4s ros2 topic echo --once --full-length \
-  /vr/teleop/active std_msgs/msg/Bool --no-daemon 2>/dev/null || true)"
-grep -Eq 'data:[[:space:]]*true' <<<"${deadman}" \
-  || die 'hold Deadman: no fresh true sample was received'
+if ! grep -Fqi 'boolean value is: true' <<<"${static_prepare_mode}"; then
+  deadman="$(timeout 4s ros2 topic echo --once --full-length \
+    /vr/teleop/active std_msgs/msg/Bool --no-daemon 2>/dev/null || true)"
+  grep -Eq 'data:[[:space:]]*true' <<<"${deadman}" \
+    || die 'activate the control session: no fresh true sample was received'
+fi
 
 # Close the time-of-check/time-of-use window left by the longer graph, head
 # seed, and Deadman checks above.  The live writer has not been authorized to
@@ -325,10 +455,16 @@ grep -Eq 'data:[[:space:]]*true' <<<"${deadman}" \
 # software kill is released.  Preserve the observer's exact result for the
 # log, but intentionally accept only its single unambiguous idle code (0).
 echo 'Repeating the read-only ArmSdk traffic gate immediately before kill release...'
+arm_sdk_gate_duration=6.0
+# The observer requires a complete two-second stable-writer interval.  A
+# window of exactly 2.0 s can end one 50 ms poll before that interval reaches
+# the threshold (1.950 s was observed on hardware).  Keep the same required
+# stability and give the bounded observer one small scheduling margin.
+[[ ${FAST_PREPARE} == true ]] && arm_sdk_gate_duration=2.25
 set +e
 R1_SDK_NETWORK_INTERFACE="${INTERFACE}" \
   "${SCRIPT_DIR}/r1-arm-sdk-traffic-check" \
-    --interface "${INTERFACE}" --duration-sec 6.0 \
+    --interface "${INTERFACE}" --duration-sec "${arm_sdk_gate_duration}" \
     --fresh-sec 0.5 --action-fresh-sec 3.5 --min-samples 3 \
     --expected-writers 1
 arm_sdk_final_gate_status=$?
@@ -348,14 +484,20 @@ call_trigger() {
 }
 
 wait_for_prepare_confirmation() {
-  local deadline=$((SECONDS + 15)) status
+  # Cold SDK startup plus the vendor's stable FSM-4/FSM-811 confirmation can
+  # exceed the old 15 s polling window even after the live graph is healthy.
+  # Keep this bounded, but align it with the manager's longer prepare timeout
+  # so a successful StandUp/Start cannot be mistaken for a failed RUN.
+  local timeout_sec=${R1_EXHIBITION_PREPARE_CONFIRM_TIMEOUT_SEC:-60} deadline status
+  [[ ${timeout_sec} =~ ^[1-9][0-9]*$ ]] || die 'R1_EXHIBITION_PREPARE_CONFIRM_TIMEOUT_SEC must be a positive integer'
+  ((10#${timeout_sec} <= 120)) || die 'R1_EXHIBITION_PREPARE_CONFIRM_TIMEOUT_SEC must be at most 120'
+  deadline=$((SECONDS + 10#${timeout_sec}))
   while ((SECONDS < deadline)); do
     status="$(timeout 3s ros2 topic echo --once \
       /r1/live_writer/status std_msgs/msg/String --field data \
       --no-daemon 2>/dev/null || true)"
     [[ -n ${status} ]] && printf 'writer status: %s\n' "${status}"
-    if grep -Eq \
-      'prepare_result=.*[[:space:]]prepare_rearm=await_deadman_release|prepared=true.*prepare_rearm=await_deadman_release' \
+    if grep -Eq "${prepare_confirmation_pattern}" \
       <<<"${status}"; then
       return 0
     fi
@@ -370,10 +512,42 @@ wait_for_prepare_confirmation() {
   return 1
 }
 
+wait_for_head_auto_center() {
+  local deadline=$((SECONDS + 45)) status
+  echo 'Waiting for verified normal head tracking or bounded automatic centering...'
+  while ((SECONDS < deadline)); do
+    status="$(timeout 3s ros2 topic echo --once \
+      /r1/live_writer/status std_msgs/msg/String --field data \
+      --no-daemon 2>/dev/null || true)"
+    [[ -n ${status} ]] && printf 'writer status: %s\n' "${status}"
+    if grep -Eq \
+      'head_auto_center=complete|head_auto_center_complete=true|head_tracking_seed_verified=true' \
+      <<<"${status}"; then
+      return 0
+    fi
+    if grep -Eq 'fail_closed reason=(head_auto_center|head_recenter)' \
+      <<<"${status}"; then
+      return 1
+    fi
+    sleep 0.2
+  done
+  echo '[BLOCKED] timed out waiting for automatic head centering confirmation' >&2
+  return 1
+}
+
+if grep -Fqi 'boolean value is: true' <<<"${static_prepare_mode}" \
+  || grep -Fqi 'boolean value is: true' <<<"${exhibition_session_mode}"; then
+  prepare_confirmation_pattern='prepare_result=.*[[:space:]]prepare_rearm=ready|prepared=true.*prepare_rearm=ready'
+else
+  prepare_confirmation_pattern='prepare_result=.*[[:space:]]prepare_rearm=await_deadman_release|prepared=true.*prepare_rearm=await_deadman_release'
+fi
+
 emergency_relock() {
   set +e
+  # Never wait behind an unresponsive writer before latching the independent
+  # supervisor. Writer cleanup remains best-effort after the central stop edge.
+  timeout 4s ros2 service call /r1/safety/emergency_stop std_srvs/srv/Trigger '{}' >/dev/null 2>&1
   timeout 5s ros2 service call /r1/live_writer/kill std_srvs/srv/Trigger '{}' >/dev/null 2>&1
-  timeout 5s ros2 service call /r1/safety/emergency_stop std_srvs/srv/Trigger '{}' >/dev/null 2>&1
   set -e
 }
 trap emergency_relock ERR
@@ -392,11 +566,25 @@ sleep 0.3
 call_trigger /r1/live_writer/reset_kill
 call_trigger /r1/live_writer/prepare
 wait_for_prepare_confirmation
+if [[ ${head_auto_center_required} == true ]]; then
+  wait_for_head_auto_center
+fi
 trap - ERR INT TERM
 
-echo '[OK] official R1 StandUp is confirmed by stable FSM 4 and Start by stable locomotion FSM 811.'
-echo 'Now release Deadman.'
-echo 'If locomotion is enabled, keep the stick neutral until the writer observes a fresh zero command.'
-echo 'Then press Deadman again; head-only mode skips the neutral-velocity gate.'
-echo 'Only fresh commands received after that new press can be sent.'
+if grep -Fqi 'boolean value is: true' <<<"${static_prepare_mode}"; then
+  echo '[OK] static StandUp is confirmed by stable FSM 4.'
+  echo 'VR bridge, head, arms, locomotion, FSM 811, and velocity commands are disabled.'
+elif grep -Fqi 'boolean value is: true' <<<"${prepare_enter_locomotion}"; then
+  echo '[OK] official R1 StandUp is confirmed by stable FSM 4 and Start by stable locomotion FSM 811.'
+else
+  echo '[OK] official R1 StandUp is confirmed by stable FSM 4.'
+  echo 'Locomotion is disabled: Start/FSM 811 and velocity commands were not requested.'
+fi
+if grep -Fqi 'boolean value is: false' <<<"${static_prepare_mode}" \
+  && grep -Fqi 'boolean value is: false' <<<"${exhibition_session_mode}"; then
+  echo 'Now release Deadman.'
+  echo 'If locomotion is enabled, keep the stick neutral until the writer observes a fresh zero command.'
+  echo 'Then press Deadman again; head/arms-only mode skips the neutral-velocity gate.'
+  echo 'Only fresh commands received after that new press can be sent.'
+fi
 echo 'Run make robot-stop or use the physical E-stop at any unexpected behavior.'

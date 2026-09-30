@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=NoMachine — Unitree R1
+Comment=Подключение к удалённому рабочему столу PC2 робота Unitree R1
+Exec=/home/unitree/Unitree_Project/Tools/NoMachine/9.7.3-portable/connect-r1.sh
+TryExec=/home/unitree/Unitree_Project/Tools/NoMachine/9.7.3-portable/connect-r1.sh
+Icon=/usr/NX/share/icons/48x48/NoMachine-desktop.png
+Path=/home/unitree/Unitree_Project/Tools/NoMachine/9.7.3-portable
+Terminal=true
+StartupNotify=true
+Categories=Network;RemoteAccess;

@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""Record and validate a short-lived read-only SDK preflight result."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+
+SCHEMA = 1
+WRITER_PATTERN = re.compile(
+    rb"r1_live_writer_node|r1_arm_sdk_dds_example|r1_loco_client|ArmSdk|LocoClient|"
+    rb"rt/(?:arm_sdk|lowcmd)|(?:^|\s)sport(?:\s|$)",
+    re.IGNORECASE,
+)
+
+
+def runtime_path() -> Path:
+    base = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+    return base / "r1-exhibition" / "sdk-preflight-attestation.json"
+
+
+def setting(name: str, fallback: str) -> str:
+    return os.environ.get(name, fallback).strip()
+
+
+def interface() -> str:
+    return setting(
+        "R1_SDK_NETWORK_INTERFACE",
+        setting("R1_LIVE_NETWORK_INTERFACE", "enxb4b024be59fe"),
+    )
+
+
+def control_ip() -> str:
+    return setting("R1_CONTROL_IP", "192.168.123.161")
+
+
+def domain_id() -> int:
+    return int(setting("R1_SDK_ROS_DOMAIN_ID", setting("R1_LIVE_ROS_DOMAIN_ID", "88")))
+
+
+def boot_id() -> str:
+    return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8").strip()
+
+
+def current_link() -> dict:
+    root = Path("/sys/class/net") / interface()
+    return {
+        "carrier": read_text(root / "carrier"),
+        "address": read_text(root / "address"),
+        "rx_errors": int(read_text(root / "statistics" / "rx_errors")),
+        "rx_length_errors": int(
+            read_text(root / "statistics" / "rx_length_errors")
+        ),
+    }
+
+
+def known_writer_running() -> bool:
+    own_pid = os.getpid()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit() or int(entry.name) == own_pid:
+            continue
+        try:
+            command = (entry / "cmdline").read_bytes().replace(b"\0", b" ")
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+        if WRITER_PATTERN.search(command):
+            return True
+    return False
+
+
+def run_quiet(argv: list[str]) -> bool:
+    try:
+        return subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+            check=False,
+        ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def payload() -> dict:
+    return {
+        "schema": SCHEMA,
+        "recorded_at": time.time(),
+        "boot_id": boot_id(),
+        "interface": interface(),
+        "control_ip": control_ip(),
+        "domain_id": domain_id(),
+        "link": current_link(),
+    }
+
+
+def record() -> int:
+    data = payload()
+    if data["link"]["carrier"] != "1":
+        print("[BLOCKED] SDK attestation: Ethernet carrier is absent", file=sys.stderr)
+        return 2
+    destination = runtime_path()
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(destination.parent, 0o700)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=".sdk-preflight-", dir=destination.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    print("[OK] Fresh read-only SDK preflight was cached for quick RUN.")
+    return 0
+
+
+def maximum_age() -> float:
+    value = float(setting("R1_SDK_PREFLIGHT_ATTEST_MAX_AGE_SEC", "3600"))
+    if not 30.0 <= value <= 86400.0:
+        raise ValueError(
+            "R1_SDK_PREFLIGHT_ATTEST_MAX_AGE_SEC must be 30..86400"
+        )
+    return value
+
+
+def check() -> int:
+    path = runtime_path()
+    try:
+        metadata = path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+            raise ValueError("file owner/type mismatch")
+        if stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise ValueError("file permissions are not private")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        link = current_link()
+        age = time.time() - float(data["recorded_at"])
+        expected = {
+            "schema": SCHEMA,
+            "boot_id": boot_id(),
+            "interface": interface(),
+            "control_ip": control_ip(),
+            "domain_id": domain_id(),
+        }
+        for name, value in expected.items():
+            if data.get(name) != value:
+                raise ValueError(f"{name} changed")
+        if not 0.0 <= age <= maximum_age():
+            raise ValueError(f"attestation age {age:.1f}s is outside the limit")
+        if link["carrier"] != "1" or data.get("link", {}).get("carrier") != "1":
+            raise ValueError("Ethernet carrier is absent")
+        for name in ("address", "rx_errors", "rx_length_errors"):
+            if data.get("link", {}).get(name) != link[name]:
+                raise ValueError(f"link field changed: {name}")
+        if known_writer_running():
+            raise ValueError("another known command writer is running")
+        if not run_quiet(["ip", "route", "get", control_ip(), "oif", interface()]):
+            raise ValueError("robot route is unavailable")
+        if not run_quiet(["ping", "-I", interface(), "-c", "1", "-W", "1", control_ip()]):
+            raise ValueError("robot endpoint does not reply")
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exception:
+        print(f"[STALE] SDK preflight cache cannot be reused: {exception}", file=sys.stderr)
+        return 3
+    print(f"[OK] SDK preflight cache is current (age={age:.1f}s).")
+    return 0
+
+
+def invalidate() -> int:
+    runtime_path().unlink(missing_ok=True)
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action", choices=("record", "check", "invalidate", "path"))
+    arguments = parser.parse_args()
+    try:
+        if arguments.action == "record":
+            return record()
+        if arguments.action == "check":
+            return check()
+        if arguments.action == "invalidate":
+            return invalidate()
+        print(runtime_path())
+        return 0
+    except (OSError, ValueError) as exception:
+        print(f"[BLOCKED] SDK preflight attestation failed: {exception}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

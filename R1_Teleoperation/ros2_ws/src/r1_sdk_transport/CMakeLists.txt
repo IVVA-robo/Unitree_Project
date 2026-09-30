@@ -60,6 +60,60 @@ else()
     "building an offline diagnostics-only node")
 endif()
 
+# Some SDK2 revisions carry the generic LowState headers but not the B2
+# MotionSwitcher API.  Keep the rest of the read-only package buildable and
+# make this probe report SDK-unavailable rather than failing compilation.
+set(R1_MOTION_SWITCHER_PROBE_HAS_SDK OFF)
+if(R1_SDK_TRANSPORT_HAS_SDK
+   AND EXISTS "${UNITREE_SDK_INCLUDE}/unitree/robot/b2/motion_switcher/motion_switcher_api.hpp"
+   AND EXISTS "${UNITREE_SDK_INCLUDE}/unitree/robot/client/client.hpp"
+   AND EXISTS "${UNITREE_SDK_INCLUDE}/unitree/robot/internal/internal_api.hpp")
+  set(R1_MOTION_SWITCHER_PROBE_HAS_SDK ON)
+  message(STATUS "R1 MotionSwitcher read-only probe enabled")
+else()
+  message(WARNING
+    "Unitree SDK2 MotionSwitcher headers were not found; "
+    "building an SDK-unavailable MotionSwitcher probe")
+endif()
+
+# The R1 locomotion header also exposes state-changing calls, so the diagnostic
+# uses a deliberately narrower Client subclass and registers only the two
+# read-only state API IDs (7001 and optional 7002).
+set(R1_LOCO_STATE_PROBE_HAS_SDK OFF)
+if(R1_SDK_TRANSPORT_HAS_SDK
+   AND EXISTS "${UNITREE_SDK_INCLUDE}/unitree/robot/r1/loco/r1_loco_api.hpp"
+   AND EXISTS "${UNITREE_SDK_INCLUDE}/unitree/robot/go2/public/jsonize_type.hpp"
+   AND EXISTS "${UNITREE_SDK_INCLUDE}/unitree/robot/client/client.hpp"
+   AND EXISTS "${UNITREE_SDK_INCLUDE}/unitree/robot/internal/internal_api.hpp")
+  set(R1_LOCO_STATE_PROBE_HAS_SDK ON)
+  message(STATUS "R1 locomotion-state read-only probe enabled")
+else()
+  message(WARNING
+    "Unitree SDK2 R1 locomotion-state headers were not found; "
+    "building an SDK-unavailable locomotion-state probe")
+endif()
+
+set(R1_WIRELESS_CONTROLLER_OBSERVER_HAS_SDK OFF)
+if(R1_SDK_TRANSPORT_HAS_SDK
+   AND EXISTS "${UNITREE_SDK_INCLUDE}/unitree/idl/go2/WirelessController_.hpp")
+  set(R1_WIRELESS_CONTROLLER_OBSERVER_HAS_SDK ON)
+  message(STATUS "R1 wireless-controller read-only observer enabled")
+else()
+  message(WARNING
+    "Unitree SDK2 WirelessController header was not found; "
+    "building an SDK-unavailable wireless-controller observer")
+endif()
+
+set(R1_WIRELESS_CONTROLLER_PROBE_HAS_SDK
+  ${R1_WIRELESS_CONTROLLER_OBSERVER_HAS_SDK})
+
+set(R1_BATTERY_OBSERVER_HAS_SDK OFF)
+if(R1_SDK_TRANSPORT_HAS_SDK
+   AND EXISTS "${UNITREE_SDK_INCLUDE}/unitree/idl/hg/BmsState_.hpp")
+  set(R1_BATTERY_OBSERVER_HAS_SDK ON)
+  message(STATUS "R1 battery read-only observer enabled")
+endif()
+
 add_executable(r1_sdk_transport src/r1_sdk_transport.cpp)
 target_compile_definitions(r1_sdk_transport PRIVATE
   R1_SDK_TRANSPORT_HAS_SDK=$<BOOL:${R1_SDK_TRANSPORT_HAS_SDK}>
@@ -89,12 +143,110 @@ if(R1_SDK_TRANSPORT_HAS_SDK)
     INSTALL_RPATH "${UNITREE_SDK_LIB_DIR}")
 endif()
 
+# Bounded read-only MotionSwitcher query.  This target intentionally exposes
+# only API 1001 (and opt-in API 1005); it contains no mode-selection path.
+add_executable(r1_motion_switcher_probe
+  src/r1_motion_switcher_probe.cpp)
+target_compile_definitions(r1_motion_switcher_probe PRIVATE
+  R1_MOTION_SWITCHER_PROBE_HAS_SDK=$<BOOL:${R1_MOTION_SWITCHER_PROBE_HAS_SDK}>
+  R1_MOTION_SWITCHER_PROBE_VENDOR_DDS_DIR="${UNITREE_SDK_LIB_DIR}")
+ament_target_dependencies(r1_motion_switcher_probe
+  rmw rmw_fastrtps_cpp)
+if(R1_MOTION_SWITCHER_PROBE_HAS_SDK)
+  target_link_libraries(r1_motion_switcher_probe
+    unitree_sdk2_vendor ${CMAKE_DL_LIBS})
+  set_target_properties(r1_motion_switcher_probe PROPERTIES
+    BUILD_RPATH "${UNITREE_SDK_LIB_DIR}"
+    INSTALL_RPATH "${UNITREE_SDK_LIB_DIR}")
+endif()
+
+# Bounded read-only query of the R1 locomotion service. This target exposes
+# only API 7001 (and opt-in API 7002); it contains no FSM/velocity command path.
+add_executable(r1_loco_state_probe
+  src/r1_loco_state_probe.cpp)
+target_compile_definitions(r1_loco_state_probe PRIVATE
+  R1_LOCO_STATE_PROBE_HAS_SDK=$<BOOL:${R1_LOCO_STATE_PROBE_HAS_SDK}>
+  R1_LOCO_STATE_PROBE_VENDOR_DDS_DIR="${UNITREE_SDK_LIB_DIR}")
+ament_target_dependencies(r1_loco_state_probe
+  rmw rmw_fastrtps_cpp)
+if(R1_LOCO_STATE_PROBE_HAS_SDK)
+  target_link_libraries(r1_loco_state_probe
+    unitree_sdk2_vendor ${CMAKE_DL_LIBS})
+  set_target_properties(r1_loco_state_probe PROPERTIES
+    BUILD_RPATH "${UNITREE_SDK_LIB_DIR}"
+    INSTALL_RPATH "${UNITREE_SDK_LIB_DIR}")
+endif()
+
+# Bounded typed subscriber for the official controller channel.  This target
+# has no publisher or command API and is safe to run while diagnosing input
+# ownership and routing.
+add_executable(r1_wireless_controller_observer
+  src/r1_wireless_controller_observer.cpp)
+target_compile_definitions(r1_wireless_controller_observer PRIVATE
+  R1_WIRELESS_CONTROLLER_OBSERVER_HAS_SDK=$<BOOL:${R1_WIRELESS_CONTROLLER_OBSERVER_HAS_SDK}>
+  R1_WIRELESS_CONTROLLER_OBSERVER_VENDOR_DDS_DIR="${UNITREE_SDK_LIB_DIR}")
+if(R1_WIRELESS_CONTROLLER_OBSERVER_HAS_SDK)
+  target_link_libraries(r1_wireless_controller_observer
+    unitree_sdk2_vendor ${CMAKE_DL_LIBS})
+  set_target_properties(r1_wireless_controller_observer PROPERTIES
+    BUILD_RPATH "${UNITREE_SDK_LIB_DIR}"
+    INSTALL_RPATH "${UNITREE_SDK_LIB_DIR}")
+endif()
+
+# Isolated commissioning publisher.  Its source hard-codes a single bounded
+# forward-stick pulse and zero frames; a separate acknowledgement gates the
+# live pulse at runtime.
+add_executable(r1_wireless_controller_probe
+  src/r1_wireless_controller_probe.cpp)
+target_compile_definitions(r1_wireless_controller_probe PRIVATE
+  R1_WIRELESS_CONTROLLER_PROBE_HAS_SDK=$<BOOL:${R1_WIRELESS_CONTROLLER_PROBE_HAS_SDK}>
+  R1_WIRELESS_CONTROLLER_PROBE_VENDOR_DDS_DIR="${UNITREE_SDK_LIB_DIR}")
+if(R1_WIRELESS_CONTROLLER_PROBE_HAS_SDK)
+  target_link_libraries(r1_wireless_controller_probe
+    unitree_sdk2_vendor ${CMAKE_DL_LIBS})
+  set_target_properties(r1_wireless_controller_probe PROPERTIES
+    BUILD_RPATH "${UNITREE_SDK_LIB_DIR}"
+    INSTALL_RPATH "${UNITREE_SDK_LIB_DIR}")
+endif()
+
+# Always-on read-only SOC monitor used by the operator panel. It subscribes to
+# typed BmsState topics only and contains no writer, RPC client, or command API.
+add_executable(r1_battery_observer src/r1_battery_observer.cpp)
+target_compile_definitions(r1_battery_observer PRIVATE
+  R1_BATTERY_OBSERVER_HAS_SDK=$<BOOL:${R1_BATTERY_OBSERVER_HAS_SDK}>)
+if(R1_BATTERY_OBSERVER_HAS_SDK)
+  target_link_libraries(r1_battery_observer
+    unitree_sdk2_vendor ${CMAKE_DL_LIBS})
+  set_target_properties(r1_battery_observer PROPERTIES
+    BUILD_RPATH "${UNITREE_SDK_LIB_DIR}"
+    INSTALL_RPATH "${UNITREE_SDK_LIB_DIR}")
+endif()
+
+# Read-only recorder for commands emitted by Unitree Explore. It subscribes to
+# typed Request topics only and writes JSONL; there is deliberately no writer
+# or RPC client in this target.
+add_executable(r1_app_command_observer src/r1_app_command_observer.cpp)
+target_compile_definitions(r1_app_command_observer PRIVATE
+  R1_APP_COMMAND_OBSERVER_HAS_SDK=$<BOOL:${R1_BATTERY_OBSERVER_HAS_SDK}>)
+if(R1_BATTERY_OBSERVER_HAS_SDK)
+  target_link_libraries(r1_app_command_observer
+    unitree_sdk2_vendor ${CMAKE_DL_LIBS})
+  set_target_properties(r1_app_command_observer PROPERTIES
+    BUILD_RPATH "${UNITREE_SDK_LIB_DIR}"
+    INSTALL_RPATH "${UNITREE_SDK_LIB_DIR}")
+endif()
+
 configure_file(
   launch/r1_sdk_transport.launch.py
   ${CMAKE_CURRENT_BINARY_DIR}/r1_sdk_transport.launch.py
   @ONLY)
 
 install(TARGETS r1_sdk_transport r1_arm_sdk_traffic_observer
+  r1_motion_switcher_probe r1_loco_state_probe
+  r1_wireless_controller_observer
+  r1_wireless_controller_probe
+  r1_battery_observer
+  r1_app_command_observer
   DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY config
   DESTINATION share/${PROJECT_NAME})
@@ -111,12 +263,26 @@ if(BUILD_TESTING)
     test/test_r1_sdk_transport_package_contract.py)
   ament_add_pytest_test(test_traffic_gate_entrypoints
     test/test_traffic_gate_entrypoints.py)
+  ament_add_pytest_test(test_motion_switcher_probe_contract
+    test/test_motion_switcher_probe_contract.py)
+  ament_add_pytest_test(test_loco_state_probe_contract
+    test/test_loco_state_probe_contract.py)
+  ament_add_pytest_test(test_wireless_controller_observer_contract
+    test/test_wireless_controller_observer_contract.py)
+    ament_add_pytest_test(test_wireless_controller_probe_contract
+      test/test_wireless_controller_probe_contract.py)
+    ament_add_pytest_test(test_panel_observers_contract
+      test/test_panel_observers_contract.py)
   if(R1_SDK_TRANSPORT_HAS_SDK)
     ament_add_pytest_test(test_runtime_abi_guard
       test/test_runtime_abi_guard.py
       ENV
         "R1_SDK_TRANSPORT_BINARY=$<TARGET_FILE:r1_sdk_transport>"
         "R1_ARM_SDK_OBSERVER_BINARY=$<TARGET_FILE:r1_arm_sdk_traffic_observer>"
+        "R1_MOTION_SWITCHER_PROBE_BINARY=$<TARGET_FILE:r1_motion_switcher_probe>"
+        "R1_LOCO_STATE_PROBE_BINARY=$<TARGET_FILE:r1_loco_state_probe>"
+        "R1_WIRELESS_CONTROLLER_OBSERVER_BINARY=$<TARGET_FILE:r1_wireless_controller_observer>"
+        "R1_WIRELESS_CONTROLLER_PROBE_BINARY=$<TARGET_FILE:r1_wireless_controller_probe>"
         "R1_SDK_TRANSPORT_VENDOR_DDS_DIR=${UNITREE_SDK_LIB_DIR}"
       TIMEOUT 30)
   endif()

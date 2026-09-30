@@ -1,0 +1,7 @@
+scrcpy v4.1 from the official Genymobile release:
+https://github.com/Genymobile/scrcpy/releases/tag/v4.1
+Archive: scrcpy-linux-x86_64-v4.1.tar.gz
+SHA256 verified against the release API asset digest:
+ad56ae8bfeedf41e824945c11dbf55fcb092b3e615b9b486f48a50e30d389635
+Local portable installation; no system packages changed.
+Use ADB=/usr/bin/adb to reuse this laptop's existing ADB daemon.

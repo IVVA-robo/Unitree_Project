@@ -23,6 +23,8 @@ def generate_launch_description():
     waist_hold_enabled = LaunchConfiguration('waist_hold_enabled')
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('response_config', default_value=config),
+        DeclareLaunchArgument('exhibition_session_mode', default_value='false'),
         DeclareLaunchArgument(
             'dry_run',
             default_value='true',
@@ -78,6 +80,29 @@ def generate_launch_description():
                 'simulation whole-body planner owns the waist controller.'
             ),
         ),
+        DeclareLaunchArgument(
+            'shoulder_height_offset_m',
+            default_value='0.0',
+            description='Shoulder height offset captured by the next calibration',
+        ),
+        DeclareLaunchArgument(
+            'shoulder_forward_offset_m',
+            default_value='-0.02',
+            description='Shoulder fore/aft offset captured by the next calibration',
+        ),
+        DeclareLaunchArgument(
+            'shoulder_width_m',
+            default_value='0.40',
+            description='Operator shoulder width captured by the next calibration',
+        ),
+        DeclareLaunchArgument(
+            'arm_motion_scale',
+            default_value='1.15',
+            description='Live headset-relative hand-delta scale',
+        ),
+        DeclareLaunchArgument('max_forward_mps', default_value='0.35'),
+        DeclareLaunchArgument('max_lateral_mps', default_value='0.25'),
+        DeclareLaunchArgument('max_yaw_rps', default_value='0.60'),
         Node(
             package='r1_kinematics_control',
             executable='r1_kinematics_control',
@@ -85,7 +110,11 @@ def generate_launch_description():
             output='screen',
             parameters=[
                 config,
+                LaunchConfiguration('response_config'),
                 {
+                    'exhibition_session_mode': ParameterValue(
+                        LaunchConfiguration('exhibition_session_mode'), value_type=bool
+                    ),
                     'use_sim_time': ParameterValue(use_sim_time, value_type=bool),
                     'urdf_path': urdf_path,
                     'dry_run': ParameterValue(dry_run, value_type=bool),
@@ -96,6 +125,30 @@ def generate_launch_description():
                         headset_relative, value_type=bool
                     ),
                     'body_proxy.calibration_file': calibration_file,
+                    'body_proxy.shoulder_height_offset_m': ParameterValue(
+                        LaunchConfiguration('shoulder_height_offset_m'),
+                        value_type=float,
+                    ),
+                    'body_proxy.shoulder_forward_offset_m': ParameterValue(
+                        LaunchConfiguration('shoulder_forward_offset_m'),
+                        value_type=float,
+                    ),
+                    'body_proxy.shoulder_width_m': ParameterValue(
+                        LaunchConfiguration('shoulder_width_m'),
+                        value_type=float,
+                    ),
+                    'body_proxy.motion_scale': ParameterValue(
+                        LaunchConfiguration('arm_motion_scale'), value_type=float
+                    ),
+                    'max_forward_mps': ParameterValue(
+                        LaunchConfiguration('max_forward_mps'), value_type=float
+                    ),
+                    'max_lateral_mps': ParameterValue(
+                        LaunchConfiguration('max_lateral_mps'), value_type=float
+                    ),
+                    'max_yaw_rps': ParameterValue(
+                        LaunchConfiguration('max_yaw_rps'), value_type=float
+                    ),
                     'cmd_vel_output_topic': cmd_vel_output_topic,
                     'arm_command_topic': arm_command_topic,
                     'joint_states_topic': joint_states_topic,

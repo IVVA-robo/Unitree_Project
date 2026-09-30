@@ -694,6 +694,18 @@ private:
           status += " mode_raw=unavailable";
         }
         publish_status(status);
+        if (!motor_health_observed_ || motors_healthy != last_motor_health_) {
+          if (motors_healthy) {
+            RCLCPP_INFO(
+              get_logger(), "motor health recovered: %s", status.c_str());
+          } else {
+            RCLCPP_ERROR(
+              get_logger(), "explicit motor fault: %s", status.c_str());
+          }
+        }
+        motor_health_observed_ = true;
+        last_motor_health_ = motors_healthy;
+        lowstate_available_ = true;
       }
     } else {
       publish_status(
@@ -703,6 +715,12 @@ private:
     // Publish on every timer tick. Consumers must independently enforce a
     // bounded arrival age, so a stopped reader can never leave a stale true
     // value authorizing physical output.
+    if (!feedback_ready && lowstate_available_) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "LowState became missing, stale, or nonfinite; motor health is false");
+      lowstate_available_ = false;
+    }
     publish_motor_health(feedback_ready && motors_healthy);
 
     // A stale/invalid physical feedback stream is itself a stop condition;
@@ -767,6 +785,10 @@ private:
   std::vector<double> arm_joint_min_rad_;
   std::vector<double> arm_joint_max_rad_;
   std::map<std::string, std::size_t> arm_name_to_index_;
+
+  bool motor_health_observed_{false};
+  bool last_motor_health_{false};
+  bool lowstate_available_{false};
 
   bool active_seen_{false};
   bool active_{false};

@@ -226,7 +226,7 @@ def test_bad_samples_and_rpc_errors_reconnect_with_metrics(
     assert client.poll_calls >= 2
 
 
-def test_repeated_unavailable_service_reuses_one_dds_client_until_recovery():
+def test_repeated_unavailable_service_recycles_stale_dds_client():
     unavailable = (3102, b'')
     client = _FakeClient(
         [unavailable, unavailable, unavailable, (0, _jpeg())],
@@ -253,13 +253,40 @@ def test_repeated_unavailable_service_reuses_one_dds_client_until_recovery():
     source.stop(timeout=0.2)
 
     metrics = hub.status()['sources']['unitree-video']
-    assert len(factory_calls) == 1
-    assert client.init_calls == 1
+    assert len(factory_calls) == 2
+    assert client.init_calls == 2
     assert client.poll_calls >= 4
     assert metrics['errors'] == 3
     assert metrics['reconnects'] == 3
     assert metrics['successful_reconnects'] == 1
     assert metrics['reported_dropped_frames'] == 3
+
+
+def test_client_recycle_closes_private_sdk_channels_when_available():
+    calls = []
+
+    class Channel:
+        def CloseWriter(self):
+            calls.append('writer')
+
+        def CloseReader(self):
+            calls.append('reader')
+
+    class Stub:
+        pass
+
+    class Client:
+        pass
+
+    stub = Stub()
+    setattr(stub, '_ClientStub__sendChannel', Channel())
+    setattr(stub, '_ClientStub__recvChannel', Channel())
+    client = Client()
+    setattr(client, '_ClientBase__stub', stub)
+
+    UnitreeVideoSource._close_client(client)
+
+    assert calls == ['writer', 'reader']
 
 
 def test_stop_during_bounded_rpc_poll_is_clean_and_does_not_reconnect():

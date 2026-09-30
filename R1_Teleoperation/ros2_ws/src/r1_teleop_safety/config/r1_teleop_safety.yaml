@@ -8,4 +8,4 @@ r1_safety_supervisor:
     kill_request_topic: "/r1/safety/kill_request"
     status_topic: "/r1/safety/status"
     allow_dry_run_release: true
-    publish_rate_hz: 5.0
+    publish_rate_hz: 20.0

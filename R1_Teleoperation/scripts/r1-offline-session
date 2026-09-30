@@ -64,6 +64,12 @@ export R1_TELEOP_HEADSET_RELATIVE="${R1_TELEOP_HEADSET_RELATIVE:-true}"
 export ROBOT_POV_MDNS_NAME="${R1_TELEOP_MDNS_NAME:-$(hostname -s).local}"
 
 if [[ "${MODE}" == r1 || "${MODE}" == unitree ]]; then
+  # Repair only the known dedicated TP-Link R1 adapter if another peripheral
+  # changed its NetworkManager profile. This is local networking only.
+  "${SCRIPT_DIR}/r1-network-ensure"
+fi
+
+if [[ "${MODE}" == r1 || "${MODE}" == unitree ]]; then
   echo 'R1 offline LAN session: video-only Unitree source; robot command paths are disabled.'
 elif [[ "${MODE}" == mock ]]; then
   echo 'R1 offline LAN session: mock video source; no robot is required.'

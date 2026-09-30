@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Keep the dedicated R1 cable on its fixed, isolated LAN.  A USB manipulator
+# or another Ethernet device may cause NetworkManager to reuse/edit a profile;
+# only repair the adapter whose factory MAC is the known TP-Link R1 adapter.
+# This script changes no robot setting and sends no SDK command.
+
+PROFILE="${R1_ROBOT_PROFILE:-Unitree_R1}"
+INTERFACE="${R1_ROBOT_INTERFACE:-enxb4b024be59fe}"
+EXPECTED_MAC="${R1_ROBOT_ADAPTER_MAC:-B4:B0:24:BE:59:FE}"
+EXPECTED_ADDRESS="${R1_LAPTOP_ROBOT_IP:-192.168.123.162}/24"
+
+if ! command -v nmcli >/dev/null 2>&1 || [[ ! -r "/sys/class/net/${INTERFACE}/address" ]]; then
+  echo "R1_NETWORK state=WAITING detail=adapter_unavailable"
+  exit 0
+fi
+
+actual_mac=$(tr '[:lower:]' '[:upper:]' < "/sys/class/net/${INTERFACE}/address")
+if [[ "${actual_mac}" != "${EXPECTED_MAC}" ]]; then
+  echo "R1_NETWORK state=SKIPPED detail=unexpected_adapter_mac"
+  exit 0
+fi
+
+if ! nmcli -g connection.id connection show "${PROFILE}" >/dev/null 2>&1; then
+  echo "R1_NETWORK state=WAITING detail=profile_missing"
+  exit 0
+fi
+
+configured_address=$(nmcli -g ipv4.addresses connection show "${PROFILE}" 2>/dev/null | head -n1 || true)
+active_address=$(nmcli -g IP4.ADDRESS device show "${INTERFACE}" 2>/dev/null | head -n1 || true)
+
+if [[ "${configured_address}" != "${EXPECTED_ADDRESS}" ]]; then
+  nmcli connection modify "${PROFILE}" \
+    ipv4.method manual \
+    ipv4.addresses "${EXPECTED_ADDRESS}" \
+    ipv4.gateway "" \
+    ipv4.never-default yes \
+    ipv6.method disabled \
+    connection.interface-name "${INTERFACE}" \
+    connection.autoconnect yes
+  echo "R1_NETWORK state=REPAIRED detail=profile_restored"
+fi
+
+if [[ "${active_address}" != "${EXPECTED_ADDRESS}" ]]; then
+  nmcli connection up "${PROFILE}" ifname "${INTERFACE}" >/dev/null
+  echo "R1_NETWORK state=READY detail=adapter_activated"
+else
+  echo "R1_NETWORK state=READY detail=static_lan_verified"
+fi

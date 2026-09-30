@@ -91,10 +91,11 @@ releases to `weight=0` and latches kill. Fresh measured head velocity above
 ownership/axis handshake; it neither establishes joint zero nor authorizes
 normal tracking.
 
-For locomotion the only reviewed direction is the official R1 high-level
-`r1::LocoClient` service `sport`. Its documented operations include
-`SetVelocity`, `StopMove`, `Damp`, and `StandUp`. Do not use `rt/lowcmd`, raw
-leg joint trajectories, `Start`, or unknown speed-mode values in tests.
+For locomotion the reviewed direction uses `r1::LocoClient` only for bounded
+`StandUp`/`Start` preparation and stable FSM checks. Normal stick motion uses
+the official typed `WirelessController_` channel `rt/wirelesscontroller`, as
+captured from Unitree Explore. Do not use `rt/lowcmd`, raw leg trajectories, or
+unknown speed-mode values in tests.
 
 ## Required environment interlocks
 
@@ -318,9 +319,27 @@ writer latch, and call `/r1/live_writer/prepare`.
 The transport sends the official R1 `StandUp()`, polls `GetFsmId()` until
 `FSM=4` is stable. In a locomotion-enabled session it then sends the official
 `Start()` and requires stable locomotion `FSM=811`, all within bounded
-timeouts. This second transition is required by the R1 sport API before
-`SetVelocity()`; without it the robot returns error `127` even though
-`StandUp()` succeeded. Head/arms-only sessions deliberately stop at stable
+timeouts. A successful Unitree Explore capture then established the missing
+command path: the app publishes `WirelessController_` axes on
+`rt/wirelesscontroller` at approximately 20 Hz and does not use `SetVelocity`
+for its virtual stick. Forward input visibly shifts the body/centre of mass
+before the first step. The ordinary isolated legs stage now uses that same
+typed channel. The operator selects blue **Run** after boot, closes the control
+screen, and confirms that no phone stick will be used concurrently. The
+forward axis of this isolated route was physically verified on 2026-09-24:
+the robot walked from a short left-stick command, then returned to zero on
+neutral/released Deadman and stopped under the normal KILL path. The combined
+arms/head/legs path remains blocked until lateral and yaw are verified in the
+same isolated manner.
+An independent R1 report states that high-level walking can work in FSM `811`
+while `SetVelocity()` returns `127`. The new diagnostic therefore admits that
+status only in `velocity_status_127_probe_enabled` mode: legs-only,
+forward-only, `0.15 m/s` maximum, `10 Hz`, and a `1.5 s` command window. It
+requires exact firmware, closed-app, and probe acknowledgements. Every other
+nonzero status remains fail-closed, and a `127` result from `StopMove()` remains
+ambiguous; the software KILL is latched and the final one-second velocity lease
+is allowed to expire.
+Head/arms-only sessions deliberately stop at stable
 `FSM=4` and never enter sport mode. Command output remains unarmed during
 these transitions. The operator must then release Deadman and press it again;
 when locomotion is enabled, a fresh neutral processed velocity is additionally

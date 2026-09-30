@@ -15,14 +15,23 @@ R1_UNITREE_SDK_ROOT ?= /home/unitree/Unitree_Project/Legacy_Robotics/robotics/un
 	r1-live-writer-live robot-preflight robot-prepare \
 	safety-supervisor \
 	robot-readonly-preflight robot-live-arm-check teleop-live-preflight \
-	head-dry-run locomotion-dry-run head-live-dry-arm head-live-test locomotion-live-test \
-	arms-live legs-live \
+	head-dry-run locomotion-dry-run arms-dry-run legs-dry-run head-live-dry-arm head-live \
+	head-live-test locomotion-live-test \
+	locomotion-127-probe \
+	arms-live arms-running-live arms-calibrate head-calibrate legs-live \
 	head-recenter-session robot-head-recenter \
 	head-ownership-probe-session robot-head-ownership-probe \
-	teleop-dry-run teleop-dry-run-smoke robot-stop robot-kill teleop-live \
+	teleop-dry-run teleop-dry-run-smoke robot-stop robot-kill robot-zero-torque teleop-live \
 	pov-demo pov-vr pov-stereo-demo pov-high-quality pov-low-latency \
 	pov-exhibition pov-preflight operator-panel operator-panel-smoke \
-	operator-panel-check
+	operator-panel-check r1-panel-status r1-voice-preflight r1-operator-panel-autostart-install \
+	exhibition-panel exhibition-static exhibition-control exhibition-reconnect \
+	exhibition-lock exhibition-rearm \
+	exhibition-calibrate exhibition-calibrate-arms exhibition-calibrate-head \
+	exhibition-full-live exhibition-stop \
+	exhibition-status exhibition-mock-smoke r1-battery-monitor r1-connection-ensure \
+	r1-app-command-capture r1-voice-ensure
+
 
 r1-sim:
 	./scripts/r1-sim
@@ -49,6 +58,18 @@ r1-sdk-build:
 # Ethernet link is already connected and the operator wants LowState telemetry.
 r1-sdk-readonly:
 	./scripts/r1-sdk-readonly
+
+r1-battery-monitor:
+	./scripts/r1-battery-monitor
+
+r1-connection-ensure:
+	./scripts/r1-connection-ensure
+
+r1-app-command-capture:
+	./scripts/r1-app-command-capture $${R1_CAPTURE_ARGS:-}
+
+r1-voice-ensure:
+	./scripts/r1-voice-ensure
 
 # Bounded read-only LowCmd plus arm-action-state subscribers. Exit 0 requires
 # an idle action state and no commands; every other code blocks another writer.
@@ -134,21 +155,46 @@ teleop-live-preflight:
 # These three targets are diagnostics-only.  They force dry-run environment
 # flags and publish exclusively to named debug topics.
 head-dry-run:
+	R1_DRY_RUN_UDP_PORT="$${R1_DRY_RUN_UDP_PORT:-19130}" \
+	R1_DRY_RUN_DISCOVERY_PORT="$${R1_DRY_RUN_DISCOVERY_PORT:-19131}" \
 	R1_DRY_RUN_START_LOCOMOTION=false ./scripts/r1-teleop-dry-run
 
 locomotion-dry-run:
+	R1_DRY_RUN_UDP_PORT="$${R1_DRY_RUN_UDP_PORT:-19132}" \
+	R1_DRY_RUN_DISCOVERY_PORT="$${R1_DRY_RUN_DISCOVERY_PORT:-19133}" \
 	R1_DRY_RUN_START_HEAD=false ./scripts/r1-teleop-dry-run
+
+# Explicit arm-only dry-run.  This starts the VR bridge, headset-relative IK,
+# and MockTransport writer on localhost; it never opens Unitree Ethernet/DDS.
+arms-dry-run:
+	./scripts/r1-arms-dry-run
+
+# Explicit locomotion-only dry-run.  The head and arm paths remain disabled.
+legs-dry-run:
+	R1_DRY_RUN_UDP_PORT="$${R1_DRY_RUN_UDP_PORT:-19132}" \
+	R1_DRY_RUN_DISCOVERY_PORT="$${R1_DRY_RUN_DISCOVERY_PORT:-19133}" \
+	R1_DRY_RUN_START_HEAD=false R1_DRY_RUN_START_ARM_PIPELINE=false ./scripts/r1-teleop-dry-run
 
 # Full VR head pipeline into MockTransport with send_commands=false. This is
 # the explicit head-live-dry-arm mode; it does not open Unitree Ethernet/DDS.
 head-live-dry-arm:
 	./scripts/r1-head-live-dry-arm
 
+# Physical head entry point.  The wrapper is fail-closed and requires the
+# reviewed commissioning acknowledgements; it is never a dry-run alias.
+head-live:
+	./scripts/r1-head-live-test
+
 # These are explicit, fail-closed physical session wrappers. They require all
 # live acknowledgements, a fixed VR IP, link checks, and a fresh-start kill
 # latch; they are not dry-run diagnostics and must not be used on a charger.
 head-live-test:
 	./scripts/r1-head-live-test
+
+# Head-only commissioning with the official FSM 811 controller active. The
+# joystick/SetVelocity path and both arms remain absent.
+head-running-live:
+	./scripts/r1-head-running-live-test
 
 # Legacy full physical recenter entry points are intentionally retained only to
 # fail closed with a migration message. They cannot start a writer or request a
@@ -171,11 +217,31 @@ robot-head-ownership-probe:
 locomotion-live-test:
 	./scripts/r1-locomotion-live-test
 
+# One-shot compatibility experiment for ai_sport 1.0.2.154. Status 127 is
+# admitted only for nonzero SetVelocity during a forward-only 1.5 s window.
+locomotion-127-probe:
+	./scripts/r1-locomotion-127-probe
+
 # Explicit staged aliases requested for the physical commissioning workflow.
 # Both wrappers remain fail-closed and require the same acknowledgements as
 # the canonical head/locomotion entry points.
 arms-live:
 	./scripts/r1-arms-live-test
+
+# Arm commissioning with the official FSM 811 controller active, while the
+# joystick/SetVelocity path remains absent.  This is not a locomotion target.
+arms-running-live:
+	./scripts/r1-arms-running-live-test
+
+# Local ROS service only: saves the current HMD/controller neutral while
+# Deadman is released. It never constructs an SDK client or clears KILL.
+arms-calibrate:
+	./scripts/r1-arms-calibrate
+
+# Save the current HMD neutral in an already-running dry/live head graph.  It
+# only calls the local Trigger service and cannot create an SDK writer.
+head-calibrate:
+	./scripts/r1-head-calibrate
 
 legs-live:
 	./scripts/r1-locomotion-live-test
@@ -186,13 +252,16 @@ teleop-dry-run:
 teleop-dry-run-smoke:
 	./scripts/r1-teleop-dry-run-smoke
 
-# Requests stop/release from an already-running writer, then asserts the
-# independent central software kill. It never starts a writer or enables motion.
+# Asserts the independent central software kill first, then requests bounded
+# stop/release from the existing writer. It never starts a writer or enables motion.
 robot-stop:
 	./scripts/r1-robot-stop
 
 robot-kill:
 	./scripts/r1-robot-kill
+
+robot-zero-torque:
+	./scripts/r1-zero-torque
 
 # Explicit full physical session. The script fails closed unless all required
 # acknowledgements are already supplied; do not invoke it on a charging robot.
@@ -222,13 +291,13 @@ robot-pov-preflight:
 # Short aliases for the video-only immersive POV workflow. These targets never
 # start a robot-control node; they only select the camera/profile and viewer.
 pov-demo:
-	./scripts/robot-pov mock --profile balanced
+	./scripts/robot-pov mock --profile balanced --port "$${R1_POV_DEMO_PORT:-18080}"
 
 pov-vr:
 	./scripts/robot-pov r1
 
 pov-stereo-demo:
-	./scripts/robot-pov mock --profile balanced --layout stereo
+	./scripts/robot-pov mock --profile balanced --layout stereo --port "$${R1_POV_STEREO_DEMO_PORT:-18081}"
 
 pov-high-quality:
 	./scripts/robot-pov r1 --profile high
@@ -247,11 +316,97 @@ pov-preflight:
 operator-panel:
 	./scripts/r1-operator-panel
 
+# One-command exhibition entry points.  The foreground manager supervises
+# video-only POV reconnects and logs every child.  Physical control still uses
+# teleop-live -> robot-prepare and therefore retains all SDK/KILL/watchdog gates.
+exhibition-panel:
+	./scripts/r1-exhibition panel
+
+exhibition-static:
+	ROBOT_CONFIRM_STATIC_PREPARE=1 \
+	R1_EXHIBITION_SESSION_MODE=deadman ./scripts/r1-exhibition static
+
+exhibition-control:
+	R1_EXHIBITION_SESSION_MODE="$${R1_EXHIBITION_SESSION_MODE:-session_arm}" \
+	SAFETY_PROFILE=exhibition \
+	ROBOT_EXHIBITION_SESSION=1 \
+		./scripts/r1-exhibition control
+
+# Compatibility name for the complete exhibition arms+legs session.  Physical
+# HMD-to-head control remains a separately reviewed head-live stage.
+exhibition-full-live:
+	R1_EXHIBITION_SESSION_MODE="$${R1_EXHIBITION_SESSION_MODE:-session_arm}" \
+	SAFETY_PROFILE=exhibition \
+	ROBOT_EXHIBITION_SESSION=1 \
+		./scripts/r1-exhibition control
+
+exhibition-reconnect:
+	./scripts/r1-exhibition reconnect
+
+# Normal RUN -> LOCK transition.  The control graph stays prepared and the
+# bridge changes to hold/zero in place, so no SDK or video restart is needed.
+exhibition-lock:
+	R1_EXHIBITION_SESSION_MODE=session_arm \
+	SAFETY_PROFILE=exhibition \
+	ROBOT_EXHIBITION_SESSION=1 \
+		./scripts/r1-exhibition lock
+
+# Reuse the already-checked control graph after a latched writer KILL.  The
+# helper repeats calibration, current feedback/traffic gates and official
+# prepare, but does not restart video, DDS readers or the live writer.
+exhibition-rearm:
+	R1_EXHIBITION_SESSION_MODE=session_arm \
+	SAFETY_PROFILE=exhibition \
+	ROBOT_EXHIBITION_SESSION=1 \
+		./scripts/r1-exhibition rearm
+
+exhibition-calibrate:
+	R1_EXHIBITION_SESSION_MODE="$${R1_EXHIBITION_SESSION_MODE:-session_arm}" \
+		./scripts/r1-exhibition-calibrate
+
+exhibition-calibrate-arms:
+	R1_EXHIBITION_SESSION_MODE="$${R1_EXHIBITION_SESSION_MODE:-session_arm}" \
+		./scripts/r1-exhibition calibrate
+
+exhibition-calibrate-head:
+	./scripts/r1-head-calibrate
+
+exhibition-stop:
+	R1_EXHIBITION_SESSION_MODE="$${R1_EXHIBITION_SESSION_MODE:-session_arm}" \
+		./scripts/r1-exhibition stop
+
+exhibition-status:
+	./scripts/r1-exhibition status
+
+exhibition-mock-smoke:
+	python3 -m pytest -q tests/test_exhibition_orchestrator.py
+
+r1-panel-status:
+	./scripts/r1-panel-status
+
+r1-voice-preflight:
+	./scripts/r1-voice-preflight
+
+r1-sdk-warmup:
+	./scripts/r1-sdk-warmup
+
+# Optional user service: starts only the operator UI.  The companion offline
+# session service remains video/bridge-only and never enables a live writer.
+r1-operator-panel-autostart-install:
+	install -Dm0644 systemd/user/r1-operator-panel.service \
+		"$${XDG_CONFIG_HOME:-$${HOME}/.config}/systemd/user/r1-operator-panel.service"
+	install -Dm0644 'desktop/Unitree R1 Панель оператора.desktop' \
+		"$${HOME}/.local/share/applications/unitree-r1-operator-panel.desktop"
+	install -Dm0755 'desktop/Unitree R1 Панель оператора.desktop' \
+		"$${HOME}/Рабочий стол/Unitree R1 Панель оператора.desktop"
+	systemctl --user daemon-reload
+	systemctl --user enable --now r1-operator-panel.service
+
 operator-panel-smoke:
 	QT_QPA_PLATFORM=offscreen ./scripts/r1-operator-panel --smoke
 
 operator-panel-check:
-	python3 -m pytest -q tests/test_operator_panel.py
+	QT_QPA_PLATFORM=offscreen python3 -m pytest -q tests/test_operator_panel.py tests/test_processes.py tests/test_operator_panel_service.py
 	PYTHONPATH=ros2_ws/src/r1_robot_pov:$${PYTHONPATH:-} python3 -m pytest -q ros2_ws/src/r1_robot_pov/test
 
 r1-camera-preflight:

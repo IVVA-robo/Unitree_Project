@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Coordinate the installed, video-only offline service with an exhibition
+# session.  This helper deliberately manages one exact user unit; it never
+# searches for or kills arbitrary ROS/SDK processes.
+
+UNIT=${R1_EXHIBITION_OFFLINE_UNIT:-r1-offline-session.service}
+TIMEOUT_SEC=${R1_EXHIBITION_OFFLINE_HANDOFF_TIMEOUT_SEC:-12}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXPECTED_EXEC="${SCRIPT_DIR}/r1-offline-session"
+UDP_PORT=${R1_TELEOP_UDP_PORT:-9090}
+DISCOVERY_PORT=${R1_TELEOP_DISCOVERY_PORT:-9091}
+VIDEO_PORT=${R1_TELEOP_VIDEO_PORT:-8080}
+
+die() {
+  printf '[BLOCKED] offline-session handoff: %s\n' "$*" >&2
+  exit 2
+}
+
+[[ ${UNIT} =~ ^[A-Za-z0-9_.@-]+\.service$ ]] \
+  || die 'R1_EXHIBITION_OFFLINE_UNIT must name one systemd service'
+[[ ${TIMEOUT_SEC} =~ ^[1-9][0-9]*$ ]] \
+  || die 'R1_EXHIBITION_OFFLINE_HANDOFF_TIMEOUT_SEC must be a positive integer'
+((10#${TIMEOUT_SEC} <= 60)) \
+  || die 'R1_EXHIBITION_OFFLINE_HANDOFF_TIMEOUT_SEC must be at most 60'
+command -v systemctl >/dev/null 2>&1 \
+  || die 'systemctl is unavailable'
+command -v ss >/dev/null 2>&1 \
+  || die 'ss is unavailable; cannot verify that handoff ports are released'
+
+port_in_use() {
+  local protocol=$1 port=$2
+  case "${protocol}" in
+    udp)
+      ss -H -lun "sport = :${port}" 2>/dev/null | grep -q .
+      ;;
+    tcp)
+      ss -H -ltn "sport = :${port}" 2>/dev/null | grep -q .
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
+wait_for_ports_free() {
+  local deadline=$((SECONDS + 10#${TIMEOUT_SEC}))
+  local busy=''
+  while ((SECONDS <= deadline)); do
+    busy=''
+    port_in_use udp "${UDP_PORT}" && busy+=" udp:${UDP_PORT}"
+    port_in_use udp "${DISCOVERY_PORT}" && busy+=" udp:${DISCOVERY_PORT}"
+    port_in_use tcp "${VIDEO_PORT}" && busy+=" tcp:${VIDEO_PORT}"
+    if [[ -z "${busy}" ]]; then
+      return 0
+    fi
+    sleep 0.10
+  done
+  die "offline service stopped but its ports remain occupied:${busy}"
+}
+
+service_state() {
+  local state status
+  set +e
+  state=$(systemctl --user is-active "${UNIT}" 2>/dev/null)
+  status=$?
+  set -e
+  case ${status} in
+    0)
+      [[ ${state} == active ]] \
+        || die "${UNIT} returned an unexpected active state: ${state}"
+      printf 'active\n'
+      return 0
+      ;;
+    3|4)
+      # systemd uses 3 for an inactive unit and 4 when the optional unit is
+      # not installed.  Both mean there is no service-owned graph to hand off.
+      printf 'inactive\n'
+      return 3
+      ;;
+    *)
+      die "could not query user unit ${UNIT} (systemctl exit ${status})"
+      ;;
+  esac
+}
+
+verify_compatible_unit() {
+  local exec_start status
+  set +e
+  exec_start=$(systemctl --user show "${UNIT}" \
+    --property=ExecStart --value 2>/dev/null)
+  status=$?
+  set -e
+  ((status == 0)) \
+    || die "could not inspect ExecStart for ${UNIT}"
+  [[ ${exec_start} == *"${EXPECTED_EXEC}"* \
+      && ${exec_start} == *"argv[]=${EXPECTED_EXEC} r1 ;"* ]] \
+    || die "${UNIT} is not the compatible video-only r1-offline-session r1 unit"
+}
+
+wait_for_state() {
+  local expected=$1 deadline=$((SECONDS + 10#${TIMEOUT_SEC})) state status
+  while ((SECONDS <= deadline)); do
+    set +e
+    state=$(service_state)
+    status=$?
+    set -e
+    if [[ ${expected} == active && ${status} == 0 ]]; then
+      return 0
+    fi
+    if [[ ${expected} == inactive && ${status} == 3 ]]; then
+      return 0
+    fi
+    ((status == 0 || status == 3)) \
+      || die "could not verify ${UNIT} after transition"
+    sleep 0.10
+  done
+  die "${UNIT} did not become ${expected} within ${TIMEOUT_SEC}s"
+}
+
+ACTION=${1:-}
+[[ $# -eq 1 ]] \
+  || die 'usage: r1-exhibition-offline-handoff status|stop|start'
+case ${ACTION} in
+  status)
+    service_state
+    ;;
+  stop)
+    set +e
+    service_state >/dev/null
+    status=$?
+    set -e
+    if ((status == 3)); then
+      printf '%s is already inactive\n' "${UNIT}"
+      exit 0
+    fi
+    ((status == 0)) || die "could not verify ${UNIT} before stop"
+    verify_compatible_unit
+    systemctl --user stop "${UNIT}" \
+      || die "could not stop ${UNIT}"
+    wait_for_state inactive
+    # systemd can report the main launch process inactive a fraction before
+    # the ROS children have released their sockets. Starting the live bridge
+    # during that gap makes its discovery bind fail and later looks like a
+    # mysterious KILL. Wait for the exact offline endpoints to disappear.
+    wait_for_ports_free
+    printf '%s stopped for the exhibition session\n' "${UNIT}"
+    ;;
+  start)
+    verify_compatible_unit
+    systemctl --user start "${UNIT}" \
+      || die "could not restore ${UNIT}"
+    wait_for_state active
+    printf '%s restored after exhibition STOP\n' "${UNIT}"
+    ;;
+  *)
+    die 'usage: r1-exhibition-offline-handoff status|stop|start'
+    ;;
+esac

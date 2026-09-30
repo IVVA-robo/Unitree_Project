@@ -84,7 +84,7 @@ for topic in \
   fi
 done
 
-ACTIVE_SAMPLE="$(timeout 2s ros2 topic echo --once /vr/teleop/active 2>/dev/null || true)"
+ACTIVE_SAMPLE="$(timeout 2s ros2 topic echo --once /vr/teleop/active --no-daemon 2>/dev/null || true)"
 ACTIVE_VALUE="$(awk '/^data:/ {print $2; exit}' <<<"${ACTIVE_SAMPLE}")"
 case "${ACTIVE_VALUE}" in
   true) mark 'INFO' 'Deadman is ACTIVE (movement is permitted by the gate)' ;;
@@ -92,7 +92,7 @@ case "${ACTIVE_VALUE}" in
   *) mark 'WARN' 'Deadman state is unavailable' ;;
 esac
 
-CMD_SAMPLE="$(timeout 2s ros2 topic echo --once /vr/cmd_vel 2>/dev/null || true)"
+CMD_SAMPLE="$(timeout 2s ros2 topic echo --once /vr/cmd_vel --no-daemon 2>/dev/null || true)"
 if [[ -n "${CMD_SAMPLE}" ]]; then
   linear_x="$(awk '/^    x:/ {print $2; exit}' <<<"${CMD_SAMPLE}")"
   linear_y="$(awk '/^    y:/ {print $2; exit}' <<<"${CMD_SAMPLE}")"

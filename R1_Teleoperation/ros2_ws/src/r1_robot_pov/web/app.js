@@ -18,6 +18,7 @@
     reconnects: $('#reconnectValue'),
     dropped: $('#droppedValue'),
     mode: $('#modeValue'),
+    stereo: $('#stereoValue'),
     webxr: $('#webxrValue'),
     modeHint: $('#modeHint'),
     noSignal: $('#noSignal'),
@@ -520,7 +521,7 @@
     }
     if (state.serverSourceHealthy === false) {
       ui.noSignalTitle.textContent = 'Нет сигнала от камеры';
-      ui.noSignalDetail.textContent = state.sourceError
+      ui.noSignalDetail.textContent = friendlyVideoError(state.sourceError)
         || 'Viewer подключён, источник видео восстанавливается автоматически.';
       setConnectionState('offline');
       ui.connectionText.textContent = 'НЕТ СИГНАЛА';
@@ -535,7 +536,15 @@
     const seconds = Math.max(0, Math.ceil((state.retryAt - Date.now()) / 1000));
     ui.noSignalDetail.textContent = seconds > 0
       ? `Переподключение через ${seconds} с. Последний кадр скрыт для безопасности.`
-      : (state.sourceError || 'Пытаемся восстановить соединение автоматически.');
+      : (friendlyVideoError(state.sourceError) || 'Пытаемся восстановить соединение автоматически.');
+  }
+
+  function friendlyVideoError(error) {
+    const text = String(error || '');
+    if (text.includes('3102')) {
+      return 'Камера робота пока не отвечает (3102). Повторяем подключение по Ethernet.';
+    }
+    return text;
   }
 
   function updateSwapButton() {
@@ -685,6 +694,7 @@
         if (bitrate !== null) state.stats.bitrateKbps = bitrate;
       }
       updateTelemetry(status);
+      updateStereoStatus();
     } catch (error) {
       state.statusFailures += 1;
       if (state.statusFailures >= 3) {
@@ -852,12 +862,26 @@
     );
     const layoutLabel = layout === 'sbs' ? 'SBS' : layout === 'tb' ? 'TOP-BOTTOM' : 'MONO';
     ui.mode.textContent = `${layoutLabel} · ${state.profile}`;
+    ui.stereo.textContent = state.config.stereoFallback === true
+      ? 'MONO → ОБА ГЛАЗА'
+      : (state.config.stereoAvailable === true ? 'STEREO' : '—');
     ui.webxr.textContent = state.xrSession
       ? 'ACTIVE'
       : (navigator.xr ? 'READY' : 'FALLBACK');
     if (status.profile && !ui.profile.matches(':focus') && !state.profile) {
       ui.profile.value = status.profile;
     }
+  }
+
+  function updateStereoStatus() {
+    const fallback = state.config.stereoFallback === true;
+    const label = fallback ? 'MONO → ОБА ГЛАЗА' : 'STEREO';
+    if (state.config.stereoStatus) {
+      ui.mode.title = state.config.stereoStatus;
+    }
+    // Keep the compact telemetry readable while exposing the distinction in
+    // the mode field and browser accessibility tree.
+    ui.mode.setAttribute('aria-label', state.config.stereoStatus || label);
   }
 
   function compactSourceName(value) {

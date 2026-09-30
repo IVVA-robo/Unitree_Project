@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Bounded JSONL capture of the existing read-only R1 FSM probe.
+
+Source ROS/workspace setup and scripts/r1-unitree-sdk-env first. This wrapper
+only executes the installed r1_loco_state_probe, which exposes API 7001 and
+the SDK's read-only version/Noop handshake. It does not enable control.
+"""
+
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+import json
+import math
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+
+
+PROJECT = Path(__file__).resolve().parents[1]
+PROBE = PROJECT / "ros2_ws/install/r1_sdk_transport/lib/r1_sdk_transport/r1_loco_state_probe"
+FSM_LINE = re.compile(
+    r"^R1_LOCO_FSM_ID status=(OK|RPC_ERROR) api=7001 code=(-?\d+) fsm_id=(-?\d+)$",
+    re.MULTILINE,
+)
+
+
+def bounded_number(lower: float, upper: float):
+    def parse(value: str) -> float:
+        try:
+            result = float(value)
+        except ValueError as error:
+            raise argparse.ArgumentTypeError("expected a number") from error
+        if not math.isfinite(result) or not lower <= result <= upper:
+            raise argparse.ArgumentTypeError(f"must be within {lower}..{upper}")
+        return result
+    return parse
+
+
+def interface_name(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", value):
+        raise argparse.ArgumentTypeError("invalid network interface name")
+    return value
+
+
+def arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Bounded read-only FSM capture; never starts robot control.",
+        epilog="Source ROS/workspace setup and scripts/r1-unitree-sdk-env first. "
+        "Every JSON line is a separate observation. Failed, stale, pending and "
+        "final records always clear fsm_id. Fresh FSM811 is not proof of walking.",
+    )
+    parser.add_argument("--interface", required=True, type=interface_name)
+    parser.add_argument("--duration-sec", required=True, type=bounded_number(0.1, 120.0))
+    parser.add_argument("--interval-sec", required=True, type=bounded_number(0.5, 120.0))
+    parser.add_argument("--timeout-sec", default=0.5, type=bounded_number(0.1, 2.0),
+                        help="per SDK request timeout (default: 0.5)")
+    parser.add_argument("--probe-timeout-sec", default=4.0, type=bounded_number(0.1, 10.0),
+                        help="total subprocess timeout, also capped by capture duration")
+    parser.add_argument("--max-sample-age-sec", default=3.0, type=bounded_number(0.1, 10.0),
+                        help="conservative freshness bound including probe startup")
+    return parser.parse_args(argv)
+
+
+def timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def sample_result(returncode: int, output: str, elapsed: float,
+                  max_age: float) -> dict:
+    # Build every observation from empty state: a failed read cannot preserve
+    # an earlier FSM, even when the subprocess printed a successful line.
+    result = {"status": "invalid_output", "fsm_id": None, "rpc_code": None,
+              "fresh": False, "probe_exit": returncode}
+    matches = FSM_LINE.findall(output)
+    if len(matches) != 1:
+        if returncode != 0:
+            result["status"] = "probe_failed"
+        return result
+    status, code, fsm = matches[0]
+    result["rpc_code"] = int(code)
+    if status != "OK" or int(code) != 0:
+        result["status"] = "rpc_error"
+    elif returncode != 0:
+        result["status"] = "probe_failed"
+    elif int(fsm) < 0:
+        result["status"] = "invalid_output"
+    elif elapsed > max_age:
+        result["status"] = "stale"
+    else:
+        result.update(status="ok", fsm_id=int(fsm), fresh=True)
+    return result
+
+
+def capture(options: argparse.Namespace, *, probe: Path = PROBE,
+            emit=None) -> int:
+    if emit is None:
+        emit = lambda value: print(json.dumps(value, ensure_ascii=False), flush=True)
+    start = time.monotonic()
+    deadline = start + options.duration_sec
+    command = [str(probe), "--interface", options.interface,
+               "--timeout-sec", str(options.timeout_sec)]
+    sequence = 0
+    failed = False
+    interrupted = False
+    try:
+        while time.monotonic() < deadline:
+            attempt_start = time.monotonic()
+            sequence += 1
+            common = {"schema": 1, "sequence": sequence,
+                      "query_started_at": timestamp(), "api": 7001}
+            emit(dict(common, event="query_started", timestamp=timestamp(),
+                      elapsed_sec=round(attempt_start - start, 6),
+                      status="pending", fsm_id=None, rpc_code=None, fresh=False))
+            try:
+                completed = subprocess.run(
+                    command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True, errors="replace",
+                    timeout=min(options.probe_timeout_sec,
+                                max(0.001, deadline - time.monotonic())),
+                    check=False,
+                )
+                elapsed = time.monotonic() - attempt_start
+                result = sample_result(completed.returncode, completed.stdout,
+                                       elapsed, options.max_sample_age_sec)
+            except subprocess.TimeoutExpired:
+                result = {"status": "timeout", "fsm_id": None,
+                          "rpc_code": None, "fresh": False, "probe_exit": None}
+            except OSError as error:
+                result = {"status": "unavailable", "fsm_id": None,
+                          "rpc_code": None, "fresh": False, "probe_exit": None,
+                          "detail": str(error)[:240]}
+            elapsed = time.monotonic() - attempt_start
+            # The SDK output has no server timestamp. Treat the whole probe
+            # lifetime as an upper bound; do not invent exact response age.
+            emit(dict(common, event="fsm_sample", timestamp=timestamp(),
+                      elapsed_sec=round(time.monotonic() - start, 6),
+                      sample_age_upper_bound_sec=round(elapsed, 6), **result))
+            failed = failed or not result["fresh"]
+            remaining = deadline - time.monotonic()
+            pause = min(remaining, options.interval_sec - elapsed)
+            if pause > 0:
+                time.sleep(pause)
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        emit({"schema": 1, "event": "watch_complete", "timestamp": timestamp(),
+              "elapsed_sec": round(time.monotonic() - start, 6),
+              "samples": sequence, "status": "interrupted" if interrupted else "complete",
+              "fsm_id": None, "rpc_code": None, "fresh": False})
+    return 130 if interrupted else (1 if failed else 0)
+
+
+def main() -> int:
+    return capture(arguments())
+
+
+if __name__ == "__main__":
+    sys.exit(main())

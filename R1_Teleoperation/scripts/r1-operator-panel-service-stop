@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# systemd does not deliver a Qt closeEvent: it runs ExecStop and then signals
+# the service cgroup.  Give an active exhibition manager ownership of the
+# reviewed STOP/KILL sequence before systemd is allowed to terminate the GUI
+# and its QProcess children.
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+EXHIBITION_COMMAND="${R1_OPERATOR_PANEL_EXHIBITION_COMMAND:-${PROJECT_DIR}/scripts/r1-exhibition}"
+
+if [[ ! -x "${EXHIBITION_COMMAND}" ]]; then
+  echo "[WARN] exhibition helper is unavailable: ${EXHIBITION_COMMAND}" >&2
+  exit 1
+fi
+
+status_output="$(${EXHIBITION_COMMAND} status 2>&1)"
+status_code=$?
+active_code=2
+if ((status_code == 0)); then
+  python3 -c '
+import json
+import sys
+
+try:
+    payload = json.loads(sys.argv[1])
+except (IndexError, TypeError, ValueError):
+    raise SystemExit(2)
+
+active = payload.get("active")
+if active is True:
+    raise SystemExit(0)
+if active is False:
+    raise SystemExit(3)
+raise SystemExit(2)
+' "${status_output}"
+  active_code=$?
+fi
+
+service_cgroup_procs=${R1_OPERATOR_PANEL_CGROUP_PROCS-}
+if [[ -z ${service_cgroup_procs} ]]; then
+  cgroup_path=$(awk -F: '$1 == "0" { print $3; exit }' /proc/self/cgroup)
+  service_cgroup_procs="/sys/fs/cgroup${cgroup_path}/cgroup.procs"
+fi
+live_owner_code=2
+if [[ -r ${service_cgroup_procs} ]]; then
+  python3 -c '
+import os
+from pathlib import Path
+import sys
+
+live_targets = {
+    "arms-live", "arms-running-live", "legs-live", "teleop-live",
+    "head-live-test", "locomotion-live-test", "robot-prepare",
+    "exhibition-static", "exhibition-control",
+}
+live_scripts = {
+    "r1-live-session", "r1-arms-live-test", "r1-arms-running-live-test",
+    "r1-locomotion-live-test", "r1-teleop-live", "r1-robot-prepare",
+}
+for raw_pid in Path(sys.argv[1]).read_text(encoding="ascii").split():
+    try:
+        pid = int(raw_pid)
+        argv = [
+            part.decode("utf-8", "replace")
+            for part in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+            if part
+        ]
+    except (OSError, ValueError):
+        continue
+    if not argv or pid == os.getpid():
+        continue
+    names = {Path(item).name for item in argv}
+    if (names & {"make", "gmake"}) and (set(argv) & live_targets):
+        raise SystemExit(0)
+    if names & live_scripts:
+        raise SystemExit(0)
+    if (
+        "r1_teleop_live.launch.py" in names
+        and "transport:=sdk" in argv
+        and "send_commands:=true" in argv
+    ):
+        raise SystemExit(0)
+raise SystemExit(3)
+' "${service_cgroup_procs}"
+  live_owner_code=$?
+fi
+
+if ((status_code == 0 && active_code == 3 && live_owner_code == 3)); then
+  echo "[OK] no active exhibition manager; panel service may stop."
+  exit 0
+fi
+
+if ((status_code != 0)); then
+  echo "[WARN] exhibition status failed; requesting fail-safe STOP." >&2
+  printf '%s\n' "${status_output}" >&2
+elif ((active_code != 0)); then
+  echo "[WARN] exhibition status was ambiguous; requesting fail-safe STOP." >&2
+  printf '%s\n' "${status_output}" >&2
+else
+  echo "[INFO] active exhibition manager found; waiting for reviewed STOP cleanup."
+fi
+if ((live_owner_code == 0 && active_code != 0)); then
+  echo "[INFO] advanced live process owner found; requesting reviewed STOP cleanup."
+elif ((live_owner_code == 2)); then
+  echo "[WARN] panel service cgroup could not be audited; requesting fail-safe STOP." >&2
+fi
+
+"${EXHIBITION_COMMAND}" stop

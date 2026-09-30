@@ -1,88 +1,206 @@
-# Unitree R1 workspace
+# Unitree R1 — автономное телеуправление через Pico 4 Ultra
 
-This directory is the canonical home for the Unitree R1 teleoperation,
-simulation, VR, SDK, hardware-reference, and Robot POV files on this laptop.
+Рабочий проект управления физическим Unitree R1: очки и контроллеры подключаются
+к ноутбуку по **USB-C**, ноутбук к роботу — по **Ethernet**. Интернет, роутер и
+Wi-Fi для этого режима не нужны. Видео камеры робота возвращается в очки по тем
+же проводам; scrcpy отдельно показывает экран очков на ноутбуке.
 
-## Layout
+**Срез: 30 сентября 2026.** Здесь собраны исходники, настройки, рабочие APK,
+инструменты, история изменений и доступные материалы ноутбука. **Файловая система
+PC2 пока не скопирована: робот выключен.** Это не полный образ двух компьютеров.
+Точный охват — [TRANSFER_STATUS.md](TRANSFER_STATUS.md).
+
+**Для нового чата Codex:** сначала [CODEX_HANDOFF.md](CODEX_HANDOFF.md), затем
+этот README. Инструкции для работы в репозитории — [AGENTS.md](AGENTS.md).
+Не выполнять физические команды только потому, что они встречаются в документации.
+
+## Что уже работает и что ещё не закончено
+
+- USB-позы головы и обоих контроллеров: около 45 Гц в проведённых испытаниях.
+- Реальная камера R1 через ноутбук в Pico: около 14–15 кадров/с.
+- Физические режимы RUN, LOCK и «СТОЙКА» проверены; оператор также подтвердил
+  успешное управление руками и ходьбу.
+- Отдельно проверены RUN ↔ LOCK при выключенном Wi-Fi обоих устройств и
+  отсутствии default route: примерно 2,32 с и 3,59 с соответственно.
+- Восстановление relay проверено в LOCK; оно сохраняет паузу и не разрешает
+  движение автоматически.
+- Холодный запуск и смена управляющего графа существенно медленнее:
+  зафиксированы примерно 25 с для стойки с кэшем, 43–49 с для отдельных полных
+  переходов и 79 с для холодной стойки. Эти условия нельзя смешивать.
+- Автоматическая инвалидация SDK-кэша добавлена. В последней сессии оставалась
+  проблема получения attestation фоновым worker панели; ручной preflight проходил.
+  Причина пока не доказана, это открытая задача, а не «всё исправлено».
+
+Источники и ограничения проверок: [USB-инструкция](R1_Teleoperation/docs/usb_mode_ru.md)
+и сохранённые [отчёты испытаний](Docs/Test_Reports/).
+Нет гарантии «любые кнопки всегда сработают»: аппаратные ошибки, потеря
+телеметрии и защитные блокировки должны останавливать опасное действие.
+
+## Схема подключения
 
 ```text
-Unitree_Project/
-├── R1_Teleoperation/       active ROS 2, Gazebo, IK, teleop and Robot POV repo
-├── Unity_Projects/
-│   └── Unitree_VR_Controller/  Pico/OpenXR controller and native POV app
-├── ROS2_WS/                vendor Unitree ROS 2 workspace and SDK checkout
-├── SDK/
-│   └── Pico/               extracted Pico SDK and its original archive
-├── Hardware/
-│   └── Photos/             robot, connector and BrainCo hand reference photos
-├── Media/
-│   └── Robot_POV_Tests/    headset recordings and Robot POV test evidence
-├── Tools/
-│   ├── Desktop_Shortcuts/  canonical copies of the R1 desktop launchers
-│   └── Installers/         project-related offline installers
-├── Backups/                small source/config snapshots before risky changes
-├── Docs/                   imported notes and cross-project documentation
-├── Configs/                shared DDS and saved body-calibration data
-├── ROS2_Scripts/           early ROS 2 utilities retained for reference
-├── VR_Files/               existing Pico APK artifacts and their index
-└── Legacy_Robotics/        older simulation/description workspaces
+Pico 4 Ultra + два контроллера
+        │ USB-C ↔ USB-C: ADB, позы, кнопки, видео
+        ▼
+Ноутбук Ubuntu 22.04 / ROS 2 Humble / панель оператора
+        │ Ethernet: Unitree SDK/DDS, телеметрия и камера
+        ▼
+Unitree R1
 ```
 
-## Canonical paths
+Управление передаёт численные позы и кнопки — не анализирует зеркало экрана.
 
-- Active project: `/home/unitree/Unitree_Project/R1_Teleoperation`
-- Unity project: `/home/unitree/Unitree_Project/Unity_Projects/Unitree_VR_Controller`
-- Pico SDK: `/home/unitree/Unitree_Project/SDK/Pico/Pico_SDK`
-- Unitree ROS workspace: `/home/unitree/Unitree_Project/ROS2_WS/unitree_ws`
-- Legacy Gazebo workspace:
-  `/home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws`
-
-The old active-project and Pico SDK locations are compatibility symlinks. New
-scripts and documentation must use the canonical paths above.
-
-## Where new files belong
-
-| File type | Destination |
+| Назначение | Настройка этой установки |
 | --- | --- |
-| Active ROS, Gazebo, IK, teleop or Robot POV code | `R1_Teleoperation/` |
-| Unity/Pico source project | `Unity_Projects/Unitree_VR_Controller/` |
-| Vendor SDK or ROS workspace | `SDK/` or `ROS2_WS/` |
-| Robot and hand photographs | `Hardware/Photos/<date>/` |
-| Headset recordings and POV test video | `Media/Robot_POV_Tests/` |
-| APK build kept for installation | `VR_Files/` |
-| Offline installer | `Tools/Installers/<tool>/` |
-| Desktop launcher | `Tools/Desktop_Shortcuts/` |
-| Imported note or command cheat sheet | `Docs/Imported_Notes/` |
-| Headset/body calibration | `Configs/Calibration/` |
-| Pre-change snapshot | `Backups/<component>/` |
+| Ноутбук → робот | 192.168.123.162, enxb4b024be59fe |
+| Управляющий компьютер / камера R1 | 192.168.123.161 |
+| PC2, SSH / дополнительные сервисы | 192.168.123.164 |
+| Физический ROS-граф | domain 88; локальный ROS/Fast DDS и отдельный SDK-транспорт |
+| Диагностический USB-граф | domain 91, dry-run |
+| USB-позы | TCP 19092 → локальный UDP 9090 |
+| Видео RUN | Pico 8080 → ноутбук 8080 |
+| Видео отдельной USB-диагностики | Pico 8080 → ноутбук 18080 |
 
-The GNOME screenshot library remains in
-`/home/unitree/Изображения/Снимки экрана` by user request and is not part of
-this consolidation. Desktop entries that point into this project are symlinks;
-their real files live under `Unitree_Project`.
+Адрес PC2 не заменяет адрес управления. Отсутствие SSH на .161 не доказывает
+неисправность управления. Имя Ethernet-интерфейса на другом ноутбуке изменится.
 
-## Start here
+### Что нужно из оборудования
+
+Pico 4 Ultra с двумя контроллерами, ноутбук с Linux, USB-C **кабель передачи
+данных**, Ethernet-кабель и при необходимости USB–Ethernet-адаптер. Желательны
+USB 3.x и разгрузка кабеля у очков. Маркировка мощности зарядки кабеля сама по
+себе не подтверждает передачу данных. Видеозахват и интернет для USB-режима не нужны.
+Исторический [список покупок](Docs/Imported_Notes/robot-shopping-2026-09-29.txt)
+не является обязательным списком для запуска.
+
+## Быстрый старт на уже настроенном ноутбуке
+
+1. Подключить Ethernet и USB, включить робота, очки и оба контроллера.
+   Разрешить USB debugging для доверенного ноутбука в очках, если потребуется.
+2. Робот не на зарядке; зона головы, рук и ног свободна; кабели не натянуты;
+   управление с телефона выключено; оператор готов к аварийной остановке.
+3. Открыть существующую «Unitree R1 Панель оператора».
+   Если она не запущена: из R1_Teleoperation выполнить `make operator-panel`.
+   Не открывать второй управляющий экземпляр поверх первого.
+4. Проверить профиль «USB-C — без Wi-Fi». Отдельная USB-диагностика и RUN
+   одновременно запрещены: они конкурируют за ADB-туннели.
+5. Сначала «СТОЙКА», дождаться подтверждения FSM 4 и устойчивой стойки.
+   Затем надеть очки, оставить стики по центру, руки спокойно и нажать RUN.
+   RUN также имеет собственную подготовку StandUp; порядок выше удобен для
+   поэтапной приёмки, а не для обхода его проверок.
+6. Для ходьбы использовать левый боковой grip и стики согласно
+   [операторской инструкции](R1_Teleoperation/docs/exhibition_quick_start_ru.md).
+   Не путать grip с курком под указательным пальцем.
+7. LOCK — подтверждаемая пауза и удержание; повторный RUN — явное возобновление.
+
+**Важно:** сохранённый профиль `config/operator_panel.json` содержит
+`dry_run=false`, `allow_live=true`. Клон не следует считать безопасным
+симулятором по умолчанию. Разрешающие флаги не заменяют проверки и согласие оператора.
+
+Текущий slow-safe: продольная скорость до 0,20 м/с, боковая до 0,12 м/с,
+поворот до 0,35 рад/с; масштаб ног 1,0. Остальные профили могут отличаться.
+Не увеличивать ограничения для устранения блокировок.
+
+### Значение режимов
+
+| Кнопка | Смысл и ограничение |
+| --- | --- |
+| СТОЙКА | Настоящий статический режим FSM 4 с подтверждением телеметрией |
+| RUN | Активное управление после preflight, калибровки и подготовки |
+| LOCK | Пауза управления с удержанием, не выключение двигателей |
+| STOP | Штатная безопасная остановка и очистка владельца/графа |
+| KILL | Защитная блокировка; не снимать автоматически после сбоя |
+| Zero Torque | Снятие момента: возможна потеря опоры; только при подходящих физических условиях |
+
+При контакте со столом, раскачивании или KILL сначала устранить причину и
+осмотреть робота. Повторный RUN только после явной проверки условий.
+USB-reconnect, перезапуск видео, старый state.json или надпись READY не являются
+разрешением двигаться. Не отключать защитные envelope, watchdog и проверки
+единственного command writer. Старый физический head-recenter остаётся запрещён;
+штатную проверенную подготовку головы нельзя подменять командой сустава q=0.
+
+## Получение и восстановление проекта
+
+```bash
+git lfs install
+git clone https://github.com/IVVA-robo/Unitree_Project.git
+cd Unitree_Project
+git lfs pull
+cd Artifacts/laptop-2026-09-30
+sha256sum -c SHA256SUMS
+```
+
+Артефакты занимают несколько гигабайт. GitHub «Download ZIP» не заменяет
+проверенный clone + LFS. Подробный порядок, выборочная загрузка, восстановление
+кэшей и старых снимков — [Docs/RESTORE.md](Docs/RESTORE.md).
+
+Основная среда: Ubuntu 22.04, ROS 2 Humble / Python 3.10, CMake/colcon,
+PyQt5, ADB; для APK — Unity 2022.3.44f1 и Pico SDK 3.4.0.
+Проверяйте версию в Unity ProjectSettings и Packages при восстановлении.
+
+Проект и установленные launchers используют абсолютный путь
+`/home/unitree/Unitree_Project`. Сохраните его либо осознанно обновите настройки,
+desktop/systemd-файлы и локальную ссылку Pico SDK в Unity Packages/manifest.json.
+Наличие исходников не означает, что зависимости ОС уже установлены.
+
+Сборка ROS, **не физический запуск**:
 
 ```bash
 cd /home/unitree/Unitree_Project/R1_Teleoperation
-make robot-pov
+source /opt/ros/humble/setup.bash
+make r1-teleoperation-build
 ```
 
-See `R1_Teleoperation/docs/robot_pov.md` for the offline viewer and
-`R1_Teleoperation/docs/architecture.md` for the control architecture.
+## Карта файлов
 
-## Safety boundary
+| Каталог | Содержимое |
+| --- | --- |
+| R1_Teleoperation | Активные ROS-пакеты, панель, USB, safety, скрипты и тесты |
+| Unity_Projects/Unitree_VR_Controller | Исходники Pico/OpenXR и видеосцена |
+| ROS2_WS, SDK | Vendor ROS/Unitree/Pico зависимости |
+| Configs, Deployment/Laptop | DDS, калибровки, снимки установленных служб и ярлыков |
+| Deployment/Robot | Статус незавершённого копирования PC2 |
+| Artifacts/laptop-2026-09-30 | APK, проверенные архивы исходников, офлайн-материалы, логи и контрольные суммы |
+| Backups | Описания исторических снимков и небольшие исходные резервные копии |
+| Tools | Установщики, scrcpy/NoMachine, безопасные инструменты экспорта |
+| Docs | Передача контекста, восстановление, отчёты и исторические README |
+| Hardware, Media, VR_Files | Справочные фото, видео испытаний, прежние APK |
+| Legacy_Robotics, ROS2_Scripts | Предыдущие симуляции и эксперименты; не основной live-контур |
 
-Robot POV is video-only by default. The physical R1 adapter is not enabled by
-any Robot POV command. Keep real hardware disconnected from command topics
-until the hardware interface, E-stop procedure, and explicit hardware launch
-have been reviewed.
+## Диагностика без команд движения
 
-`R1_Teleoperation/ros2_ws/src/r1_sdk_transport` is the current C++ SDK
-read-only boundary. It may read `rt/lf/lowstate` for diagnostics, but it has no
-arm or locomotion writer; commissioning interlock and writer flags are
-fail-closed.
+```bash
+adb devices -l
+ping -c 2 192.168.123.161
+cd /home/unitree/Unitree_Project/R1_Teleoperation
+./scripts/r1-exhibition status
+```
 
-Run `R1_Teleoperation/scripts/r1-sdk-preflight` for the bounded physical-link,
-fresh-26-joint, and safety-parameter checks. It can start the read-only reader
-temporarily, but never sends actuator or locomotion commands.
+SDK preflight запускается отдельно только после проверки отсутствия активного
+writer и конкурирующего worker; он может создавать временный read-only reader.
+Не запускайте общий commissioning-check или диагностический граф поверх живого RUN.
+
+- Нет USB: проверить кабель данных, ADB-авторизацию, активность приложения
+  и что очки не уснули. Возврат пакетов не снимает паузу.
+- Только торс, нет ходьбы: проверить grip, нейтраль/явное возобновление,
+  статус locomotion и safety; не обходить deadman.
+- «Стойка» медленная: смотреть этапы cleanup, SDK warmup, discovery, prepare.
+  Не считать запуск процесса подтверждением FSM 4.
+- Сетевой адаптер показывает half-duplex: сохранённое исключение относится
+  только к проверенному адаптеру cdc_ether. Ошибки интерфейса и свежая
+  телеметрия всё равно обязательны.
+- Не работает PC2: отдельно проверить питание и SSH .164. Не переустанавливать
+  системы робота по отсутствию ping/SSH без диагностики.
+
+## Документация и лицензии
+
+- [Передача новому чату](CODEX_HANDOFF.md)
+- [USB и протокол проведённых проверок](R1_Teleoperation/docs/usb_mode_ru.md)
+- [Панель оператора](R1_Teleoperation/docs/operator_panel.md)
+- [Robot POV](R1_Teleoperation/docs/unity_robot_pov.md)
+- [Архитектура](R1_Teleoperation/docs/architecture.md)
+- [Восстановление](Docs/RESTORE.md), [охват переноса](TRANSFER_STATUS.md)
+- [Сторонние компоненты](Docs/THIRD_PARTY.md)
+
+Лицензии сторонних компонентов сохраняются; этот README не предоставляет
+дополнительных прав на SDK, модели, Unity, Pico или NoMachine.

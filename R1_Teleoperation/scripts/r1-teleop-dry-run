@@ -36,6 +36,7 @@ set -u
 DOMAIN_ID="${R1_DRY_RUN_DOMAIN_ID:-89}"
 UDP_BIND_ADDRESS="${R1_DRY_RUN_UDP_BIND_ADDRESS:-0.0.0.0}"
 UDP_PORT="${R1_DRY_RUN_UDP_PORT:-9090}"
+DISCOVERY_PORT="${R1_DRY_RUN_DISCOVERY_PORT:-9091}"
 VR_ALLOWED_SOURCE_IP="${R1_DRY_RUN_VR_ALLOWED_SOURCE_IP:-}"
 START_BRIDGE="${R1_DRY_RUN_START_BRIDGE:-true}"
 START_HEAD="${R1_DRY_RUN_START_HEAD:-true}"
@@ -54,6 +55,11 @@ done
 [[ "${UDP_PORT}" =~ ^[0-9]+$ ]] \
   && (( 10#${UDP_PORT} >= 1 && 10#${UDP_PORT} <= 65535 )) || \
   die 'R1_DRY_RUN_UDP_PORT must be an integer from 1 to 65535'
+[[ "${DISCOVERY_PORT}" =~ ^[0-9]+$ ]] \
+  && (( 10#${DISCOVERY_PORT} >= 1024 && 10#${DISCOVERY_PORT} <= 65535 )) || \
+  die 'R1_DRY_RUN_DISCOVERY_PORT must be an integer from 1024 to 65535'
+[[ "${DISCOVERY_PORT}" != "${UDP_PORT}" ]] \
+  || die 'R1_DRY_RUN_DISCOVERY_PORT must differ from R1_DRY_RUN_UDP_PORT'
 case "${LOCOMOTION_MODE}" in
   slow-safe|normal|exhibition) ;;
   *) die 'R1_DRY_RUN_LOCOMOTION_MODE must be slow-safe, normal, or exhibition' ;;
@@ -62,6 +68,10 @@ esac
 if [[ "${START_BRIDGE}" == true ]] && command -v ss >/dev/null 2>&1 \
   && ss -H -lunp 2>/dev/null | grep -Eq "([.:]|\\])${UDP_PORT}[[:space:]]"; then
   die "UDP port ${UDP_PORT} is already in use; stop the old bridge or set R1_DRY_RUN_UDP_PORT"
+fi
+if [[ "${START_BRIDGE}" == true ]] && command -v ss >/dev/null 2>&1 \
+  && ss -H -lunp 2>/dev/null | grep -Eq "([.:]|\\])${DISCOVERY_PORT}[[:space:]]"; then
+  die "UDP discovery port ${DISCOVERY_PORT} is already in use; set R1_DRY_RUN_DISCOVERY_PORT"
 fi
 
 # Do not inherit a user's stale actuation acknowledgement into a diagnostics
@@ -75,7 +85,7 @@ export ROBOT_CONFIRM_CLEAR_AREA=0
 export ROBOT_CONFIRM_ESTOP_READY=0
 
 echo 'R1 full teleop dry-run: debug topics only; no Unitree SDK writer is started.'
-echo "  domain=${ROS_DOMAIN_ID} UDP=${UDP_BIND_ADDRESS}:${UDP_PORT} mode=${LOCOMOTION_MODE}"
+echo "  domain=${ROS_DOMAIN_ID} UDP=${UDP_BIND_ADDRESS}:${UDP_PORT} discovery=${DISCOVERY_PORT} mode=${LOCOMOTION_MODE}"
 echo "  allowed VR source=${VR_ALLOWED_SOURCE_IP:-first valid sender (dry-run only)}"
 echo "  read-only arm pipeline=${START_ARM_PIPELINE} (default false)"
 
@@ -83,6 +93,7 @@ launch_arguments=(
   "ros_domain_id:=${ROS_DOMAIN_ID}"
   "udp_bind_address:=${UDP_BIND_ADDRESS}"
   "udp_port:=$((10#${UDP_PORT}))"
+  "discovery_port:=$((10#${DISCOVERY_PORT}))"
   "start_bridge:=${START_BRIDGE}"
   "start_head:=${START_HEAD}"
   "start_locomotion:=${START_LOCOMOTION}"

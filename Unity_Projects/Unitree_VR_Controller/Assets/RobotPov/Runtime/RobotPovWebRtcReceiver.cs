@@ -248,6 +248,12 @@ namespace RobotPov
             }
 
             config.ValidateAndClamp();
+            VRUdpSender.EndpointDiscovered -= HandleVrEndpointDiscovered;
+            VRUdpSender.EndpointDiscovered += HandleVrEndpointDiscovered;
+            if (!string.IsNullOrWhiteSpace(VRUdpSender.LastDiscoveredHost))
+            {
+                HandleVrEndpointDiscovered(VRUdpSender.LastDiscoveredHost);
+            }
             generation++;
             int activeGeneration = generation;
             useMjpegFallback = Application.platform == RuntimePlatform.Android;
@@ -281,6 +287,7 @@ namespace RobotPov
 
         private void StopRuntime(string reason)
         {
+            VRUdpSender.EndpointDiscovered -= HandleVrEndpointDiscovered;
             generation++;
             StopAllCoroutines();
             connectionCoroutine = null;
@@ -291,6 +298,37 @@ namespace RobotPov
             DisposePeer();
             ClearTexture();
             SetState(RobotPovConnectionState.Stopped, reason);
+        }
+
+        private void HandleVrEndpointDiscovered(string discoveredHost)
+        {
+            if (string.IsNullOrWhiteSpace(discoveredHost) || config == null)
+            {
+                return;
+            }
+
+            string currentHost;
+            try
+            {
+                currentHost = new Uri(config.BaseUrl).Host;
+            }
+            catch (UriFormatException)
+            {
+                currentHost = string.Empty;
+            }
+
+            if (string.Equals(currentHost, discoveredHost, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            string endpoint = "http://" + discoveredHost.Trim() + ":8080";
+            Debug.Log("[Robot POV] Video endpoint discovered at " + endpoint);
+            config.SetEndpoint(endpoint, config.Profile);
+            if (isActiveAndEnabled && connectionCoroutine != null)
+            {
+                RestartNow();
+            }
         }
 
         private void Update()

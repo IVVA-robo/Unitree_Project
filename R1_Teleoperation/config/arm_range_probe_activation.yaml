@@ -1,0 +1,9 @@
+# Only for the currently checked writer session; do not use after a fresh takeover.
+r1_kinematics_control:
+  ros__parameters:
+    arm_range_probe_file: /home/unitree/Unitree_Project/R1_Teleoperation/config/operator_arm_range.bounded-session.json
+    arm_range_probe_fraction: 0.000001
+    max_joint_velocity_rad_s: 0.20
+r1_live_writer:
+  ros__parameters:
+    max_arm_joint_rate_rad_s: 0.75

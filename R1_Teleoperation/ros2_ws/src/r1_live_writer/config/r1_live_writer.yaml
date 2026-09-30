@@ -5,11 +5,40 @@ r1_live_writer:
     # then the process environment, commissioning token, kill, deadman,
     # feedback, command freshness, and prepare state are checked on every send.
     transport: "mock"
+    # Opt-in protocol comparison with Unitree's August 2026 R1 A5 frames.
+    # Physical simultaneous walking is not yet validated on ai_sport 1.0.2.154.
+    arm_sdk_frame_profile: "legacy"
+    # Enabled by the full exhibition wrapper, never by generic dry-run launch.
+    sequential_control: false
     send_commands: false
     enable_head: false
     enable_arms: false
     enable_locomotion: false
+    # The reviewed physical legs stage overrides this with
+    # "wireless_controller" to reproduce Unitree Explore's virtual joystick
+    # channel. The legacy LocoClient RPC remains available only for its
+    # isolated diagnostic path.
+    locomotion_command_mode: "loco_rpc"
+    # One-shot, legs-only firmware diagnostic. It is rejected unless the
+    # dedicated wrapper and three physical confirmations are present.
+    velocity_status_127_probe_enabled: false
     enable_prepare: false
+    # Allows the prepare step to enter the official locomotion controller
+    # (FSM 811) independently of joystick velocity output.  The dedicated
+    # arms-running commissioning stage sets this true while keeping
+    # enable_locomotion=false, so no stick command can reach SetVelocity.
+    prepare_enter_locomotion: false
+    # Narrow no-VR StandUp/FSM4 mode. Physical launch requires a separate
+    # environment acknowledgement and rejects every head/arm/velocity feature.
+    static_prepare_mode: false
+    # Optional exhibition policy. It is inert by default and also requires
+    # ROBOT_EXHIBITION_SESSION=1. The panel arms it explicitly; brief VR loss
+    # then holds ArmSdk and sends a bounded zero velocity without clearing the
+    # normal KILL, feedback, motor-health, joint/workspace, or rate limits.
+    exhibition_session_mode: false
+    exhibition_session_armed_on_start: false
+    exhibition_reconnect_grace_sec: 2.0
+    session_armed_topic: "/vr/teleop/session_armed"
     commissioning_confirmed: false
     commissioning_token: ""
     expected_vr_source_ip: ""
@@ -35,8 +64,19 @@ r1_live_writer:
     command_timeout_sec: 0.25
     deadman_timeout_sec: 1.50
     kill_timeout_sec: 0.50
-    publish_rate_hz: 50.0
-    command_duration_sec: 0.12
+    # Unitree's R1 ArmSdk routine requires one new rt/arm_sdk frame each
+    # 10 ms.  This is also used for safe arm hold/release frames.
+    publish_rate_hz: 100.0
+    # The R1 firmware accepts the official one-second SetVelocity lease used
+    # by Unitree's SDK example. The writer refreshes it while input is fresh;
+    # stale input immediately produces an explicit zero command.
+    command_duration_sec: 1.0
+    # Locomotion is an RPC with a one-second command lifetime.  The 100 Hz
+    # writer loop remains available to ArmSdk, while velocity RPC refresh is
+    # bounded independently.
+    locomotion_rpc_rate_hz: 10.0
+    # Captured Unitree Explore virtual-stick traffic is approximately 20 Hz.
+    wireless_controller_rate_hz: 20.0
 
     # Immutable C++ ceilings reject anything larger than this first-live set.
     max_forward_mps: 0.20
@@ -55,7 +95,20 @@ r1_live_writer:
     # Arm IK already enforces URDF joint/workspace limits.  The writer adds a
     # second immutable first-live slew bound before the ArmSdk boundary.
     max_arm_joint_delta_rad: 0.25
-    max_arm_joint_rate_rad_s: 1.00
+    max_arm_joint_rate_rad_s: 0.50
+    # If the physical robot receives a meaningful arm target but fresh
+    # LowState feedback does not move in that direction, release ArmSdk and
+    # latch kill instead of leaving a silently ignored command stream active.
+    arm_feedback_follow_command_delta_rad: 0.08
+    # This guard proves that ArmSdk authority reached the robot; it is not a
+    # servo accuracy test.  Require three fresh samples beyond 1.5 mrad so the
+    # commissioned shoulder's slow initial take-up is accepted without letting
+    # a single encoder-noise sample satisfy the guard.
+    # Track new accumulated commands independently per joint. A confirmed,
+    # unchanged goal may be held with static PD error without another timeout.
+    # Three fresh samples already at the observed goal also prove response.
+    arm_feedback_follow_min_progress_rad: 0.0015
+    arm_feedback_follow_timeout_sec: 1.50
 
     # Physical SDK head mode is refused unless the staged launcher explicitly
     # confirms that the immutable manufacturer envelope was reviewed.
@@ -84,10 +137,11 @@ r1_live_writer:
     head_recenter_follow_timeout_sec: 1.0
     head_recenter_timeout_sec: 35.0
 
-    # Probe sequence: 0-weight discovery, ~1 s seed-hold weight ramp, a
-    # yaw-only 0.005 rad excursion at 0.005 rad/s, verified fresh feedback,
-    # return to the exact seed, then release and latch kill. All 12 non-probed
-    # fields remain the captured fresh seed and are watched for motion.
+    # Probe sequence: 0-weight discovery, ~1 s measured-pose ownership ramp,
+    # a yaw-only 0.005 rad excursion at 0.005 rad/s, verified fresh feedback,
+    # return to the exact seed, then release and latch kill. During the ramp
+    # the arms/waist follow bounded FSM 811 balance settling; at full weight
+    # their settled pose is captured and the tight non-yaw guard is restored.
     head_probe_zero_weight_hold_sec: 0.35
     head_probe_weight_ramp_sec: 1.0
     head_probe_step_rad: 0.005
@@ -102,9 +156,11 @@ r1_live_writer:
     # before the transport can cross even the passive zero-weight boundary.
     head_probe_seed_stability_rad: 0.003
     head_probe_seed_samples: 10
-    # Exact-seed claim/ramp and all 12 non-probed fields use the same tight
-    # 0.003 rad ceiling. A false abort is preferable to an ownership jump.
+    # Zero-weight discovery and the actual yaw probe keep the tight 0.003 rad
+    # non-yaw ceiling. The ownership blend alone permits at most 0.020 rad of
+    # measured arm/waist settling; head pitch never uses this wider envelope.
     head_probe_other_joint_tolerance_rad: 0.003
+    head_probe_ramp_other_joint_tolerance_rad: 0.020
     head_probe_claim_tolerance_rad: 0.003
     head_probe_direction_tolerance_rad: 0.0005
     head_probe_return_tolerance_rad: 0.0015

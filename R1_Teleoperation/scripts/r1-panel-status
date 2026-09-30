@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+set -u
+
+# Read-only, line-oriented health snapshot for the operator panel.  It never
+# starts ROS nodes, DDS writers, Unitree SDK clients, or robot commands.
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+INTERFACE="${R1_ROBOT_INTERFACE:-enxb4b024be59fe}"
+CONTROL_IP="${R1_CONTROL_IP:-192.168.123.161}"
+PC2_IP="${R1_PC2_IP:-${R1_ROBOT_IP:-192.168.123.164}}"
+DOMAIN="${ROS_DOMAIN_ID:-${R1_LIVE_ROS_DOMAIN_ID:-88}}"
+OFFLINE_DOMAIN="${R1_OFFLINE_ROS_DOMAIN_ID:-81}"
+
+# shellcheck source=scripts/r1-network-autodetect
+source "${PROJECT_DIR}/scripts/r1-network-autodetect"
+ROBOT_IP="$(r1_resolve_control_ip "${INTERFACE}" "${CONTROL_IP}" "${PC2_IP}" || true)"
+
+# A desktop/systemd-launched panel does not inherit the interactive ROS
+# shell.  Source only the local ROS overlay and the matched Fast DDS policy;
+# this script still creates no Unitree SDK client or command publisher.
+if [[ -f /opt/ros/humble/setup.bash ]]; then
+  set +u
+  # shellcheck disable=SC1091
+  source /opt/ros/humble/setup.bash
+  if [[ -f "${PROJECT_DIR}/ros2_ws/install/setup.bash" ]]; then
+    # shellcheck disable=SC1091
+    source "${PROJECT_DIR}/ros2_ws/install/setup.bash"
+  fi
+  # shellcheck source=r1-physical-ros-env
+  source "${PROJECT_DIR}/scripts/r1-physical-ros-env"
+  set -u
+fi
+export ROS_DOMAIN_ID="${DOMAIN}"
+export ROS_LOCALHOST_ONLY=1
+
+emit() { printf 'STATUS %s=%s\n' "$1" "$2"; }
+
+# The exhibition manager is intentionally independent from ROS.  Reading its
+# small state file lets the panel show the real foreground mode even when the
+# VR bridge is absent (the normal case for static mode).
+runtime_root="${R1_EXHIBITION_RUNTIME_DIR:-}"
+if [[ -z "${runtime_root}" ]]; then
+  if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+    runtime_root="${XDG_RUNTIME_DIR}/r1-exhibition"
+  else
+    runtime_root="/tmp/r1-exhibition-$(id -u)"
+  fi
+fi
+state_file="${runtime_root}/state.json"
+manager_value=stopped
+mode_value=stopped
+kill_latched=false
+if [[ -r "${state_file}" ]]; then
+  state_fields="$(python3 - "${state_file}" <<'PY' 2>/dev/null || true
+import json
+import os
+import sys
+
+try:
+    with open(sys.argv[1], encoding='utf-8') as stream:
+        state = json.load(stream)
+    pid = int(state.get('pid', 0))
+    command_line = b''
+    if pid > 1:
+        try:
+            with open(f'/proc/{pid}/cmdline', 'rb') as stream:
+                command_line = stream.read()
+        except OSError:
+            pass
+    active = any(
+        marker in command_line
+        for marker in (b'r1-exhibition', b'exhibition.orchestrator')
+    )
+    mode = state.get('mode', 'stopped') if active else 'stopped'
+    status = state.get('status', 'unknown') if active else 'stopped'
+    # A fast LOCK deliberately keeps the control graph warm.  Present its
+    # operator-visible state as static even though the retained manager still
+    # owns the control writer for the next quick RUN.
+    if mode == 'control' and status == 'locked':
+        mode = 'static'
+    if mode not in {'static', 'control', 'stopped'}:
+        mode = 'stopped'
+    print(mode)
+    print(str(status).replace('\n', ' ')[:80])
+except (OSError, ValueError, TypeError, json.JSONDecodeError):
+    pass
+PY
+)"
+  mode_value="$(sed -n '1p' <<<"${state_fields}")"
+  manager_value="$(sed -n '2p' <<<"${state_fields}")"
+  [[ -n "${mode_value}" ]] && emit mode "${mode_value}"
+  [[ -n "${manager_value}" ]] && emit exhibition "${manager_value}"
+else
+  emit mode stopped
+  emit exhibition stopped
+fi
+
+if [[ -r "/sys/class/net/${INTERFACE}/carrier" ]] && [[ "$(cat "/sys/class/net/${INTERFACE}/carrier" 2>/dev/null)" == 1 ]]; then
+  emit ethernet OK
+else
+  emit ethernet WARN
+fi
+
+emit robot_ip "${ROBOT_IP}"
+if command -v ping >/dev/null 2>&1 && ping -I "${INTERFACE}" -c 1 -W 1 "${ROBOT_IP}" >/dev/null 2>&1; then
+  emit robot OK
+else
+  emit robot OFFLINE
+fi
+
+emit pc2_ip "${PC2_IP}"
+if command -v ping >/dev/null 2>&1 && ping -I "${INTERFACE}" -c 1 -W 1 "${PC2_IP}" >/dev/null 2>&1; then
+  emit pc2 OK
+else
+  emit pc2 OFFLINE
+fi
+
+if pgrep -af 'r1_live_writer|r1-arms-live|r1-locomotion-live|r1-teleop-live' \
+    2>/dev/null \
+    | grep -Ev 'pgrep -af|r1-panel-status' >/dev/null 2>&1; then
+  emit writer RUNNING
+else
+  emit writer STOPPED
+fi
+
+if [[ -n "${R1_KILL_LATCH_FILE:-}" && -e "${R1_KILL_LATCH_FILE}" ]]; then
+  emit kill LATCHED
+  kill_latched=true
+else
+  emit kill UNKNOWN
+fi
+
+# ``healthz`` only proves that the HTTP process exists.  The operator-facing
+# "video works" indicator must require a connected source and a fresh frame;
+# Robot POV exposes that stronger contract through ``readyz``.
+video_payload=''
+if command -v curl >/dev/null 2>&1; then
+  video_payload="$(curl -sS --max-time 1 "${R1_TELEOP_STATUS_VIDEO_URL:-http://127.0.0.1:8080/readyz}" 2>/dev/null || true)"
+fi
+if command -v jq >/dev/null 2>&1 \
+  && jq -e '
+    .ready == true
+    or (.source.has_frame == true and .source.stale == false)
+  ' >/dev/null 2>&1 <<<"${video_payload}"; then
+  emit video OK
+else
+  emit video OFFLINE
+fi
+
+if command -v ros2 >/dev/null 2>&1; then
+  list_topics() {
+    ROS_DOMAIN_ID="$1" timeout 2s ros2 topic list --no-daemon --spin-time 0.5 \
+      2>/dev/null || true
+  }
+  topics="$(list_topics "${DOMAIN}")"
+  if ! grep -Fxq '/vr/head/pose' <<<"${topics}" \
+    && [[ "${OFFLINE_DOMAIN}" != "${DOMAIN}" ]]; then
+    offline_topics="$(list_topics "${OFFLINE_DOMAIN}")"
+    if grep -Fxq '/vr/head/pose' <<<"${offline_topics}"; then
+      DOMAIN="${OFFLINE_DOMAIN}"
+      export ROS_DOMAIN_ID="${DOMAIN}"
+      topics="${offline_topics}"
+    fi
+  fi
+  emit ros_domain "${DOMAIN}"
+  # Keep the panel's compact health report useful during commissioning: these
+  # are topic-level, read-only indicators and never create a command publisher.
+  if grep -Fxq '/vr/head/pose' <<<"${topics}"; then
+    emit hmd OK
+  else
+    emit hmd OFFLINE
+  fi
+  if grep -Fxq '/vr/left_controller/pose' <<<"${topics}" \
+    && grep -Fxq '/vr/right_controller/pose' <<<"${topics}"; then
+    emit hands OK
+  else
+    emit hands OFFLINE
+  fi
+  if grep -Fxq '/vr/cmd_vel' <<<"${topics}"; then
+    emit sticks OK
+  else
+    emit sticks OFFLINE
+  fi
+  if grep -Fxq '/vr/teleop/active' <<<"${topics}"; then
+    active="$(timeout 2s ros2 topic echo --once /vr/teleop/active \
+      std_msgs/msg/Bool --no-daemon 2>/dev/null || true)"
+    if grep -Eiq '^data:[[:space:]]*true' <<<"${active}"; then
+      emit deadman PRESSED
+    elif grep -Eiq '^data:[[:space:]]*false' <<<"${active}"; then
+      emit deadman RELEASED
+    else
+      emit deadman UNKNOWN
+    fi
+  else
+    emit vr UNKNOWN
+    emit controllers OFFLINE
+    emit deadman UNKNOWN
+  fi
+
+  if grep -Fxq '/vr/teleop/status' <<<"${topics}"; then
+    vr_status="$(timeout 2s ros2 topic echo --once /vr/teleop/status \
+      std_msgs/msg/String --field data --no-daemon 2>/dev/null || true)"
+    tracking_phase="$(sed -nE 's/.*tracking_phase=([^[:space:]]+).*/\1/p' \
+      <<<"${vr_status}" | tail -n 1)"
+    missing="$(sed -nE 's/.*missing=([^[:space:]]+).*/\1/p' \
+      <<<"${vr_status}" | tail -n 1)"
+    packet_fresh="$(sed -nE 's/.*fresh=([^[:space:]]+).*/\1/p' \
+      <<<"${vr_status}" | tail -n 1)"
+    emergency_stop="$(sed -nE 's/.*emergency_stop=([^[:space:]]+).*/\1/p' \
+      <<<"${vr_status}" | tail -n 1)"
+    last_action="$(sed -nE 's/.*last_action=([^[:space:]]+).*/\1/p' \
+      <<<"${vr_status}" | tail -n 1)"
+    if [[ ${packet_fresh} == true && ${missing:-none} != *head* ]]; then
+      emit vr OK
+    elif [[ ${tracking_phase} == reconnecting || ${tracking_phase} == holding \
+        || ${packet_fresh} == false ]]; then
+      emit vr RECOVERING
+    elif [[ -n ${vr_status} ]]; then
+      emit vr OK
+    else
+      emit vr UNKNOWN
+    fi
+    if [[ ${missing:-none} == none && ${packet_fresh} == true ]]; then
+      emit controllers OK
+    elif [[ ${tracking_phase} == reconnecting || ${tracking_phase} == holding \
+        || ${packet_fresh} == false ]]; then
+      emit controllers RECOVERING
+    else
+      emit controllers OFFLINE
+    fi
+    [[ -n ${tracking_phase} ]] && emit vr_phase "${tracking_phase}"
+    if [[ ${emergency_stop} == true \
+        || ${last_action} == emergency_stop_right_b ]]; then
+      emit emergency RIGHT_B
+    elif [[ ${last_action} == emergency_stop_cleared ]]; then
+      emit emergency CLEAR
+    fi
+  elif grep -Fxq '/vr/teleop/active' <<<"${topics}"; then
+    # Backward-compatible bridge: topic presence still identifies the HMD
+    # path, but it cannot provide per-controller recovery information.
+    emit vr OK
+    emit controllers UNKNOWN
+  fi
+  if grep -Fxq '/r1/safety/kill' <<<"${topics}"; then
+    kill_state="$(timeout 2s ros2 topic echo --once /r1/safety/kill \
+      std_msgs/msg/Bool --no-daemon 2>/dev/null || true)"
+    if grep -Eiq '^data:[[:space:]]*true' <<<"${kill_state}"; then
+      emit kill LATCHED
+      kill_latched=true
+    elif grep -Eiq '^data:[[:space:]]*false' <<<"${kill_state}"; then
+      emit kill CLEAR
+    fi
+  fi
+  if grep -Eq '^/r1/(live_writer/status|sdk/joint_states)' <<<"${topics}"; then
+    emit feedback OK
+  else
+    emit feedback UNKNOWN
+  fi
+  emit sequential_phase unknown
+  if grep -Fxq '/r1/live_writer/status' <<<"${topics}"; then
+    writer_status="$(timeout 2s ros2 topic echo --once /r1/live_writer/status \
+      std_msgs/msg/String --field data --qos-durability transient_local \
+      --no-daemon 2>/dev/null || true)"
+    sequential_phase="$(sed -nE 's/.*sequential_phase=([^[:space:]]+).*/\1/p' \
+      <<<"${writer_status}" | tail -n 1)"
+    [[ -n ${sequential_phase} ]] && emit sequential_phase "${sequential_phase}"
+  fi
+else
+  emit ros_domain "${DOMAIN}"
+  emit hmd UNKNOWN
+  emit hands UNKNOWN
+  emit sticks UNKNOWN
+  emit vr UNKNOWN
+  emit deadman UNKNOWN
+  emit feedback UNKNOWN
+  emit sequential_phase unknown
+fi
+
+# The process manager can remain alive after the writer has deliberately
+# failed closed. Do not keep presenting its older "ready" state as an active
+# control session once the independent KILL topic says that output is blocked.
+if [[ ${mode_value:-stopped} == control \
+    && ${manager_value:-stopped} == ready \
+    && ${kill_latched} == true ]]; then
+  emit exhibition degraded
+fi
+
+emit project "${PROJECT_DIR}"

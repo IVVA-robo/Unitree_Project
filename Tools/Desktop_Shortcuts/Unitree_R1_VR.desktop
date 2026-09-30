@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Terminal=false
+Name=Unitree R1 VR
+Comment=Clean Launch for VR Teleoperation
+Exec=gnome-terminal -- bash -c "source /opt/ros/humble/setup.bash && source /home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/install/setup.bash && ros2 launch unitree_r1_description vr_demo.launch.py; exec bash"
+Icon=utilities-terminal

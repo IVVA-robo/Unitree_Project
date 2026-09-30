@@ -129,6 +129,42 @@ else:
 PY
 }
 
+validate_discovery_port() {
+  local value="$1"
+  [[ "${value}" =~ ^[0-9]+$ ]] \
+    && ((10#${value} >= 1024 && 10#${value} <= 65535)) \
+    || die 'R1_DRY_RUN_SMOKE_DISCOVERY_PORT must be an integer from 1024 to 65535'
+  [[ "${value}" != '9091' ]] \
+    || die 'R1_DRY_RUN_SMOKE_DISCOVERY_PORT must differ from the normal discovery port 9091'
+  [[ "$((10#${value}))" != "${UDP_PORT}" ]] \
+    || die 'R1_DRY_RUN_SMOKE_DISCOVERY_PORT must differ from the command UDP port'
+}
+
+select_discovery_port() {
+  local requested="${R1_DRY_RUN_SMOKE_DISCOVERY_PORT:-}"
+  if [[ -n "${requested}" ]]; then
+    validate_discovery_port "${requested}"
+    printf '%d\n' "$((10#${requested}))"
+    return
+  fi
+
+  python3 - "${UDP_PORT}" <<'PY'
+import socket
+import sys
+
+command_port = int(sys.argv[1])
+for _ in range(16):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.bind(('127.0.0.1', 0))
+        port = sock.getsockname()[1]
+    if port not in {9091, command_port}:
+        print(port)
+        break
+else:
+    raise SystemExit('failed to select an alternate discovery port')
+PY
+}
+
 wait_for_unified_launch() {
   local prefix attempt
   for attempt in $(seq 1 10); do
@@ -186,6 +222,23 @@ wait_for_service() {
   die "timed out waiting for service ${expected}"
 }
 
+wait_for_topic() {
+  local expected="$1" deadline=$((SECONDS + 25)) topics
+  while (( SECONDS < deadline )); do
+    if ! launch_is_alive; then
+      show_launch_log
+      die "unified launch exited while waiting for topic ${expected}"
+    fi
+    topics="$(ros2 topic list --no-daemon --spin-time 0.35 2>/dev/null || true)"
+    if grep -Fqx "${expected}" <<<"${topics}"; then
+      return
+    fi
+    sleep 0.20
+  done
+  show_launch_log
+  die "timed out waiting for topic ${expected}"
+}
+
 response_reports_success() {
   grep -Eq \
     'success[[:space:]]*=[[:space:]]*True|success:[[:space:]]*true' \
@@ -239,10 +292,12 @@ PY
 
 assert_preflight_observes_active_debug_controllers() {
   local output required
+  # Cold Fast-DDS discovery can take longer for the second debug node. Keep
+  # this bounded but give both volatile status publishers two full seconds.
   if ! output="$(timeout 10s ros2 run r1_teleop_safety r1_teleop_preflight \
     --interface lo \
     --robot-ip 127.0.0.1 \
-    --observe-seconds 1.0 \
+    --observe-seconds 2.0 \
     --require-vr \
     --require-kill-clear \
     --require-debug-controllers 2>&1)"; then
@@ -404,12 +459,13 @@ wait_for_unified_launch
 ROS_DOMAIN_ID="$(select_isolated_domain)"
 export ROS_DOMAIN_ID
 UDP_PORT="$(select_udp_port)"
+DISCOVERY_PORT="$(select_discovery_port)"
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/r1-teleop-dry-run-smoke.XXXXXX")"
 LAUNCH_LOG="${RUN_DIR}/launch.log"
 UDP_SEQUENCE=1000
 
 echo 'R1 teleoperation smoke test: local debug outputs only; no robot transport is started.'
-echo "  ROS_DOMAIN_ID=${ROS_DOMAIN_ID} UDP=127.0.0.1:${UDP_PORT}"
+echo "  ROS_DOMAIN_ID=${ROS_DOMAIN_ID} UDP=127.0.0.1:${UDP_PORT} discovery=${DISCOVERY_PORT}"
 
 # New session/process group: cleanup can only signal this launch and children
 # which it itself starts.  arm pipeline remains explicitly disabled.
@@ -417,6 +473,7 @@ setsid ros2 launch r1_teleoperation_app r1_teleop_dry_run.launch.py \
   ros_domain_id:="${ROS_DOMAIN_ID}" \
   udp_bind_address:=127.0.0.1 \
   udp_port:="${UDP_PORT}" \
+  discovery_port:="${DISCOVERY_PORT}" \
   start_arm_pipeline:=false \
   >"${LAUNCH_LOG}" 2>&1 &
 LAUNCH_PID=$!
@@ -427,6 +484,8 @@ wait_for_node /r1_head_dry_run
 wait_for_node /r1_locomotion_dry_run
 wait_for_service /r1/safety/set_kill
 wait_for_service /r1/head/calibrate_neutral
+wait_for_topic /r1_hardware_adapter/debug/head/command_euler
+wait_for_topic /r1/locomotion_dry_run/debug/cmd_vel
 assert_no_robot_command_topics
 
 # Startup is fail-closed before any mock packet or interlock release.

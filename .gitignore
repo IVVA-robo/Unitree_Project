@@ -1,20 +1,43 @@
+# Generated runtime/build trees; authoritative sources are tracked.
+log/
 logs/
 *.log
 build/
 install/
-logs/
-*.log
-build/
-install/
+__pycache__/
+*.pyc
+.pytest_cache/
+.cache/
 Unity_Projects/**/Library/
 Unity_Projects/**/Builds/
 Unity_Projects/**/Temp/
 Unity_Projects/**/Logs/
 Unity_Projects/**/UserSettings/
-SDK/Pico/Archives/
-Tools/
-SDK/Pico/Archives/
-Tools/
-
-# Generated Pico APK backups (the source projects and release APKs are tracked elsewhere)
+# Reviewed, deduplicated copies are under Artifacts/.
+Backups/**/*.tar
 Backups/Pico_2026-09-22/*.apk
+Backups/pre-usb-20260929-qDx6LT/*.apk
+R1_Teleoperation/backups/
+Tools/NoMachine/*/home/
+Tools/NoMachine/*/stage/
+Tools/NoMachine/*/runtime/
+# New proprietary redistributions require a separate license review.
+SDK/Pico/Archives/
+Tools/Installers/NoMachine/
+Tools/NoMachine/*/downloads/
+# Machine-local credentials and incomplete downloads must remain private.
+.env
+*.local.env
+*.venue.env
+.ssh/
+.gnupg/
+.nx/
+.git-credentials
+*.pem
+*.key
+*.p12
+*.keystore
+*.jks
+*.partial
+*~
+.~lock.*

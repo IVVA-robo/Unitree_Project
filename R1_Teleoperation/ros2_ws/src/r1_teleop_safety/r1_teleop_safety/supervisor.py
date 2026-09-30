@@ -21,7 +21,10 @@ class R1SafetySupervisor(Node):
         )
         self.declare_parameter('status_topic', '/r1/safety/status')
         self.declare_parameter('allow_dry_run_release', True)
-        self.declare_parameter('publish_rate_hz', 5.0)
+        # The physical writer requires a fresh kill heartbeat within 0.5 s.
+        # Twenty hertz leaves enough scheduling margin during SDK discovery,
+        # diagnostics and live status sampling while remaining lightweight.
+        self.declare_parameter('publish_rate_hz', 20.0)
 
         self._policy = ActuationPolicy.from_environment()
         self._kill_topic = str(self.get_parameter('kill_topic').value)

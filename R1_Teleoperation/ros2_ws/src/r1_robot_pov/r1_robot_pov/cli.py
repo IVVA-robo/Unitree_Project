@@ -218,6 +218,11 @@ def _arguments(argv: Optional[Sequence[str]] = None):
     parser.add_argument('--port', type=int)
     parser.add_argument('--duration', type=float, default=0.0)
     parser.add_argument('--no-mdns', action='store_true')
+    parser.add_argument(
+        '--no-discovery',
+        action='store_true',
+        help='Do not bind UDP 9091; the live VR bridge owns discovery',
+    )
     arguments, unknown = parser.parse_known_args(argv)
     unexpected = [item for item in unknown if item != '--ros-args']
     # launch_ros appends remap/log arguments after --ros-args. They are not
@@ -253,6 +258,8 @@ def _configured(arguments) -> PovConfig:
         value = getattr(arguments, argument_name)
         if value is not None:
             overrides[field_name] = value
+    if arguments.no_discovery:
+        overrides['discovery_enabled'] = False
     return config.with_overrides(**overrides)
 
 

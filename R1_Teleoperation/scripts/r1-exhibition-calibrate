@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Capture both exhibition neutral references with one DDS participant.  The
+# action is local to the ROS graph: it imports no Unitree SDK, clears no KILL,
+# and sends no command to the robot.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_SETUP="${PROJECT_DIR}/ros2_ws/install/setup.bash"
+[[ -f "${WORKSPACE_SETUP}" ]] \
+  || WORKSPACE_SETUP="${PROJECT_DIR}/install/setup.bash"
+
+die() {
+  echo "[BLOCKED] $*" >&2
+  echo 'No Unitree command was sent and no kill latch was cleared.' >&2
+  exit 2
+}
+
+[[ $# -eq 0 ]] || die 'usage: r1-exhibition-calibrate'
+[[ -f /opt/ros/humble/setup.bash ]] || die 'ROS 2 Humble is unavailable'
+[[ -f "${WORKSPACE_SETUP}" ]] || die "workspace is not built: ${WORKSPACE_SETUP}"
+DOMAIN_ID=${R1_LIVE_ROS_DOMAIN_ID:-88}
+[[ "${DOMAIN_ID}" =~ ^[0-9]+$ ]] && ((10#${DOMAIN_ID} <= 232)) \
+  || die 'R1_LIVE_ROS_DOMAIN_ID must be 0..232'
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${WORKSPACE_SETUP}"
+# shellcheck source=r1-physical-ros-env
+source "${SCRIPT_DIR}/r1-physical-ros-env"
+set -u
+export ROS_DOMAIN_ID="$((10#${DOMAIN_ID}))"
+export ROS_LOCALHOST_ONLY=1
+
+exec "${SCRIPT_DIR}/r1-exhibition-ros-client" calibrate --timeout-sec 10

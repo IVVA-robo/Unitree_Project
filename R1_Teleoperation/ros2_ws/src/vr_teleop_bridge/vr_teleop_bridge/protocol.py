@@ -22,6 +22,43 @@ class Pose:
 
 
 @dataclass(frozen=True)
+class TrackingAvailability:
+    """Per-device XR tracking flags supplied by the Unity sender."""
+
+    left: bool
+    right: bool
+    head: bool
+    reported: bool = True
+
+    @property
+    def all_available(self) -> bool:
+        """Return true only for an explicit complete tracking snapshot."""
+        return self.reported and self.left and self.right and self.head
+
+    @property
+    def missing(self) -> tuple:
+        """Return unavailable device names in stable diagnostic order."""
+        return tuple(
+            name for name in ('head', 'left', 'right')
+            if not self.reported or not getattr(self, name)
+        )
+
+    @classmethod
+    def unavailable(cls, reported: bool = True):
+        """Construct an all-unavailable snapshot."""
+        return cls(left=False, right=False, head=False, reported=reported)
+
+
+@dataclass(frozen=True)
+class ControllerButtons:
+    """Buttons used by the exhibition action mapping."""
+
+    left_x: bool = False
+    right_b: bool = False
+    reported: bool = True
+
+
+@dataclass(frozen=True)
 class VRPacket:
     sequence: int
     client_time_ms: int
@@ -33,6 +70,8 @@ class VRPacket:
     left_trigger: float
     right_trigger: float
     deadman: bool
+    tracking: TrackingAvailability
+    buttons: ControllerButtons
 
 
 def parse_packet(payload: bytes, max_position_m: float = 5.0) -> VRPacket:
@@ -57,6 +96,8 @@ def parse_packet(payload: bytes, max_position_m: float = 5.0) -> VRPacket:
     left_stick = _stick(sticks, 'left')
     right_stick = _stick(sticks, 'right')
     triggers = _triggers(root)
+    tracking = _tracking(root)
+    buttons = _buttons(root)
 
     return VRPacket(
         sequence=sequence,
@@ -69,6 +110,8 @@ def parse_packet(payload: bytes, max_position_m: float = 5.0) -> VRPacket:
         left_trigger=triggers[0],
         right_trigger=triggers[1],
         deadman=deadman,
+        tracking=tracking,
+        buttons=buttons,
     )
 
 
@@ -86,6 +129,33 @@ def apply_deadzone(value: float, deadzone: float) -> float:
     if abs(value) <= deadzone:
         return 0.0
     return math.copysign((abs(value) - deadzone) / (1.0 - deadzone), value)
+
+
+def scale_stick_axis(value: float, scale: float) -> float:
+    """Normalize a runtime-specific stick range and keep it inside [-1, 1]."""
+    return max(-1.0, min(1.0, value * scale))
+
+
+def shape_translation_stick(
+    x: float, y: float, snap_ratio: float,
+) -> Tuple[float, float]:
+    """
+    Suppress minor-axis drift; smoothly restore intentional diagonals.
+
+    Apply before gain/clipping so saturation cannot change the input angle.
+    The dominant component is unchanged; neither component is amplified.
+    """
+    if not all(math.isfinite(v) for v in (x, y, snap_ratio)):
+        raise ValueError('stick direction inputs must be finite')
+    if not 0.0 <= snap_ratio <= 0.8:
+        raise ValueError('snap_ratio must be in [0, 0.8]')
+    if snap_ratio == 0.0 or (x == 0.0 and y == 0.0):
+        return x, y
+    major = max(abs(x), abs(y))
+    ratio = min(abs(x), abs(y)) / major
+    fraction = max(0.0, (ratio - snap_ratio) / (1.0 - snap_ratio))
+    blend = fraction * fraction * (3.0 - 2.0 * fraction)
+    return (x * blend, y) if abs(y) >= abs(x) else (x, y * blend)
 
 
 def _mapping(parent: Mapping[str, Any], key: str) -> Mapping[str, Any]:
@@ -152,3 +222,36 @@ def _triggers(parent: Mapping[str, Any]) -> Tuple[float, float]:
     if any(value < -0.05 or value > 1.05 for value in values):
         raise PacketError('triggers are outside [0, 1]')
     return tuple(max(0.0, min(1.0, value)) for value in values)
+
+
+def _tracking(parent: Mapping[str, Any]) -> TrackingAvailability:
+    """Parse optional v1 tracking flags while preserving old clients."""
+    if 'tracking' not in parent:
+        # Legacy packets remain valid for the default physical-Deadman mode.
+        # The exhibition session gate separately requires reported=True before
+        # it can arm, so absence cannot silently authorize persistent motion.
+        return TrackingAvailability(
+            left=True, right=True, head=True, reported=False
+        )
+    value = _mapping(parent, 'tracking')
+    flags = {}
+    for name in ('left', 'right', 'head'):
+        flag = value.get(name)
+        if type(flag) is not bool:
+            raise PacketError(f'tracking.{name} must be a boolean')
+        flags[name] = flag
+    return TrackingAvailability(**flags, reported=True)
+
+
+def _buttons(parent: Mapping[str, Any]) -> ControllerButtons:
+    """Parse optional v1 action buttons while accepting deployed old APKs."""
+    if 'buttons' not in parent:
+        return ControllerButtons(reported=False)
+    value = _mapping(parent, 'buttons')
+    flags = {}
+    for name in ('left_x', 'right_b'):
+        flag = value.get(name)
+        if type(flag) is not bool:
+            raise PacketError(f'buttons.{name} must be a boolean')
+        flags[name] = flag
+    return ControllerButtons(**flags, reported=True)

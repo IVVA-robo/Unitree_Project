@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""Fast bounded ROS client for exhibition calibration and session gates.
+
+The helper constructs one ROS participant per user action. It never imports
+Unitree SDK or sends a robot command. Explicit emergency recovery requests
+the bridge's clear service; normal resume does not clear any latch.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import signal
+import sys
+import time
+
+import rclpy
+from rclpy.context import Context
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.signals import SignalHandlerOptions
+from std_msgs.msg import Bool
+from std_srvs.srv import Trigger
+
+
+GATES = {
+    "arm": ("/vr/teleop/arm_session", True, True),
+    "disarm": ("/vr/teleop/disarm_session", False, False),
+    "pause": ("/vr/teleop/pause_session", False, True),
+    "resume": ("/vr/teleop/resume_session", True, True),
+    "resume_ready": ("/vr/teleop/resume_session", True, True),
+    "clear_emergency": (
+        "/vr/teleop/clear_emergency_stop", True, True
+    ),
+}
+
+
+class ExhibitionClient:
+    def __init__(self, context: Context) -> None:
+        self.node = rclpy.create_node(
+            f"r1_exhibition_client_{os.getpid()}", context=context
+        )
+        self.executor = SingleThreadedExecutor(context=context)
+        self.executor.add_node(self.node)
+        self.active: bool | None = None
+        self.armed: bool | None = None
+        self.writer_armed: bool | None = None
+        self.kill: bool | None = None
+        self.cancelled = False
+        self.phase = 'initializing'
+        command_qos = QoSProfile(
+            depth=5,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        session_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.subscriptions = (
+            self.node.create_subscription(
+                Bool, "/vr/teleop/active", self._on_active, command_qos
+            ),
+            self.node.create_subscription(
+                Bool, "/vr/teleop/session_armed", self._on_armed, session_qos
+            ),
+            self.node.create_subscription(
+                Bool, "/r1/live_writer/armed", self._on_writer_armed, command_qos
+            ),
+            self.node.create_subscription(
+                Bool, "/r1/safety/kill", self._on_kill, command_qos
+            ),
+        )
+
+    def _on_active(self, message: Bool) -> None:
+        self.active = bool(message.data)
+
+    def _on_armed(self, message: Bool) -> None:
+        self.armed = bool(message.data)
+
+    def _on_writer_armed(self, message: Bool) -> None:
+        self.writer_armed = bool(message.data)
+
+    def _on_kill(self, message: Bool) -> None:
+        self.kill = bool(message.data)
+
+    def spin_until(self, predicate, deadline: float) -> bool:
+        while time.monotonic() < deadline:
+            if self.cancelled:
+                return False
+            if predicate():
+                return True
+            self.executor.spin_once(
+                timeout_sec=min(0.05, max(0.0, deadline - time.monotonic()))
+            )
+        return not self.cancelled and predicate()
+
+    def trigger(self, name: str, deadline: float) -> tuple[bool, str]:
+        if self.cancelled:
+            return False, 'helper cancelled before service request'
+        client = self.node.create_client(Trigger, name)
+        try:
+            self.phase = f'discovery:{name}'
+            print('[WAIT] ' + self.phase, flush=True)
+            if not self.spin_until(lambda: client.service_is_ready(), deadline):
+                return False, f"service unavailable: {name}"
+            self.phase = f'response:{name}'
+            print('[WAIT] ' + self.phase, flush=True)
+            futures = [client.call_async(Trigger.Request())]
+            if name == GATES['pause'][0]:
+                # LOCK is idempotent and only removes motion permission. A
+                # lost reply may leave the robot paused while the UI times
+                # out. Retry only this request, once, within the SAME budget.
+                # Never retry RUN, arm, calibration or emergency clear here.
+                retry_at = min(deadline, time.monotonic() + 1.5)
+                replied = self.spin_until(lambda: futures[0].done(), retry_at)
+                if not replied and not self.cancelled and time.monotonic() < deadline:
+                    print('[RETRY] LOCK reply missing; one idempotent pause retry', flush=True)
+                    futures.append(client.call_async(Trigger.Request()))
+            if not self.spin_until(lambda: any(future.done() for future in futures), deadline):
+                return False, f"service timed out: {name}"
+            future = next(future for future in futures if future.done())
+            if future.exception() is not None:
+                return False, f"service failed: {name}: {future.exception()}"
+            response = future.result()
+            if response is None:
+                return False, f"service returned no response: {name}"
+            print("response:", flush=True)
+            print(f"  service: {name}", flush=True)
+            print(f"  success: {'true' if response.success else 'false'}", flush=True)
+            print(f"  message: {response.message}", flush=True)
+            return bool(response.success), str(response.message)
+        finally:
+            self.node.destroy_client(client)
+
+    def diagnostics(self) -> str:
+        return (f'phase={self.phase} active={self.active} armed={self.armed} '
+                f'writer_armed={self.writer_armed} kill={self.kill}')
+
+    def close(self) -> None:
+        self.executor.remove_node(self.node)
+        self.executor.shutdown(timeout_sec=0.1)
+        self.node.destroy_node()
+
+
+def run_gate(client: ExhibitionClient, action: str, deadline: float) -> int:
+    if action == "resume_ready":
+        client.phase = 'fresh_safety_before_resume'
+        client.kill = None
+        if not client.spin_until(lambda: client.kill is not None, deadline):
+            print('[BLOCKED] fresh writer safety state unavailable')
+            return 2
+        if client.kill:
+            print('[RECOVERY_REQUIRED] explicit RUN must recover the latched stop')
+            return 3
+    service, expected_active, expected_armed = GATES[action]
+    success, reason = client.trigger(service, deadline)
+    if not success:
+        print(f"[BLOCKED] session service rejected {action}: {reason}", file=sys.stderr)
+        return 2
+    if action == "clear_emergency":
+        # The bridge may already have no emergency while an ordinary pause
+        # remains active. Its clear service validates a real B recovery; it
+        # need not resume a paused session. The owner calibrates/resumes next.
+        print('[OK] VR emergency clear acknowledged; writer prepare still required')
+        return 0
+    # Require observations made after the service response rather than a
+    # retained pre-call value.
+    client.active = None
+    client.armed = None
+    client.writer_armed = None
+    if action == "resume_ready":
+        client.kill = None
+    client.phase = f'fresh_confirmation:{action}'
+    print('[WAIT] ' + client.phase, flush=True)
+    if not client.spin_until(
+        lambda: (
+            client.active is expected_active
+            and client.armed is expected_armed
+            and (action != "resume_ready" or
+                 (client.writer_armed is True and client.kill is False))
+        ),
+        deadline,
+    ):
+        print(
+            "[BLOCKED] fresh session state was not confirmed: "
+            f"active={client.active} armed={client.armed} "
+            f"writer_armed={client.writer_armed} kill={client.kill}",
+            file=sys.stderr, flush=True,
+        )
+        return 2
+    print(f"[OK] exhibition session gate accepted: {action}")
+    return 0
+
+
+def run_calibration(client: ExhibitionClient, deadline: float) -> int:
+    client.active = None
+    if not client.spin_until(lambda: client.active is not None, deadline):
+        print("[BLOCKED] no fresh /vr/teleop/active sample", file=sys.stderr)
+        return 2
+    if client.active:
+        print("[BLOCKED] pause the control session before calibration", file=sys.stderr)
+        return 2
+    print("Capturing current HMD and controllers as neutral...")
+    for service in ("/vr/calibrate_body", "/r1/head/calibrate_neutral"):
+        success, reason = client.trigger(service, deadline)
+        if not success:
+            print(f"[BLOCKED] calibration rejected: {reason}", file=sys.stderr)
+            return 2
+    print("[OK] Exhibition arm and head neutral references are calibrated.")
+    return 0
+
+
+def main() -> int:
+    # Parent helpers can terminate us at their outer deadline. Preserve the
+    # last completed phase/response even when stdout is a pipe.
+    sys.stdout.reconfigure(line_buffering=True)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action", choices=(*GATES, "calibrate"))
+    parser.add_argument("--timeout-sec", type=float, default=8.0)
+    arguments = parser.parse_args()
+    if not 1.0 <= arguments.timeout_sec <= 30.0:
+        parser.error("--timeout-sec must be 1..30")
+
+    deadline = time.monotonic() + arguments.timeout_sec
+    context = Context()
+    client = None
+    interrupted = False
+
+    def cancel(_signum, _frame):
+        nonlocal interrupted
+        interrupted = True
+        if client is not None:
+            client.cancelled = True
+
+    previous_term = signal.signal(signal.SIGTERM, cancel)
+    try:
+        rclpy.init(
+            context=context,
+            signal_handler_options=SignalHandlerOptions.NO,
+        )
+        client = ExhibitionClient(context)
+        client.cancelled = interrupted
+        if arguments.action == "calibrate":
+            return run_calibration(client, deadline)
+        return run_gate(client, arguments.action, deadline)
+    except (KeyboardInterrupt, SystemExit):
+        return 130
+    except Exception as exception:
+        print(f"[BLOCKED] exhibition ROS client failed: {exception}", file=sys.stderr)
+        return 2
+    finally:
+        if client is not None:
+            if interrupted:
+                print('[BLOCKED] helper interrupted: ' + client.diagnostics(), flush=True)
+            client.close()
+        if context.ok():
+            context.shutdown()
+        signal.signal(signal.SIGTERM, previous_term)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

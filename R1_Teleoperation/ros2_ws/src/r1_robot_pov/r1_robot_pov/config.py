@@ -158,7 +158,7 @@ class PovConfig:
     right_topic: str = '/r1/camera/right/right_eye/image_raw'
     left_source: object = '/dev/video0'
     right_source: object = ''
-    unitree_interface: str = 'enxb4b024be59fe'
+    unitree_interface: str = 'auto'
     unitree_timeout_sec: float = 3.0
     unitree_fps: float = 15.0
     swap_eyes: bool = False
@@ -177,6 +177,10 @@ class PovConfig:
     log_dir: str = 'logs/robot_pov'
     robot_ip: str = ''
     preflight_duration_sec: float = 5.0
+    # The VR bridge owns UDP discovery while the live control graph is
+    # running.  Keep the responder enabled for the standalone/offline viewer,
+    # but allow live orchestration to disable this duplicate listener.
+    discovery_enabled: bool = True
 
     @property
     def video_profile(self) -> VideoProfile:
@@ -212,6 +216,33 @@ class PovConfig:
             'videoOnly': self.video_only,
             'source': self.source,
             'layout': self.layout,
+            # Unitree's current videohub exposes one mono stream.  The server
+            # duplicates it per eye for immersive viewers until a second
+            # physical source is configured.
+            'stereoAvailable': bool(
+                self.layout in ('stereo', 'top-bottom')
+                and (
+                    self.source in ('mock', 'ros')
+                    or bool(str(self.right_source).strip())
+                )
+            ),
+            'stereoFallback': bool(
+                self.source == 'unitree'
+                or (
+                    self.layout in ('stereo', 'top-bottom')
+                    and self.source in ('usb', 'rtsp')
+                    and not bool(str(self.right_source).strip())
+                )
+            ),
+            'stereoStatus': (
+                'true stereo'
+                if self.layout in ('stereo', 'top-bottom')
+                and (
+                    self.source in ('mock', 'ros')
+                    or bool(str(self.right_source).strip())
+                )
+                else 'mono-to-both-eyes fallback'
+            ),
             'transport': self.transport,
             'profile': self.profile,
             'profiles': profile_values,
@@ -375,6 +406,10 @@ def load_config(
         preflight_duration_sec=_number(
             value('ROBOT_POV_PREFLIGHT_DURATION_SEC', '5.0'),
             'ROBOT_POV_PREFLIGHT_DURATION_SEC', 1.0, 120.0,
+        ),
+        discovery_enabled=_bool(
+            value('ROBOT_POV_DISCOVERY_ENABLED', 'true'),
+            'ROBOT_POV_DISCOVERY_ENABLED',
         ),
     )
     return validate_config(config)

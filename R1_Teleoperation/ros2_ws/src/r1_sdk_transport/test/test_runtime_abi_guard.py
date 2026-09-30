@@ -12,6 +12,10 @@ import pytest
 _REQUIRED_BUILD_ENV = (
     'R1_SDK_TRANSPORT_BINARY',
     'R1_ARM_SDK_OBSERVER_BINARY',
+    'R1_MOTION_SWITCHER_PROBE_BINARY',
+    'R1_LOCO_STATE_PROBE_BINARY',
+    'R1_WIRELESS_CONTROLLER_OBSERVER_BINARY',
+    'R1_WIRELESS_CONTROLLER_PROBE_BINARY',
     'R1_SDK_TRANSPORT_VENDOR_DDS_DIR',
 )
 _MISSING_BUILD_ENV = [name for name in _REQUIRED_BUILD_ENV if not os.environ.get(name)]
@@ -25,6 +29,13 @@ if _MISSING_BUILD_ENV:
 
 BINARY = Path(os.environ['R1_SDK_TRANSPORT_BINARY'])
 OBSERVER_BINARY = Path(os.environ['R1_ARM_SDK_OBSERVER_BINARY'])
+MOTION_SWITCHER_PROBE_BINARY = Path(
+    os.environ['R1_MOTION_SWITCHER_PROBE_BINARY'])
+LOCO_STATE_PROBE_BINARY = Path(os.environ['R1_LOCO_STATE_PROBE_BINARY'])
+WIRELESS_CONTROLLER_OBSERVER_BINARY = Path(
+    os.environ['R1_WIRELESS_CONTROLLER_OBSERVER_BINARY'])
+WIRELESS_CONTROLLER_PROBE_BINARY = Path(
+    os.environ['R1_WIRELESS_CONTROLLER_PROBE_BINARY'])
 VENDOR_DDS_DIR = Path(os.environ['R1_SDK_TRANSPORT_VENDOR_DDS_DIR'])
 MATCH_STUB_SOURCE = Path(__file__).with_name('match_discovery_stub.c')
 
@@ -122,6 +133,98 @@ def test_arm_sdk_observer_help_is_inert_and_documents_gate_statuses():
     assert '12=action state missing' in result.stdout
     assert '15=typed writer set absent/unexpected/unstable' in result.stdout
     assert 'requires the phase-specific typed rt/arm_sdk writer set' in result.stdout
+
+
+def test_motion_switcher_probe_help_is_inert_and_read_only():
+    """Help exits before DDS initialization and states the API boundary."""
+    result = subprocess.run(
+        [str(MOTION_SWITCHER_PROBE_BINARY), '--help'],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, combined_output(result)
+    assert 'Read-only Unitree MotionSwitcher diagnostic.' in result.stdout
+    assert 'internal Noop API 2 handshake' in result.stdout
+    assert 'then sends one explicit API 1001 query' in result.stdout
+    assert '--get-silent adds one API 1005 query' in result.stdout
+    assert 'No state-changing MotionSwitcher API (1002, 1003, or 1004)' in result.stdout
+
+
+def test_loco_state_probe_help_is_inert_and_read_only():
+    """Help exits before DDS initialization and states the narrow API boundary."""
+    result = subprocess.run(
+        [str(LOCO_STATE_PROBE_BINARY), '--help'],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, combined_output(result)
+    assert 'Read-only Unitree R1 locomotion-state diagnostic.' in result.stdout
+    assert 'internal Noop API 2 handshake' in result.stdout
+    assert 'then sends one explicit API 7001 query' in result.stdout
+    assert '--get-fsm-mode adds one API 7002 query' in result.stdout
+    assert (
+        'No state-changing locomotion API (7101, 7105, or 7107)'
+        in result.stdout
+    )
+
+
+def test_wireless_controller_observer_help_is_inert_and_read_only():
+    """Help exits before DDS initialization and documents its receive boundary."""
+    result = subprocess.run(
+        [str(WIRELESS_CONTROLLER_OBSERVER_BINARY), '--help'],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, combined_output(result)
+    assert (
+        'Read only rt/wirelesscontroller for a bounded interval'
+        in result.stdout
+    )
+    assert 'No DDS writer, RPC client, locomotion call' in result.stdout
+    assert '10=typed publisher matched but silent' in result.stdout
+    assert '11=no typed publisher matched' in result.stdout
+
+
+def test_wireless_controller_probe_help_is_inert_and_live_gated():
+    """Help exits before DDS and documents the exact bounded live pulse."""
+    result = subprocess.run(
+        [str(WIRELESS_CONTROLLER_PROBE_BINARY), '--help'],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, combined_output(result)
+    assert 'Default: publish zero axes/buttons' in result.stdout
+    assert 'ly=0.15 pulse for 0.40 s' in result.stdout
+    assert 'BOUNDED_R1_FORWARD_STICK_PROBE' in result.stdout
+    assert 'R2+A Running Mode combination' in result.stdout
+    assert 'BOUNDED_R1_RUNNING_AND_FORWARD_STICK_PROBE' in result.stdout
+
+
+def test_wireless_controller_probe_accepts_exact_ack_before_runtime_checks():
+    """The documented acknowledgement reaches interface validation."""
+    result = subprocess.run(
+        [
+            str(WIRELESS_CONTROLLER_PROBE_BINARY),
+            '--interface', 'nosuch0',
+            '--forward-probe', '--acknowledge',
+            'BOUNDED_R1_FORWARD_STICK_PROBE',
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 21, combined_output(result)
+    assert 'network interface does not exist: nosuch0' in combined_output(result)
+    assert 'invalid --acknowledge value' not in combined_output(result)
 
 
 @pytest.mark.parametrize('expected', [1, 2])

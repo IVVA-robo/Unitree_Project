@@ -32,8 +32,113 @@ def test_defaults_are_mock_and_all_physical_features_are_off():
     assert 'enable_arms: false' in CONFIG
     assert 'enable_locomotion: false' in CONFIG
     assert 'enable_prepare: false' in CONFIG
+    assert 'prepare_enter_locomotion: false' in CONFIG
     assert "default_value='mock'" in LAUNCH
     assert "default_value='false'" in LAUNCH
+
+
+def test_physical_armsdk_is_locked_to_vendor_required_100_hz():
+    """ArmSdk sends and its bounded release must keep the 10 ms cadence."""
+    assert 'publish_rate_hz: 100.0' in CONFIG
+    assert 'declare_parameter<double>("publish_rate_hz", 100.0)' in NODE
+
+    validation = function_body(NODE, 'void validate_parameters() const')
+    assert 'physical R1 ArmSdk control requires publish_rate_hz=100 Hz' in validation
+    assert '(enable_head_ || enable_arms_)' in validation
+
+    release = function_body(
+        TRANSPORT, 'TransportResult SdkTransport::release_head('
+    )
+    assert 'constexpr auto kReleasePeriod = std::chrono::milliseconds(10)' in release
+    assert 'constexpr int kReleaseSteps = 100' in release
+    assert 'constexpr int kZeroBurstFrames = 30' in release
+
+
+def test_arm_feedback_follow_guard_latches_existing_fail_closed_path():
+    """A queued arm frame is insufficient without same-direction feedback."""
+    arms = function_body(NODE, 'void process_arms(')
+    timer = function_body(NODE, 'void on_timer()')
+    guard = function_body(NODE, 'std::string arm_feedback_follow_failure(')
+    record = function_body(NODE, 'void record_arm_feedback_follow_target(')
+
+    assert 'reset_arm_feedback_follow(held_head_target_)' in arms
+    assert 'record_arm_feedback_follow_target(held_head_target_' in arms
+    assert 'arm_feedback_follow_failure(now)' in timer
+    assert 'safe_stop_outputs(arm_follow_reason, true)' in timer
+    assert 'arm_feedback_follow_timeout' in guard
+    assert 'state_fresh(now)' in guard
+    assert 'arm_response_guard_.observe(' in guard
+    assert 'feedback, state_sequence_' in guard
+    assert 'ArmResponseGuard::kRequiredProgressSamples' in guard
+    assert 'arm_response_guard_.record_target(' in record
+    assert 'command, feedback, state_sequence_' in record
+    assert 'failure->target' in guard
+    assert 'failure->feedback' in guard
+    assert 'failure->command_reference' in guard
+    assert 'failure->observation_target' in guard
+    assert 'arm_feedback_follow_min_progress_rad_' in guard
+    assert 'arm_feedback_follow_timeout_sec_' in guard
+
+
+def test_arm_feedback_authority_guard_accepts_small_repeatable_motion():
+    """The guard proves authority with fresh samples, not servo accuracy."""
+    assert 'arm_feedback_follow_min_progress_rad: 0.0015' in CONFIG
+    validation = function_body(NODE, 'void validate_parameters() const')
+    assert 'arm_feedback_follow_min_progress_rad_ < 0.001' in validation
+
+    safe_stop = function_body(NODE, 'void safe_stop_outputs(')
+    assert 'clear_arm_feedback_follow()' in safe_stop
+
+
+def test_arm_rearm_captures_first_vr_target_before_allowing_delta():
+    """Re-arm must not replay an already-offset controller pose."""
+    arms = function_body(NODE, 'void process_arms(')
+    freshness = function_body(NODE, 'void clear_command_freshness()')
+    assert 'ArmNeutralHold' in NODE
+    assert 'arm_neutral_hold_.arm(' in arms
+    assert 'capture_first_target(latest_arm_)' in arms
+    assert 'arm_neutral_hold=captured_first_vr_target' in arms
+    assert 'arm_neutral_hold_.target_for(latest_arm_)' in arms
+    assert 'publish_debug_arm(last_arm_command_)' in arms
+    assert 'arm_neutral_hold_.reset()' in freshness
+
+
+def test_arm_rearm_keeps_locomotion_disabled():
+    assert 'enable_locomotion: false' in CONFIG
+    assert 'enable_locomotion_' in NODE
+    assert 'process_velocity' in NODE
+
+
+def test_locomotion_command_refresh_is_bounded_without_delaying_zero_stop():
+    """The 100 Hz arm loop must use each locomotion transport's cadence."""
+    assert 'locomotion_rpc_rate_hz: 10.0' in CONFIG
+    assert 'wireless_controller_rate_hz: 20.0' in CONFIG
+    assert 'declare_parameter<double>(\n      "locomotion_rpc_rate_hz", 10.0)' in NODE
+
+    validation = function_body(NODE, 'void validate_parameters() const')
+    assert 'locomotion_rpc_rate_hz_ < 2.0' in validation
+    assert 'locomotion_rpc_rate_hz_ > 10.0' in validation
+    assert 'wireless_controller_rate_hz_ < 15.0' in validation
+    assert 'wireless_controller_rate_hz_ > 25.0' in validation
+
+    velocity = function_body(NODE, 'void process_velocity(')
+    zero_branch = velocity.index('if (is_zero(shaped))')
+    stop_call = velocity.index('stop_locomotion()', zero_branch)
+    command_period = velocity.index(
+        'const double command_period_sec = 1.0 / locomotion_command_rate_hz',
+        stop_call,
+    )
+    throttled_return = velocity.index(
+        'age(send_now, last_velocity_rpc_send_) < command_period_sec',
+        command_period,
+    )
+    velocity_send = velocity.index('transport_->set_velocity(', throttled_return)
+    timestamp = velocity.index('last_velocity_rpc_send_ =', velocity_send)
+    assert zero_branch < stop_call < command_period < throttled_return
+    assert throttled_return < velocity_send < timestamp
+
+    safe_stop = function_body(NODE, 'void safe_stop_outputs(')
+    assert 'last_velocity_rpc_send_ = SteadyClock::time_point{}' in safe_stop
 
 
 def test_writer_consumes_only_reviewed_safe_pipeline_topics():
@@ -280,9 +385,10 @@ def test_set_velocity_marks_potential_delivery_before_the_rpc():
 
     stop_body = function_body(TRANSPORT, 'TransportResult SdkTransport::stop_locomotion()')
     stop_rpc = stop_body.index('StopMove()')
-    clear = re.search(r'velocity_maybe_active\s*=\s*false\s*;', stop_body)
+    clear = re.search(
+        r'velocity_maybe_active\s*=\s*false\s*;', stop_body[stop_rpc:]
+    )
     assert clear is not None
-    assert clear.start() > stop_rpc
 
     destructor = function_body(TRANSPORT, 'SdkTransport::~SdkTransport()')
     assert 'velocity_maybe_active' in destructor
@@ -290,9 +396,268 @@ def test_set_velocity_marks_potential_delivery_before_the_rpc():
 
 
 def test_node_only_enters_sport_mode_for_locomotion_prepare():
-    """Head/arms-only prepare must stop at stable FSM 4."""
+    """FSM 811 entry is explicit and independent of joystick output."""
     prepare_call = NODE.index('return transport_->prepare(')
-    assert '}, enable_locomotion_);' in NODE[prepare_call:prepare_call + 220]
+    snippet = NODE[prepare_call:prepare_call + 240]
+    assert (
+        '}, prepare_enter_locomotion_, static_prepare_mode_, prepare_speed_mode_);'
+        in snippet
+    )
+    assert '}, enable_locomotion_);' not in snippet
+
+
+def test_static_stand_retains_stopmove_cleanup_debt_until_reviewed_stop():
+    prepare = function_body(
+        TRANSPORT, 'TransportResult SdkTransport::prepare('
+    )
+    stand_up = prepare.index('StandUp()')
+    no_locomotion = prepare.index('if (!enter_locomotion)', stand_up)
+    static_branch = prepare.index(
+        'if (!retain_stand_cleanup_debt)', no_locomotion
+    )
+    arms_only_clear = prepare.index(
+        'impl_->prepare_maybe_active = false', static_branch
+    )
+    retained = prepare.index(
+        'static Stand cleanup debt retained', arms_only_clear
+    )
+    assert stand_up < no_locomotion < static_branch < arms_only_clear < retained
+
+    node_prepare = function_body(NODE, 'void on_prepare(')
+    assert (
+        'prepare_enter_locomotion_, static_prepare_mode_' in node_prepare
+    )
+    stop = function_body(
+        TRANSPORT, 'TransportResult SdkTransport::stop_locomotion()'
+    )
+    stop_move = stop.index('StopMove()')
+    debt_clear = stop.index('impl_->prepare_maybe_active = false', stop_move)
+    assert stop_move < debt_clear
+
+
+def test_no_velocity_stop_fallback_requires_stable_entered_nonmoving_mode():
+    """A rejected redundant zero is safe only before any velocity boundary."""
+    prepare = function_body(
+        TRANSPORT, 'TransportResult SdkTransport::prepare('
+    )
+    start = prepare.index('Start()')
+    start_debt = prepare.rindex(
+        'impl_->locomotion_mode_maybe_active = true', 0, start
+    )
+    assert start_debt < start
+
+    stop = function_body(
+        TRANSPORT, 'TransportResult SdkTransport::stop_locomotion()'
+    )
+    stop_move = stop.index('StopMove()')
+    fallback = stop.index(
+        'detail::no_velocity_stop_fallback_eligible(', stop_move
+    )
+    get_fsm = stop.index('GetFsmId(', fallback)
+    stable_gate = stop.index(
+        'if (stable_samples == kRequiredStableSamples)', get_fsm
+    )
+    debt_clear = stop.index(
+        'impl_->prepare_maybe_active = false', stable_gate
+    )
+    assert 'kRequiredStableSamples = 5' in stop[fallback:stable_gate]
+    assert 'kMaxConfirmationPolls = 40' in stop[fallback:stable_gate]
+    assert 'polls <= kMaxConfirmationPolls' in stop[fallback:stable_gate]
+    assert 'detail::confirms_nonmoving_mode_sample(' in stop[
+        fallback:stable_gate
+    ]
+    assert 'stable_samples = 0' in stop[get_fsm:stable_gate]
+    assert 'nonmoving FSM confirmation timed out' in stop[stable_gate:]
+    assert 'impl_->velocity_maybe_active' in stop[fallback:get_fsm]
+    assert 'impl_->locomotion_mode_maybe_active' in stop[
+        get_fsm:stable_gate
+    ]
+    assert stop_move < fallback < get_fsm < stable_gate < debt_clear
+
+    # The ordinary accepted StopMove path clears every kind of debt.
+    accepted = stop.index('if (result == 0)', stop_move)
+    assert 'impl_->locomotion_mode_maybe_active = false' in stop[
+        accepted:fallback
+    ]
+    assert 'impl_->velocity_maybe_active = false' in stop[accepted:fallback]
+    # The fallback never clears velocity debt. It is unreachable once a
+    # SetVelocity RPC boundary was crossed, even if delivery was ambiguous.
+    assert 'impl_->velocity_maybe_active = false' not in stop[
+        fallback:debt_clear + len('impl_->prepare_maybe_active = false')
+    ]
+
+
+def test_arms_running_prepare_keeps_velocity_pipeline_disabled():
+    """The running arm stage may enter FSM 811, never SetVelocity."""
+    live = (ROOT.parents[2] / 'scripts' / 'r1-live-session').read_text()
+    stage = live[live.index('  arms-running)'):live.index('  head-probe)')]
+    assert 'ENABLE_ARMS=true' in stage
+    assert 'ENABLE_LOCOMOTION=false' in stage
+    assert 'PREPARE_ENTER_LOCOMOTION=true' in stage
+    assert 'set_velocity' not in stage
+    assert 'enable_locomotion:="${ENABLE_LOCOMOTION}"' in live
+    assert 'prepare_enter_locomotion:="${PREPARE_ENTER_LOCOMOTION}"' in live
+
+
+def test_velocity_127_is_not_transport_success_or_enabled_by_legacy_switch():
+    """The general transport remains fail-closed for every nonzero status."""
+    live = (ROOT.parents[2] / 'scripts' / 'r1-live-session').read_text()
+    assert 'unset R1_ALLOW_R1_VELOCITY_127_COMPAT' in live
+    assert 'export R1_ALLOW_R1_VELOCITY_127_COMPAT' not in live
+    assert 'VELOCITY_127_COMPAT=true' not in live
+
+    velocity = function_body(
+        TRANSPORT, 'TransportResult SdkTransport::set_velocity('
+    )
+    assert 'if (result == 0)' in velocity
+    assert 'result == 127' not in velocity
+    assert 'ambiguous nonzero status=' in velocity
+
+    stop = function_body(
+        TRANSPORT, 'TransportResult SdkTransport::stop_locomotion()'
+    )
+    assert 'result == 127' not in stop
+    assert 'velocity_127_compatibility' not in TRANSPORT
+
+
+def test_velocity_127_probe_is_bounded_forward_only_and_opt_in():
+    """One firmware experiment may admit 127 without weakening normal mode."""
+    assert 'velocity_status_127_probe_enabled: false' in CONFIG
+    assert (
+        '"velocity_status_127_probe_enabled", false' in NODE
+    )
+
+    validation = function_body(NODE, 'void validate_parameters() const')
+    for required in (
+        'transport_name_ != "sdk"',
+        '!enable_locomotion_',
+        'enable_head_',
+        'enable_arms_',
+        '!prepare_enter_locomotion_',
+        'exhibition_session_mode_',
+        'velocity_limits_.forward > kVelocity127ProbeMaxForwardMps',
+        '!velocity_127_probe_environment_confirmed()',
+    ):
+        assert required in validation
+
+    velocity = function_body(NODE, 'void process_velocity(')
+    assert 'kVelocity127ProbeMaxDurationSec = 1.5' in NODE
+    assert 'kVelocity127ProbeMaxForwardMps = 0.15' in NODE
+    assert 'std::clamp(shaped[0], 0.0, kVelocity127ProbeMaxForwardMps)' in velocity
+    assert '0.0,\n        0.0};' in velocity
+    assert 'age(send_now, velocity_127_probe_started_) >=' in velocity
+    assert 'velocity_127_probe_window_complete' in velocity
+    assert 'result.status_code == 127' in velocity
+    assert 'locomotion_active_ = true' in velocity
+    assert 'last_velocity_rpc_send_ = SteadyClock::now()' in velocity
+
+    safe_stop = function_body(NODE, 'void safe_stop_outputs(')
+    assert 'velocity_127_probe_started_ = SteadyClock::time_point{}' in safe_stop
+
+    watchdog = function_body(NODE, 'std::string active_watchdog_failure(')
+    assert 'watchdog_velocity_127_probe_confirmation_lost' in watchdog
+
+    environment = function_body(
+        NODE, 'bool velocity_127_probe_environment_confirmed() const'
+    )
+    assert 'ROBOT_CONFIRM_UNITREE_EXPLORE_CLOSED' in environment
+    assert 'ROBOT_CONFIRM_NO_PHONE_CONTROL' in environment
+
+    for limit in ('max_forward_mps', 'max_lateral_mps', 'max_yaw_rps'):
+        assert f"DeclareLaunchArgument('{limit}'" in LAUNCH
+        assert f"LaunchConfiguration('{limit}')" in LAUNCH
+
+
+def test_failed_stopmove_retries_are_bounded_and_debt_is_preserved():
+    """An ambiguous stop must not hammer the R1 service at the 100 Hz tick rate."""
+    safe_stop = function_body(NODE, 'void safe_stop_outputs(')
+
+    assert 'kCleanupRetryIntervalSec{0.5}' in NODE
+    assert 'last_locomotion_cleanup_attempt_' in safe_stop
+    assert 'age(cleanup_now, last_locomotion_cleanup_attempt_) >=' in safe_stop
+    assert 'locomotion_cleanup_pending = locomotion_active_' in safe_stop
+    assert 'StopMove=retry_deferred' in safe_stop
+    assert 'last_safe_stop_status_time_' in safe_stop
+
+    velocity = function_body(NODE, 'void process_velocity(')
+    velocity_call = velocity.index('transport_->set_velocity(')
+    reset = velocity.rindex(
+        'last_locomotion_cleanup_attempt_ = SteadyClock::time_point{}',
+        0,
+        velocity_call,
+    )
+    assert reset < velocity_call
+
+
+def test_first_locomotion_command_is_logged_with_mode_and_result():
+    """One short physical command must leave unambiguous evidence."""
+    velocity = function_body(NODE, 'void process_velocity(')
+    attempt = velocity.index('Locomotion command attempt mode=')
+    call = velocity.index('transport_->set_velocity(', attempt)
+    result = velocity.index('Locomotion command result ok=true', call)
+    assert attempt < call < result
+    assert 'Locomotion_command_failed mode=' in velocity[call:result]
+
+
+def test_wireless_controller_mode_matches_captured_vendor_channel():
+    assert 'locomotion_command_mode: "loco_rpc"' in CONFIG
+    assert 'wireless_controller_rate_hz: 20.0' in CONFIG
+    assert '"locomotion_command_mode", "loco_rpc"' in NODE
+    assert 'std::make_unique<SdkTransport>(' in NODE
+    assert 'locomotion_command_mode_ == "wireless_controller"' in NODE
+    assert "DeclareLaunchArgument(\n            'wireless_controller_rate_hz'" in LAUNCH
+
+    mapping = function_body(
+        TRANSPORT, 'detail::velocity_to_wireless_controller('
+    )
+    assert 'lateral / kLateralCeilingMps' in mapping
+    assert 'forward / kForwardCeilingMps' in mapping
+    assert '-yaw / kYawCeilingRps' in mapping
+    assert 'std::clamp' in mapping
+
+    velocity = function_body(
+        TRANSPORT, 'TransportResult SdkTransport::set_velocity('
+    )
+    assert 'rt/wirelesscontroller' in TRANSPORT
+    assert 'velocity_to_wireless_controller(' in velocity
+    assert 'message.keys(command.keys)' in velocity
+    assert 'wireless_controller->Write(message)' in velocity
+
+    stop = function_body(
+        TRANSPORT, 'TransportResult SdkTransport::stop_locomotion()'
+    )
+    assert 'kZeroFrames = 6' in stop
+    assert 'milliseconds(50)' in stop
+    assert 'wireless_controller->Write(zero)' in stop
+
+
+def test_optional_speed_mode_is_bounded_to_the_isolated_probe():
+    """The R1 speed-mode experiment must be explicit and happen before velocity."""
+    prepare = function_body(TRANSPORT, 'TransportResult SdkTransport::prepare(')
+    assert 'SetSpeedMode(speed_mode)' in prepare
+    assert 'R1 SetSpeedMode(' in prepare
+    speed_call = prepare.index('SetSpeedMode(speed_mode)')
+    final_success = prepare.index('stand_up_state.detail + "; " + locomotion_state.detail')
+    assert speed_call < final_success
+
+    validation = function_body(NODE, 'void validate_parameters() const')
+    assert 'prepare_speed_mode must be -1 (disabled) or 1' in validation
+    assert 'prepare_speed_mode is admitted only by the isolated legs-only status-127 probe' in validation
+
+    assert "DeclareLaunchArgument('prepare_speed_mode'" in LAUNCH
+    assert "value_type=int" in LAUNCH
+
+
+def test_velocity_disabled_811_allows_only_one_upper_body_path():
+    validation = function_body(NODE, 'void validate_parameters() const')
+    gate = validation.index(
+        'if (prepare_enter_locomotion_ && !enable_locomotion_)'
+    )
+    snippet = validation[gate:gate + 520]
+    assert 'enable_arms_ && !enable_head_' in snippet
+    assert 'enable_head_ && !enable_arms_' in snippet
+    assert 'if (!arms_only && !head_only)' in snippet
+    assert 'exactly one upper-body commissioning path' in snippet
 
 
 def test_arm_sdk_release_is_a_bounded_approximately_one_second_ramp():
@@ -300,10 +665,10 @@ def test_arm_sdk_release_is_a_bounded_approximately_one_second_ramp():
     assert 'deadline' in body
     assert re.search(r'milliseconds\s*\(\s*(?:12[0-9][0-9]|13[0-9][0-9]|1400)\s*\)', body)
     assert re.search(r'(?:milliseconds\s*\(\s*1000\s*\)|seconds\s*\(\s*1\s*\))', body)
-    assert re.search(r'milliseconds\s*\(\s*20\s*\)', body)
-    assert re.search(r'(?:release_)?steps?\s*=\s*50', body, re.IGNORECASE)
-    assert re.search(r'zero_?burst_?frames?\s*=\s*15', body, re.IGNORECASE)
-    assert re.search(r'milliseconds\s*\(\s*2700\s*\)', body)
+    assert re.search(r'milliseconds\s*\(\s*10\s*\)', body)
+    assert re.search(r'(?:release_)?steps?\s*=\s*100', body, re.IGNORECASE)
+    assert re.search(r'zero_?burst_?frames?\s*=\s*30', body, re.IGNORECASE)
+    assert re.search(r'milliseconds\s*\(\s*3100\s*\)', body)
     assert re.search(
         r'for\s*\(\s*int\s+frame\s*=\s*0\s*;\s*'
         r'frame\s*<\s*kZeroBurstFrames', body)
@@ -424,9 +789,12 @@ def test_node_enforces_post_prepare_rearm_and_combined_command_barrier():
     assert NODE.count('enabled_commands_fresh(authorization_now)') == 3
 
 
-def test_node_uses_private_unicast_validation_for_both_vr_source_values():
+def test_node_validates_both_sources_against_the_same_explicit_transport():
     validation = function_body(NODE, 'bool vr_source_ok(')
-    assert validation.count('valid_private_unicast_ipv4(') == 2
+    assert validation.count('valid_vr_source(') == 2
+    assert 'environment.vr_transport == vr_transport_' in validation
+    assert 'valid_vr_source(expected_vr_source_ip_, vr_transport_)' in validation
+    assert 'valid_vr_source(environment.vr_source_ip, environment.vr_transport)' in validation
     assert 'valid_unicast_ipv4(' not in NODE
 
 
@@ -474,6 +842,47 @@ def test_timer_polls_prepare_future_nonblocking_and_reauthorizes_completion():
     assert 'prepare_completion_gate_failed:' in completion
 
 
+def test_prepared_static_and_exhibition_sessions_keep_watchdog_active():
+    timer = function_body(NODE, 'void on_timer()')
+    watchdog_gate = timer.index('const bool safety_watchdog_required =')
+    prepared_watchdog = timer.index(
+        '(prepared_ && (static_prepare_mode_ || exhibition_session_mode_))',
+        watchdog_gate,
+    )
+    watchdog_call = timer.index(
+        'active_watchdog_failure(now)', prepared_watchdog
+    )
+    fail_closed = timer.index('safe_stop_outputs(', watchdog_call)
+    assert watchdog_gate < prepared_watchdog < watchdog_call < fail_closed
+
+    watchdog = function_body(
+        NODE, 'std::string active_watchdog_failure('
+    )
+    for required_gate in (
+        'kill_clear_fresh(now)',
+        'state_fresh(now)',
+        'motor_health_fresh(now)',
+        'live_environment_complete(environment)',
+        'commissioning_parameter_ok(environment)',
+        'control_source_ok(environment)',
+        'profile_ != "slow-safe"',
+    ):
+        assert required_gate in watchdog
+    assert 'if (static_prepare_mode_)' in watchdog
+
+
+def test_exhibition_arm_hold_preserves_pending_feedback_follow_guard():
+    """A VR dropout must not erase evidence that the last arm target stalled."""
+    timer = function_body(NODE, 'void on_timer()')
+    dropout = timer[timer.index('const bool exhibition_dropout'):]
+    dropout = dropout[:dropout.index('const std::string arm_follow_reason')]
+    assert 'clear_arm_feedback_follow()' not in dropout
+
+    hold = function_body(NODE, 'void maintain_exhibition_arm_hold(')
+    assert 'transport_->hold_head(held_head_target_)' in hold
+    assert 'clear_arm_feedback_follow()' not in hold
+
+
 def test_prepare_watchdog_cancels_without_concurrent_transport_calls():
     watchdog = function_body(NODE, 'std::string prepare_watchdog_failure(')
     for required_gate in (
@@ -481,7 +890,7 @@ def test_prepare_watchdog_cancels_without_concurrent_transport_calls():
         'deadman_fresh(now)',
         'state_fresh(now)',
         'commissioning_parameter_ok(environment)',
-        'vr_source_ok(environment)',
+        'control_source_ok(environment)',
         'profile_ != "slow-safe"',
     ):
         assert required_gate in watchdog
@@ -574,12 +983,26 @@ def test_every_first_sdk_action_is_reauthorized_after_transport_initialization()
         seed_extract,
     )
     seed_window = head.index('head_seed_requires_explicit_recenter', absolute_check)
-    stable_feedback = head.index('head_seed_requires_stable_feedback', seed_window)
+    stable_feedback = head.index(
+        'head_seed_waiting_for_stable_feedback', seed_window)
+    stable_timeout = head.index(
+        'head_seed_stable_feedback_timeout', stable_feedback)
+    stable_samples = head.index(
+        'head_seed_settle_stable_samples_ < kHeadSeedStableSamples',
+        stable_timeout,
+    )
     assert head_post_gate < seed_extract < absolute_check
-    assert absolute_check < seed_window < stable_feedback < head_seed
+    assert (
+        absolute_check < seed_window < stable_feedback < stable_timeout
+        < stable_samples < head_seed
+    )
+    settle_path = head[stable_feedback:head_seed]
+    assert 'state_sequence_ != head_seed_settle_last_state_sequence_' in settle_path
+    assert 'head_velocity_valid_' in settle_path
+    assert 'reset_head_seed_settle()' in settle_path
 
-    held_seed = head.index('held_head_target_ = latest_state_', stable_feedback)
-    assert stable_feedback < held_seed < head_seed
+    held_seed = head.index('held_head_target_ = latest_state_', stable_samples)
+    assert stable_samples < held_seed < head_seed
 
     target = head.index('absolute_head_target(', head_seed)
     command = head.index('transport_->command_head(', target)
@@ -608,10 +1031,71 @@ def test_head_feedback_and_limits_use_unambiguous_immutable_conventions():
     joint_state = function_body(NODE, 'void on_joint_state(')
     assert 'message->name.size() != message->velocity.size()' in joint_state
     assert 'candidate[kHeadYawIndex], candidate[kHeadPitchIndex]' in joint_state
-    assert 'head_within_absolute_limits(candidate_head, head_absolute_limits_)' \
+    assert '!static_prepare_mode_ &&' in joint_state
+    assert '!prepare_in_progress_ &&' in joint_state
+    assert '!head_within_feedback_envelope(candidate_head, head_absolute_limits_)' \
         in joint_state
-    assert 'joint_state_rejected=head_outside_official_absolute_envelope' \
+    assert 'joint_state_rejected=head_outside_official_absolute_envelope_plus_feedback_margin' \
         in joint_state
+    assert 'kHeadFeedbackEnvelopeToleranceRad = 0.01' in NODE
+    deadman = function_body(NODE, 'void on_deadman(')
+    assert 'became_ready = !exhibition_session_mode_ &&' in deadman
+    assert 'prepare_rearm_gate_.observe_deadman(deadman_active_)' in deadman
+    session = function_body(NODE, 'void on_session_armed(')
+    assert 'safe_stop_outputs("exhibition_session_disarmed", true)' in session
+
+    normal_head = function_body(NODE, 'void process_head(')
+    envelope = normal_head.index('!head_within_absolute_limits(seed, head_absolute_limits_)')
+    claim = normal_head.index('transport_->seed_head(held_head_target_)', envelope)
+    assert 'safe_stop_outputs(' in normal_head[envelope:claim]
+    stable = normal_head.index('head_seed_settle_stable_samples_ < kHeadSeedStableSamples')
+    seeded = normal_head.index('transport_->seed_head(held_head_target_)', stable)
+    verified = normal_head.index('head_tracking_seed_verified_ = true', seeded)
+    assert stable < seeded < verified
+    assert 'head_tracking_seed_verified_ = false' in function_body(
+        NODE, 'void reset_head_seed_settle()'
+    )
+    assert 'begin_automatic_exhibition_head_center(send_now, seed)' in normal_head
+    assert 'exhibition_session_mode_' in normal_head
+    auto_center = function_body(
+        NODE, 'void process_automatic_exhibition_head_center('
+    )
+    assert 'clamp_head_to_absolute_envelope(seed, head_absolute_limits_)' \
+        in auto_center
+    assert 'transport_->seed_head(held_head_target_)' in auto_center
+    assert 'step_head_toward_zero(' in auto_center
+    assert 'head_recenter_follow_timeout_sec_' in auto_center
+    assert 'head_recenter_confirmation_samples_ >= 5' in auto_center
+    assert 'head_auto_center=complete' in auto_center
+    assert '!enabled_commands_fresh(now)' in auto_center
+    pause = auto_center.index('head_auto_center=paused reason=vr_reconnecting')
+    resume = auto_center.index('head_auto_center=resumed reason=vr_recovered')
+    assert pause < resume
+    assert 'maintain_exhibition_arm_hold("head_auto_center_vr_reconnecting")' \
+        in auto_center[pause:resume]
+    assert 'maintain_exhibition_velocity_zero(' \
+        in auto_center[pause:resume]
+    assert 'head_recenter_last_advance_time_ = now' \
+        in auto_center[pause:resume]
+    assert 'head_recenter_follow_wait_since_ = SteadyClock::time_point{}' \
+        in auto_center[pause:resume]
+    pause_branch = auto_center[pause:resume]
+    assert 'safe_stop_outputs(' not in pause_branch
+    assert 'head_auto_center_paused=' in NODE
+    assert 'safe_stop_outputs(' not in auto_center[
+        auto_center.index('head_recenter_confirmation_samples_ >= 5'):
+    ]
+
+    timer = function_body(NODE, 'void on_timer()')
+    center = timer.index('process_automatic_exhibition_head_center(now, dt)')
+    arms = timer.index('process_arms(now, dt)')
+    locomotion = timer.index('process_velocity(now, dt)')
+    assert center < arms < locomotion
+    assert 'enable_arms_ && upper_allowed && !automatic_head_center_active_' in timer
+    assert 'enable_locomotion_ && !automatic_head_center_active_' in timer
+
+    safe_stop = function_body(NODE, 'void safe_stop_outputs(')
+    assert 'clamp_head_to_absolute_envelope(' in safe_stop
 
     assert 'const HeadAbsoluteLimits head_absolute_limits_{};' in NODE
     for forbidden_parameter in (

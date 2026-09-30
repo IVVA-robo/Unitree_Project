@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=MuJoCo R1
+Comment=Launch Unitree R1 in MuJoCo
+Exec=/home/unitree/.mujoco/mujoco-3.1.6/bin/simulate r1_mujoco.xml
+Path=/home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/src/unitree_r1_description/urdf
+Icon=utilities-terminal
+Terminal=false
+Type=Application

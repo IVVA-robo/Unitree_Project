@@ -62,6 +62,7 @@ else()
 endif()
 
 add_library(r1_live_writer_core
+  src/arm_sdk_frame.cpp
   src/safety.cpp
   src/transport.cpp)
 target_include_directories(r1_live_writer_core PUBLIC
@@ -116,9 +117,20 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_gtest(test_safety test/test_safety.cpp)
+  ament_add_gtest(test_sequential_control test/test_sequential_control.cpp)
+  if(TARGET test_sequential_control)
+    target_link_libraries(test_sequential_control r1_live_writer_core)
+    target_include_directories(test_sequential_control PRIVATE include)
+  endif()
   if(TARGET test_safety)
     target_link_libraries(test_safety r1_live_writer_core)
     target_include_directories(test_safety PRIVATE include)
+  endif()
+  if(R1_LIVE_WRITER_HAS_SDK)
+    ament_add_gtest(test_arm_sdk_frame test/test_arm_sdk_frame.cpp)
+    if(TARGET test_arm_sdk_frame)
+      target_link_libraries(test_arm_sdk_frame r1_live_writer_core)
+    endif()
   endif()
   ament_add_pytest_test(test_abi_probe_contract test/test_abi_probe_contract.py)
   ament_add_pytest_test(

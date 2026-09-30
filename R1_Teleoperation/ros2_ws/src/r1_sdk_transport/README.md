@@ -115,6 +115,40 @@ ros2 topic echo /r1/sdk_transport/motors_healthy
 ros2 topic echo /r1/sdk_transport/status
 ```
 
+## Read-only проверка текущего motion mode
+
+Если нужно только определить текущие `form` и `name` MotionSwitcher, запускайте
+отдельный однократный probe из чистого терминала ноутбука. Он использует тот же
+раздельный DDS runtime, что и read-only transport:
+
+```bash
+cd /home/unitree/Unitree_Project/R1_Teleoperation
+source /opt/ros/humble/setup.bash
+source ros2_ws/install/setup.bash
+source scripts/r1-unitree-sdk-env
+export ROS_LOCALHOST_ONLY=1
+ros2 run r1_sdk_transport r1_motion_switcher_probe \
+  --interface enxb4b024be59fe --timeout-sec 2
+```
+
+Перед явным `CheckMode` (API `1001`) SDK создаёт внутренний client handshake
+`Noop` (API `2`), который может быть повторён самой библиотекой. Это исходящий
+диагностический RPC, поэтому probe не является офлайн-проверкой и его нельзя
+запускать автоматически или одновременно с непроверенным SDK-процессом.
+После handshake программа выполняет ровно один явный `CheckMode`; опция
+`--get-silent` добавляет один `GetSilent` (API `1005`) только после успешного
+ответа. В программе нет `SelectMode` (`1002`), `ReleaseMode` (`1003`),
+`SetSilent` (`1004`), `ArmSdk`, `LocoClient`, `rt/arm_sdk`, `rt/lowcmd` или
+publisher. Результат имеет вид:
+
+```text
+MOTION_SWITCHER_CHECK status=OK api=1001 code=0 form=<form> name=<name>
+```
+
+Этот результат только сообщает состояние; он не подтверждает готовность рук и
+не заменяет LowState, Arm Action, deadman, KILL или остальные commissioning
+gates.
+
 `/r1/sdk_transport/motors_healthy` публикуется непрерывно и равен `true`
 только пока LowState свежий, все 26 настроенных `q/dq` конечны и поле
 `motorstate` равно нулю в каждом физическом IDL slot. При любом ненулевом

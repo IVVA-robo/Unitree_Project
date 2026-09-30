@@ -20,6 +20,11 @@ def _arguments():
     parser.add_argument('--right-y', type=float, default=0.0)
     parser.add_argument('--left-trigger', type=float, default=0.0)
     parser.add_argument('--right-trigger', type=float, default=0.0)
+    parser.add_argument('--press-x', action='store_true')
+    parser.add_argument('--press-b', action='store_true')
+    parser.add_argument('--drop-left', action='store_true')
+    parser.add_argument('--drop-right', action='store_true')
+    parser.add_argument('--drop-head', action='store_true')
     args = parser.parse_args()
     if args.rate <= 0.0 or args.duration < 0.0:
         parser.error('--rate must be positive and --duration must be non-negative')
@@ -39,6 +44,15 @@ def _packet(args, sequence, pose, deadman):
             'right': [args.right_x, args.right_y],
         },
         'triggers': [args.left_trigger, args.right_trigger],
+        'tracking': {
+            'left': not args.drop_left,
+            'right': not args.drop_right,
+            'head': not args.drop_head,
+        },
+        'buttons': {
+            'left_x': args.press_x,
+            'right_b': args.press_b,
+        },
         'deadman': deadman,
     }
 

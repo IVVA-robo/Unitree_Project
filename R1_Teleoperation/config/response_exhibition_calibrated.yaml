@@ -1,0 +1,20 @@
+r1_live_writer:
+  ros__parameters:
+    max_head_yaw_delta_rate_rad_s: 1.0
+    max_head_pitch_delta_rate_rad_s: 1.0
+    max_arm_joint_rate_rad_s: 1.0
+    arm_targets_absolute: true
+r1_head_dry_run:
+  ros__parameters:
+    smoothing_alpha: 0.35
+    max_yaw_rate_rad_s: 1.0
+    max_pitch_rate_rad_s: 1.0
+r1_kinematics_control:
+  ros__parameters:
+    max_joint_velocity_rad_s: 1.0
+    body_proxy.max_target_speed_mps: 0.35
+    position_ema_tau_sec: 0.05
+    orientation_ema_tau_sec: 0.075
+    trajectory_time_sec: 0.06
+    arm_range_probe_file: /home/unitree/Unitree_Project/R1_Teleoperation/config/operator_arm_range.exhibition.json
+    arm_range_probe_fraction: 1.0

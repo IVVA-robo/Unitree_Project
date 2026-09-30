@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+UNIT=${R1_OFFLINE_SESSION_UNIT:-r1-offline-session.service}
+READY_URL=${R1_CONNECTION_READY_URL:-http://127.0.0.1:8080/readyz}
+ROBOT_INTERFACE=${R1_ROBOT_INTERFACE:-enxb4b024be59fe}
+PRIMARY_ROBOT_IP=${R1_CONTROL_IP:-${R1_ROBOT_IP:-192.168.123.161}}
+CHECK_INTERVAL_SEC=${R1_CONNECTION_CHECK_INTERVAL_SEC:-5}
+FAILURE_LIMIT=${R1_CONNECTION_FAILURE_LIMIT:-4}
+RESTART_COOLDOWN_SEC=${R1_CONNECTION_RESTART_COOLDOWN_SEC:-20}
+FRAME_GRACE_SEC=${R1_CONNECTION_FRAME_GRACE_SEC:-90}
+PROBE_COOLDOWN_SEC=${R1_CONNECTION_PROBE_COOLDOWN_SEC:-30}
+RESTART_LIMIT=${R1_CONNECTION_RESTART_LIMIT:-2}
+
+# Desktop/service launches may overlap. Only one camera watchdog may own the
+# offline unit; otherwise their independent failure counters restart it twice.
+CONNECTION_RUNTIME=${XDG_RUNTIME_DIR:-/tmp/r1-connection-$(id -u)}
+mkdir -p -m 700 "${CONNECTION_RUNTIME}"
+exec 9>"${R1_CONNECTION_LOCK_FILE:-${CONNECTION_RUNTIME}/r1-connection-ensure.lock}"
+if ! flock --nonblock 9; then
+  echo 'CONNECT state=BRIDGE_READY detail=watchdog_already_running'
+  exit 0
+fi
+EXHIBITION_RUNTIME=${R1_EXHIBITION_RUNTIME_DIR:-${XDG_RUNTIME_DIR:+${XDG_RUNTIME_DIR}/r1-exhibition}}
+EXHIBITION_RUNTIME=${EXHIBITION_RUNTIME:-/tmp/r1-exhibition-$(id -u)}
+
+exhibition_active() {
+  # The manager holds this lock throughout handoff, running and cleanup.
+  # A leftover unlocked file after a crash must not disable camera recovery.
+  [[ -e "${EXHIBITION_RUNTIME}/session.lock" ]] \
+    && ! flock --shared --nonblock "${EXHIBITION_RUNTIME}/session.lock" true
+}
+
+video_ready() {
+  video_payload=$(curl -sS --max-time 2 "${READY_URL}" 2>/dev/null) || return 1
+  jq -e '
+    .ready == true and .source.has_frame != false and .source.stale != true
+  ' >/dev/null 2>&1 <<<"${video_payload}"
+}
+
+video_within_grace() {
+  # A brief outage is a waiting state, never a claim that video is ready.
+  jq -e --argjson grace "${FRAME_GRACE_SEC}" '
+    .source.has_frame == true
+    and ((.source.frame_age_s // 1e9) < $grace)
+  ' >/dev/null 2>&1 <<<"${video_payload:-}"
+}
+
+video_hub_available() (
+  # This watchdog only reads ServiceList. The manual r1-video-hub-ensure
+  # helper also switches remote services and must not run on a retry loop.
+  # DDS discovery uses the Ethernet interface, not a diagnostic ping address.
+  # shellcheck source=scripts/r1-unitree-sdk-env
+  source "${PROJECT_DIR}/scripts/r1-unitree-sdk-env" || exit 1
+  timeout --kill-after=1s 7s python3 - "${ROBOT_INTERFACE}" <<'PY'
+import sys
+
+try:
+    from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+    from unitree_sdk2py.go2.robot_state.robot_state_client import RobotStateClient
+
+    ChannelFactoryInitialize(0, sys.argv[1])
+    client = RobotStateClient()
+    client.SetTimeout(2.0)
+    client.Init()
+    code, services = client.ServiceList()
+    if code != 0 or services is None:
+        raise RuntimeError(f'ServiceList failed with code {code}')
+    video = next((service for service in services if service.name == 'video_hub'), None)
+    if video is None:
+        print('VIDEO_HUB state=UNAVAILABLE detail=not_in_ServiceList')
+        raise SystemExit(2)
+    if int(video.status) != 0:
+        print('VIDEO_HUB state=STOPPED detail=remote_service_not_running')
+        raise SystemExit(2)
+except Exception as error:
+    print(f'VIDEO_HUB state=UNAVAILABLE detail={error}')
+    raise SystemExit(1)
+
+print('VIDEO_HUB state=RUNNING read_only=true')
+PY
+)
+
+echo 'CONNECT state=SEARCHING'
+echo "CONNECT discovery=dds interface=${ROBOT_INTERFACE} diagnostic_ip=${PRIMARY_ROBOT_IP}"
+"${PROJECT_DIR}/scripts/r1-network-ensure"
+if command -v systemctl >/dev/null 2>&1 \
+  && systemctl --user cat "${UNIT}" >/dev/null 2>&1; then
+  while exhibition_active; do
+    echo 'CONNECT state=BRIDGE_READY detail=exhibition_owns_camera'
+    sleep "${CHECK_INTERVAL_SEC}"
+  done
+  systemctl --user start "${UNIT}"
+  for _ in $(seq 1 50); do
+    if systemctl --user is-active --quiet "${UNIT}"; then
+      echo 'CONNECT state=BRIDGE_READY'
+      break
+    fi
+    sleep 0.1
+  done
+  if ! systemctl --user is-active --quiet "${UNIT}"; then
+    echo 'CONNECT state=ERROR detail=offline_service_timeout'
+    exit 20
+  fi
+
+  # Keep this helper alive as the camera recovery watchdog.  Unitree
+  # videohub clients created while the robot is still booting can remain on a
+  # stale DDS request/response match. When read-only DDS confirms video_hub
+  # is running, a bounded local restart gives the camera a fresh client.
+  # It never starts a writer or sends a robot command.
+  if ! command -v curl >/dev/null 2>&1 \
+    || ! command -v jq >/dev/null 2>&1 \
+    || ! command -v timeout >/dev/null 2>&1 \
+    || ! command -v python3 >/dev/null 2>&1; then
+    echo 'CONNECT state=BRIDGE_READY detail=watchdog_tools_unavailable'
+    exit 0
+  fi
+
+  failures=0
+  recoveries=0
+  next_probe_at=0
+  while true; do
+    if exhibition_active; then
+      failures=0
+      sleep "${CHECK_INTERVAL_SEC}"
+      continue
+    fi
+    if video_ready; then
+      if (( failures > 0 )); then
+        echo 'CONNECT state=VIDEO_READY'
+      fi
+      failures=0
+      recoveries=0
+      next_probe_at=0
+    elif video_within_grace; then
+      failures=0
+    else
+      if (( failures < FAILURE_LIMIT )); then
+        failures=$((failures + 1))
+      fi
+      echo "CONNECT state=VIDEO_WAITING attempt=${failures}/${FAILURE_LIMIT}"
+      if (( failures >= FAILURE_LIMIT && SECONDS >= next_probe_at )); then
+        if exhibition_active; then
+          failures=0
+          continue
+        fi
+        hub_status=0
+        video_hub_available || hub_status=$?
+        next_probe_at=$((SECONDS + PROBE_COOLDOWN_SEC))
+        if (( hub_status != 0 )); then
+          echo 'CONNECT state=VIDEO_HUB_WAITING detail=remote_service_unavailable'
+          failures=0
+          sleep "${CHECK_INTERVAL_SEC}"
+          continue
+        fi
+        echo 'CONNECT state=VIDEO_HUB_READY'
+        # Camera service availability does not guarantee working image data.
+        # Bound local restarts per outage; the source continues its own DDS
+        # reconnect attempts while the offline bridge stays available to VR.
+        if (( recoveries >= RESTART_LIMIT )); then
+          echo 'CONNECT state=VIDEO_WAITING detail=local_recovery_limit'
+          sleep "${CHECK_INTERVAL_SEC}"
+          continue
+        fi
+        if exhibition_active; then
+          failures=0
+          continue
+        fi
+        echo 'CONNECT state=VIDEO_RECOVERING detail=restarting_read_only_session'
+        systemctl --user restart "${UNIT}"
+        recoveries=$((recoveries + 1))
+        failures=0
+        sleep "${RESTART_COOLDOWN_SEC}"
+        continue
+      fi
+    fi
+    sleep "${CHECK_INTERVAL_SEC}"
+  done
+fi
+
+# Portable fallback used before the optional user unit has been installed.
+# This process owns only the camera/VR bridge and never starts a robot writer.
+if exhibition_active; then
+  echo 'CONNECT state=BRIDGE_READY detail=exhibition_owns_camera'
+  exit 0
+fi
+echo 'CONNECT state=STARTING_LOCAL_BRIDGE'
+exec "${PROJECT_DIR}/scripts/r1-offline-session" r1

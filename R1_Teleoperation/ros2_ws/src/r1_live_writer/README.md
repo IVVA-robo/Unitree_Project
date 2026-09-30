@@ -72,10 +72,13 @@ smoke target runs the isolated `MockTransport` test on a disposable
 localhost-only ROS domain and loopback UDP; it does not open the R1 Ethernet
 interface or SDK transport.
 
-The SDK implementation uses only the official R1 interfaces found in the local
-Unitree SDK2 checkout: `r1::LocoClient` (`StandUp`, `GetFsmId`, `SetVelocity`,
-`StopMove`) and R1 `ArmSdk` on `rt/arm_sdk`. Legs are never commanded
-joint-by-joint. `StandUp()` is not considered a successful prepare by itself:
+The SDK implementation uses only official interfaces found in the local
+Unitree SDK2 checkout: `r1::LocoClient` for `StandUp`, `Start`, and
+`GetFsmId`; the typed `WirelessController_` publisher on
+`rt/wirelesscontroller` for the normal legs stage; and R1 `ArmSdk` on
+`rt/arm_sdk`. `SetVelocity`/`StopMove` remain available only to the isolated
+RPC diagnostic. Legs are never commanded joint-by-joint. `StandUp()` is not
+considered a successful prepare by itself:
 an async, cancellable worker polls `GetFsmId()` until FSM `4` has been observed
 for the required number of consecutive samples. Polling has a bounded timeout;
 an RPC error, an unstable FSM, cancellation, or timeout makes prepare fail
@@ -185,6 +188,15 @@ to completed re-arm it requires fresh Deadman, joint state, motor health,
 kill-clear, and all enabled command streams. It therefore remains false between the new Deadman
 press and the first fresh post-press command sample(s).
 
+Arm-only re-arm also has a neutral hold. The first absolute VR arm target after
+prepare, STOP, or KILL is captured as the controller's new neutral and is not
+sent as a displacement. The writer first publishes the fresh physical feedback
+seed, then accepts only deltas from that captured neutral. Those deltas still
+pass the immutable `0.25 rad`/`1.0 rad/s` slew limits and the measured-feedback
+follow watchdog. This allows a suspended or repositioned controller to be
+re-gripped without replaying its old offset; it does not disable automatic
+fail-closed stop on stale feedback, Deadman, or kill.
+
 Head control owns all 13 ArmSdk fields, seeds them from fresh feedback before
 the first SDK publish, and never emits a two-field head-only command.
 The incoming VR command is a headset-relative delta. The writer rate-limits
@@ -220,9 +232,11 @@ helper remains unit-tested for offline comparison but has no live entry path.
 Physical use still requires a new explicit on-site approval after indicator and
 pose/encoder correlation; a probe pass does **not** recenter the head or permit
 ordinary tracking.
-Locomotion exclusively uses the high-level `r1::LocoClient` path
-(`StandUp`, `SetVelocity`, `StopMove`); `rt/lowcmd` and raw leg-joint control
-are not used.
+The normal locomotion stage converts the already bounded physical velocity to
+the axes captured from Unitree Explore: forward → `ly`, lateral → `lx`, yaw →
+`rx`, with `ry=0` and `keys=0`. It publishes at 20 Hz. On neutral, STOP,
+Deadman release, watchdog failure, or teardown it publishes six all-zero
+frames over 300 ms. `rt/lowcmd` and raw leg-joint control are not used.
 
 When arms are enabled, the existing headset-relative IK node remains in
 `dry_run=true` and publishes ten named arm joints. The writer validates the
@@ -243,8 +257,39 @@ potentially delivered before its publisher boundary; if it fails ambiguously,
 cleanup sends only a bounded `weight=0` relinquish frame, never a new full-weight
 hold. A failed `StopMove()` or ArmSdk release keeps
 the output marked active, so the watchdog retries and reset/prepare stay
-blocked; only confirmed cleanup clears it. Stop/kill service responses remain
+blocked; only confirmed cleanup clears it. In normal wireless-controller mode,
+confirmed cleanup is the bounded six-frame all-zero burst; in the legacy RPC
+diagnostic it is `StopMove()`. Stop/kill service responses remain
 false while that cleanup or an asynchronous prepare cancellation is pending.
+On the R1, `StopMove()` is implemented by the vendor SDK as
+`SetVelocity(0, 0, 0)`. Some firmware rejects that RPC in the static standing
+FSM 4 (observed return code `127`). The same value was returned by `ai_sport`
+after `Start()` reached FSM 811. During a bounded legs-only test the body
+shifted but no foot stepped; consequently the ordinary writer treats `127` as
+an ambiguous failure. This value
+is an in-process RPC result returned by `LocoClient::SetVelocity`; it is not
+Linux process exit code 127, and it does not mean that the executable, ROS
+package, or a shared library could not be found. A capture of a successful
+walk from Unitree Explore established that the app does not call
+`SetVelocity` for its virtual stick. It publishes normalized axes on
+`rt/wirelesscontroller` at approximately 20 Hz; the robot first shifts its
+body/centre of mass and then steps. The ordinary legs stage now reproduces
+this typed stream. After each robot boot the operator selects blue **Run**,
+then closes the control screen and does not use the phone stick while our
+writer is active. A static-only session may therefore confirm
+STOP from five consecutive read-only FSM 4 samples, but only when this writer
+has never attempted `Start` (FSM 811) or `SetVelocity`. After either locomotion
+boundary, a nonzero `StopMove` remains ambiguous and cleanup stays latched.
+
+An independent R1 owner reported that high-level walking works in FSM `811`
+even while `SetVelocity()` returns `127`. The separate
+`make locomotion-127-probe` experiment can therefore provisionally admit that
+status for nonzero velocity only. It requires exact acknowledgements for
+`ai_sport 1.0.2.154`, a fully closed Unitree Explore app, and the experiment
+itself. The writer forces a forward-only command, caps it at `0.15 m/s`, sends
+at `10 Hz`, and ends the interval after `1.5 s`. The general transport still
+reports `127` as failure, `StopMove=127` is never accepted as confirmed stop,
+and the final velocity lease remains bounded to one second.
 `/r1/live_writer/kill` additionally latches locally and asks the central
 supervisor to assert `/r1/safety/kill`; `/reset_kill` requires a fresh external
 clear state. `make robot-stop` and `make robot-kill` assert the same central

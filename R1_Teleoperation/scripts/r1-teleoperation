@@ -46,6 +46,17 @@ START_SIMULATION="${R1_TELEOP_START_SIMULATION:-true}"
 START_VIDEO="${R1_TELEOP_START_VIDEO:-true}"
 VIDEO_MDNS="${R1_TELEOP_VIDEO_MDNS:-false}"
 
+# The physical Unitree camera client embeds the SDK's CycloneDDS build.  ROS
+# setup files prepend ROS libraries to LD_LIBRARY_PATH, which can make the
+# camera RPC silently time out (3104) even though the robot is reachable.  Pin
+# ROS to Fast DDS and restore the matched Unitree DDS libraries after all ROS
+# workspaces have been sourced.  This affects only the read-only Unitree video
+# source; mock, ROS, USB and RTSP sources keep their existing environment.
+if [[ "${VIDEO_SOURCE}" == unitree ]]; then
+  # shellcheck source=r1-unitree-sdk-env
+  source "${SCRIPT_DIR}/r1-unitree-sdk-env"
+fi
+
 case "${DISPLAY_MODE}" in true|false) ;; *) die 'R1_TELEOP_DISPLAY must be true or false' ;; esac
 case "${HEADSET_RELATIVE}" in true|false) ;; *) die 'R1_TELEOP_HEADSET_RELATIVE must be true or false' ;; esac
 case "${START_BRIDGE}" in true|false) ;; *) die 'R1_TELEOP_START_BRIDGE must be true or false' ;; esac

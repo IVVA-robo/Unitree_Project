@@ -29,10 +29,20 @@ r1_kinematics_control:
       require_calibration: true
       calibration_service: "/vr/calibrate_body"
       calibration_file: "~/Unitree_Project/Configs/Calibration/r1_body_calibration.json"
-      sync_tolerance_sec: 0.05
+      # Refuse arm targets after Deadman re-arm until the current controller
+      # neutral matches the saved calibration.  This catches stale left/right
+      # VR offsets before they become robot-reach IK targets.
+      neutral_pose_guard_enabled: true
+      neutral_pose_max_error_m: 0.15
+      # Pico controller samples can arrive one XR frame apart while the hands
+      # are moving.  Accept that measured jitter, but keep this below the
+      # 0.25 s pose/writer watchdogs so a tracking dropout still fails closed.
+      sync_tolerance_sec: 0.08
       # Set user_height_m to a measured value to override the HMD-height
       # estimate. Shoulder width and arm reach cannot be measured reliably
       # from HMD + controllers alone, so enter measured values when available.
+      # Shoulder width and the two offsets below are captured only by the next
+      # /vr/calibrate_body call; saved calibration is never silently rewritten.
       user_height_m: 0.0
       fallback_user_height_m: 1.75
       shoulder_width_m: 0.40
@@ -42,17 +52,23 @@ r1_kinematics_control:
       shoulder_height_ratio: 0.82
       chest_height_ratio: 0.72
       waist_height_ratio: 0.53
+      shoulder_height_offset_m: 0.0
       shoulder_forward_offset_m: -0.02
       body_position_tau_sec: 0.12
       body_yaw_tau_sec: 0.20
-      motion_scale: 1.15
+      # Head rotation is handled by the dedicated head pipeline. Keep the
+      # calibrated torso frame fixed so looking around does not move the arms.
+      follow_head_position: false
+      follow_head_yaw: false
+      # This scale acts on live hand deltas and does not require recalibration.
+      motion_scale: 0.50
       robot_reach_scale: 0.95
       max_behind_shoulder_m: 0.04
       # Keep left/right wrist targets at least 8 cm from the torso centre
       # plane; this prevents crossed-arm IK solutions when controllers cross.
       min_hand_lateral_m: 0.08
       max_input_jump_m: 0.25
-      max_target_speed_mps: 0.75
+      max_target_speed_mps: 0.25
 
     # Legacy world-relative calibration, used only when
     # headset_relative_enabled=false. The unequal recorded neutral points are
@@ -113,7 +129,7 @@ r1_kinematics_control:
     orientation_ema_tau_sec: 0.10
     finger_ema_tau_sec: 0.12
     trajectory_time_sec: 0.10
-    max_joint_velocity_rad_s: 1.0
+    max_joint_velocity_rad_s: 0.5
 
     pose_timeout_sec: 0.25
     joy_timeout_sec: 0.50
@@ -138,7 +154,11 @@ r1_kinematics_control:
       orientation_tolerance_rad: 0.04
       # The local R1 arm chain has five joints, so a full 6-D pose is
       # over-constrained.  Position is prioritized until wrist calibration.
-      orientation_weight: 0.05
+      # Keep orientation disabled for the first physical arm stage: the
+      # under-constrained roll solution otherwise adds a meaningful wrist-roll
+      # step even for a small lateral hand move.  Wrist roll therefore remains
+      # at the measured feedback seed until its VR sign/zero is commissioned.
+      orientation_weight: 0.0
       # Retry from the neutral pose if a tracking jump leaves numerical IK in
       # a bad local minimum. This never bypasses joint, speed, or residual
       # safety limits.
@@ -150,6 +170,7 @@ r1_kinematics_control:
     right_pose_topic: "/vr/right_controller/pose"
     joy_topic: "/vr/joy"
     active_topic: "/vr/teleop/active"
+    arms_neutral_topic: "/vr/actions/arms_neutral"
     cmd_vel_input_topic: "/vr/cmd_vel"
     # A separate simulation/hardware adapter owns the final /cmd_vel output.
     cmd_vel_output_topic: "/vr/safe_cmd_vel"

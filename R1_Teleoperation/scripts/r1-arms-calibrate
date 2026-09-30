@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Capture headset-relative hand neutral from an already-running VR/IK graph.
+# This command never creates a Unitree SDK client and never clears either kill.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_SETUP="${PROJECT_DIR}/ros2_ws/install/setup.bash"
+[[ -f "${WORKSPACE_SETUP}" ]] \
+  || WORKSPACE_SETUP="${PROJECT_DIR}/install/setup.bash"
+
+die() {
+  echo "[BLOCKED] $*" >&2
+  echo 'No robot command was sent and no kill latch was cleared.' >&2
+  exit 2
+}
+
+[[ $# -eq 0 ]] || die 'usage: r1-arms-calibrate'
+[[ -f /opt/ros/humble/setup.bash ]] || die 'ROS 2 Humble is unavailable'
+[[ -f "${WORKSPACE_SETUP}" ]] \
+  || die "workspace is not built: ${WORKSPACE_SETUP}"
+
+DOMAIN_ID=${R1_LIVE_ROS_DOMAIN_ID:-88}
+[[ "${DOMAIN_ID}" =~ ^[0-9]+$ ]] && ((10#${DOMAIN_ID} <= 232)) \
+  || die 'R1_LIVE_ROS_DOMAIN_ID must be 0..232'
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${WORKSPACE_SETUP}"
+# Join only the laptop-local ROS graph. This does not load Unitree SDK2.
+# shellcheck source=r1-physical-ros-env
+source "${SCRIPT_DIR}/r1-physical-ros-env"
+set -u
+export ROS_DOMAIN_ID="$((10#${DOMAIN_ID}))"
+export ROS_LOCALHOST_ONLY=1
+
+service_ready=false
+for _attempt in 1 2 3 4; do
+  services="$(timeout 5s ros2 service list --no-daemon --spin-time 1.0 \
+    --show-types 2>/dev/null || true)"
+  if grep -Fqx '/vr/calibrate_body [std_srvs/srv/Trigger]' <<<"${services}"; then
+    service_ready=true
+    break
+  fi
+  sleep 0.25
+done
+[[ ${service_ready} == true ]] \
+  || die 'body calibration service is absent; start the arm VR session first'
+
+deadman="$(timeout 4s ros2 topic echo --once /vr/teleop/active \
+  std_msgs/msg/Bool --no-daemon 2>/dev/null || true)"
+grep -Eq 'data:[[:space:]]*false' <<<"${deadman}" \
+  || die 'release Deadman before hand calibration'
+
+echo 'Capturing current HMD and both controllers as the zero reference...'
+set +e
+response="$(timeout 10s ros2 service call /vr/calibrate_body \
+  std_srvs/srv/Trigger '{}' 2>&1)"
+status=$?
+set -e
+printf '%s\n' "${response}"
+((status == 0)) || die 'body calibration service call failed'
+grep -Eq 'success[[:space:]]*=[[:space:]]*True|success:[[:space:]]*true' \
+  <<<"${response}" || die 'body calibration was rejected; keep HMD and both controllers visible'
+
+echo '[OK] Current arm pose was saved as the zero reference. No fixed T-pose is required.'

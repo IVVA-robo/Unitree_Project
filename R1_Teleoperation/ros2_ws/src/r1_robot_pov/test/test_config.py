@@ -22,6 +22,13 @@ def test_video_only_cannot_be_disabled():
         load_config(environ={'ROBOT_POV_VIDEO_ONLY': 'false'})
 
 
+def test_discovery_responder_can_be_disabled_for_live_bridge():
+    offline = load_config(environ={})
+    live = load_config(environ={'ROBOT_POV_DISCOVERY_ENABLED': 'false'})
+    assert offline.discovery_enabled is True
+    assert live.discovery_enabled is False
+
+
 def test_rtsp_credentials_are_redacted():
     config = load_config(environ={
         'ROBOT_POV_SOURCE': 'rtsp',
@@ -46,6 +53,17 @@ def test_public_config_does_not_expose_camera_source():
     })
     assert 'left_source' not in config.public_dict()
     assert 'secret' not in str(config.public_dict())
+
+
+def test_public_config_describes_stereo_fallback_for_unitree_source():
+    config = load_config(environ={
+        'ROBOT_POV_SOURCE': 'unitree',
+        'ROBOT_POV_LAYOUT': 'mono',
+    })
+    public = config.public_dict()
+    assert public['stereoFallback'] is True
+    assert public['stereoAvailable'] is False
+    assert public['stereoStatus'] == 'mono-to-both-eyes fallback'
 
 
 def test_rtsp_source_rejects_non_rtsp_and_malformed_urls():

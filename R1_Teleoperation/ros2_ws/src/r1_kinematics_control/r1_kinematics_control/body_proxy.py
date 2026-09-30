@@ -89,9 +89,16 @@ class BodyProxyConfig:
     shoulder_height_ratio: float = 0.82
     chest_height_ratio: float = 0.72
     waist_height_ratio: float = 0.53
+    shoulder_height_offset_m: float = 0.0
     shoulder_forward_offset_m: float = -0.02
     body_position_tau_sec: float = 0.12
     body_yaw_tau_sec: float = 0.20
+    # The HMD represents the robot head, not the operator's torso.  Physical
+    # teleoperation normally keeps the calibrated torso frame fixed so looking
+    # around cannot create a false two-arm command.  Simulation/avatar users
+    # can opt back into following HMD translation or yaw independently.
+    follow_head_position: bool = False
+    follow_head_yaw: bool = False
     motion_scale: float = 1.0
     robot_reach_scale: float = 0.95
     max_behind_shoulder_m: float = 0.04
@@ -105,6 +112,11 @@ class BodyProxyConfig:
 
     def validate(self):
         """Reject unsafe or nonsensical body-proxy parameters."""
+        scalar_values = tuple(
+            float(value) for value in self.__dict__.values()
+        )
+        if not all(math.isfinite(value) for value in scalar_values):
+            raise ValueError('body proxy parameters must be finite')
         positive = (
             self.fallback_user_height_m,
             self.shoulder_width_m,
@@ -135,6 +147,21 @@ class BodyProxyConfig:
         )
         if any(not 0.0 < ratio < 1.0 for ratio in ratios):
             raise ValueError('body proxy height ratios must be in (0, 1)')
+        bounded_tuning = {
+            'body_proxy.shoulder_height_offset_m': (
+                self.shoulder_height_offset_m, -0.15, 0.15
+            ),
+            'body_proxy.shoulder_forward_offset_m': (
+                self.shoulder_forward_offset_m, -0.12, 0.08
+            ),
+            'body_proxy.shoulder_width_m': (
+                self.shoulder_width_m, 0.25, 0.55
+            ),
+            'body_proxy.motion_scale': (self.motion_scale, 0.50, 1.20),
+        }
+        for name, (value, lower, upper) in bounded_tuning.items():
+            if not lower <= value <= upper:
+                raise ValueError(f'{name} must be within [{lower}, {upper}]')
 
 
 @dataclass
@@ -264,6 +291,15 @@ class BodyProxyTransformer:
         """Return true when both calibration and robot geometry are available."""
         return self.calibration is not None and bool(self._robot_neutral)
 
+    def neutral_targets(self):
+        """Return independent copies of the reviewed robot-neutral wrist poses."""
+        if not self._robot_neutral:
+            raise RuntimeError('robot neutral geometry is not available')
+        return {
+            side: transform.copy()
+            for side, transform in self._robot_neutral.items()
+        }
+
     def set_robot_geometry(
         self,
         left_shoulder,
@@ -307,7 +343,7 @@ class BodyProxyTransformer:
             self._filtered_yaw = _yaw_from_pose(head_world)
 
     def calibrate(self, head_world, left_world, right_world):
-        """Capture a neutral HMD/body pose and enforce bilateral symmetry."""
+        """Capture the current tracked pose as each hand's independent zero."""
         head_world = _as_pose(head_world, 'head_world')
         hands = {
             'left': _as_pose(left_world, 'left_world'),
@@ -319,11 +355,13 @@ class BodyProxyTransformer:
         body_hands = {
             side: body_from_world @ pose for side, pose in hands.items()
         }
-        left_position, right_position = _symmetric_positions(
-            body_hands['left'][:3, 3], body_hands['right'][:3, 3]
-        )
-        body_hands['left'][:3, 3] = left_position
-        body_hands['right'][:3, 3] = right_position
+        # Do not force the operator into a mirrored T-pose. Each controller's
+        # current body-relative transform is its own zero, so a session can
+        # begin from any comfortable, trackable pose. Robot geometry remains
+        # symmetrized in ``set_robot_geometry``; zero displacement therefore
+        # still maps both sides to the reviewed robot-neutral targets. The
+        # downstream writer additionally captures the first IK frame relative
+        # to fresh physical joint feedback, preventing an activation jump.
 
         head_height = float(head_world[2, 3])
         measured_height_valid = math.isfinite(head_height) and head_height > 0.5
@@ -340,6 +378,7 @@ class BodyProxyTransformer:
 
         shoulder_height = (
             self.config.shoulder_height_ratio * user_height - head_height
+            + self.config.shoulder_height_offset_m
         )
         shoulder_half_width = 0.5 * self.config.shoulder_width_m
         left_shoulder = np.array([
@@ -370,6 +409,23 @@ class BodyProxyTransformer:
         """Install a loaded calibration and clear transient filter state."""
         self.calibration = calibration
         self.reset_filter()
+
+    def neutral_position_errors(self, hands_body_local):
+        """Return each hand's distance from the saved calibration neutral."""
+        if self.calibration is None:
+            return {'left': math.inf, 'right': math.inf}
+        errors = {}
+        for side in ('left', 'right'):
+            pose = _as_pose(hands_body_local[side], f'{side}_hand_body')
+            neutral = (
+                self.calibration.left_neutral_body
+                if side == 'left'
+                else self.calibration.right_neutral_body
+            )
+            errors[side] = float(
+                np.linalg.norm(pose[:3, 3] - neutral[:3, 3])
+            )
+        return errors
 
     def update(self, head_world, left_world, right_world, dt):
         """Return symmetric, bounded robot wrist targets for one VR snapshot."""
@@ -429,13 +485,15 @@ class BodyProxyTransformer:
                 dt, self.config.body_position_tau_sec
             )
             yaw_alpha = exponential_alpha(dt, self.config.body_yaw_tau_sec)
-            self._filtered_head_position += position_alpha * (
-                position - self._filtered_head_position
-            )
-            self._filtered_yaw += yaw_alpha * _wrap_angle(
-                yaw - self._filtered_yaw
-            )
-            self._filtered_yaw = _wrap_angle(self._filtered_yaw)
+            if self.config.follow_head_position:
+                self._filtered_head_position += position_alpha * (
+                    position - self._filtered_head_position
+                )
+            if self.config.follow_head_yaw:
+                self._filtered_yaw += yaw_alpha * _wrap_angle(
+                    yaw - self._filtered_yaw
+                )
+                self._filtered_yaw = _wrap_angle(self._filtered_yaw)
         return _yaw_pose(self._filtered_head_position, self._filtered_yaw)
 
     def _limit_user_hand(self, side, body_hand):

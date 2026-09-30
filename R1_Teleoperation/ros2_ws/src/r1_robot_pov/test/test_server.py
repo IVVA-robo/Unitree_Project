@@ -10,6 +10,9 @@ from r1_robot_pov.config import PROFILES, load_config
 from r1_robot_pov.frame_pipeline import FrameHub
 import r1_robot_pov.server as server_module
 from r1_robot_pov.server import (
+    DISCOVERY_PROBE_PREFIX,
+    DISCOVERY_RESPONSE_PREFIX,
+    _DiscoveryProtocol,
     RobotPovWebServer,
     SERVER_SHUTDOWN_TIMEOUT_SEC,
     _fit_frame,
@@ -22,6 +25,45 @@ from r1_robot_pov.server import (
     _ordered_video_codecs,
     _set_video_bandwidth,
 )
+
+
+def test_discovery_protocol_answers_headset_probe():
+    class FakeTransport:
+        def __init__(self):
+            self.sent = []
+
+        def sendto(self, payload, address):
+            self.sent.append((payload, address))
+
+    transport = FakeTransport()
+    protocol = _DiscoveryProtocol(9090)
+    protocol.connection_made(transport)
+    protocol.datagram_received(
+        DISCOVERY_PROBE_PREFIX + b'abc123',
+        ('100.73.34.129', 45678),
+    )
+
+    assert transport.sent == [
+        (
+            f'{DISCOVERY_RESPONSE_PREFIX} 9090 abc123\n'.encode('ascii'),
+            ('100.73.34.129', 45678),
+        )
+    ]
+
+
+def test_discovery_protocol_ignores_unrelated_datagrams():
+    class FakeTransport:
+        def __init__(self):
+            self.sent = []
+
+        def sendto(self, payload, address):
+            self.sent.append((payload, address))
+
+    transport = FakeTransport()
+    protocol = _DiscoveryProtocol(9090)
+    protocol.connection_made(transport)
+    protocol.datagram_received(b'not-an-r1-probe', ('192.168.1.2', 1))
+    assert transport.sent == []
 
 
 def test_server_uses_bounded_shutdown_timeout(monkeypatch, tmp_path):

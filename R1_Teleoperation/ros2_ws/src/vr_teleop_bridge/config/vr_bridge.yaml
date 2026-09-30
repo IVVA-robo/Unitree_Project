@@ -10,6 +10,12 @@ vr_teleop_bridge:
     tracking_frame: "vr_tracking"
     packet_timeout_sec: 0.25
     deadzone: 0.15
+    # Commissioned Pico/OpenXR runtime: full physical travel is about 0.25.
+    # Normalize to [-1, 1] before applying deadzone and speed limits.
+    stick_input_scale: 4.0
+    # Straight travel within ~31 degrees of a cardinal axis; gradual diagonal.
+    # Applied before stick scaling/clipping. 0 disables direction assistance.
+    translation_axis_snap_ratio: 0.60
     # Conservative intent limits for initial simulation/testing.
     max_forward_mps: 0.35
     max_lateral_mps: 0.25
@@ -19,3 +25,11 @@ vr_teleop_bridge:
     yaw_sign: -1.0
     max_position_m: 5.0
     max_datagram_bytes: 4096
+    # Default commissioning behavior remains the physical left-grip Deadman.
+    # The exhibition manager must explicitly select session_arm and then call
+    # /vr/teleop/arm_session after a complete tracking snapshot is visible.
+    activation_mode: "deadman"
+    tracking_grace_sec: 2.0
+    recovery_blend_sec: 0.5
+    button_debounce_sec: 0.05
+    safety_profile: "standard"

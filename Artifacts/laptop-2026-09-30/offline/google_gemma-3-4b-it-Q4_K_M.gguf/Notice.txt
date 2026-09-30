@@ -1,0 +1,12 @@
+Gemma is provided under and subject to the Gemma Terms of Use found at ai.google.dev/gemma/terms
+
+This distribution and all use of these Gemma-derived model weights are subject
+to LICENSE.txt, including Section 3.2 and the incorporated Gemma Prohibited Use
+Policy at https://ai.google.dev/gemma/prohibited_use_policy .
+
+The local file google_gemma-3-4b-it-Q4_K_M.gguf is a quantized derivative.
+The author/source of that quantization has not been verified from this file.
+For this backup only, the existing bytes were split into ordered 512 MiB
+part-* files on 2026-09-30. No weight values were modified by this export.
+manifest.json records the original checksum and each part's checksum.
+This model is not required for the USB robot-control path.

@@ -37,7 +37,7 @@ namespace RobotPov.Editor
         private const string OutputEnvironmentVariable =
             "UNITREE_COMBINED_APK_PATH";
 
-        private const string DefaultLaptopHost = "192.168.8.120";
+        private const string DefaultLaptopHost = "192.168.8.9";
         // Pico decodes MJPEG on Unity's main thread. Start conservatively so
         // video cannot starve the 72 Hz UDP sender during the first combined test.
         private const string DefaultProfile = "bad-wifi";
@@ -292,6 +292,7 @@ namespace RobotPov.Editor
                 configuration.Profile;
             RequireProperty(serialized, "autoStart").boolValue = true;
             RequireProperty(serialized, "headLocked").boolValue = true;
+            SetEnum(RequireProperty(serialized, "displaySurface"), "FlatQuad");
             SetEnum(RequireProperty(serialized, "videoLayout"), "Mono");
             RequireProperty(serialized, "screenDistance").floatValue =
                 ScreenDistance;
@@ -312,6 +313,7 @@ namespace RobotPov.Editor
             RequireRelative(runtimeConfig, "profile").stringValue =
                 configuration.Profile;
             RequireRelative(runtimeConfig, "connectOnEnable").boolValue = true;
+            SetEnum(RequireRelative(runtimeConfig, "displaySurface"), "FlatQuad");
             SetEnum(RequireRelative(runtimeConfig, "videoLayout"), "Mono");
             RequireRelative(runtimeConfig, "swapEyes").boolValue = false;
             RequireRelative(runtimeConfig, "flipVertical").boolValue = false;
@@ -399,6 +401,8 @@ namespace RobotPov.Editor
                     != configuration.Profile
                 || !RequireProperty(videoSerialized, "autoStart").boolValue
                 || !RequireProperty(videoSerialized, "headLocked").boolValue
+                || RequireProperty(videoSerialized, "displaySurface").enumValueIndex
+                    != EnumIndex(RequireProperty(videoSerialized, "displaySurface"), "FlatQuad")
                 || RequireProperty(
                         videoSerialized,
                         "videoLayout").enumValueIndex
@@ -450,6 +454,8 @@ namespace RobotPov.Editor
                 "screenDistance").floatValue;
 
             if (layout.enumValueIndex != EnumIndex(layout, "Mono")
+                || RequireRelative(runtimeConfig, "displaySurface").enumValueIndex
+                    != EnumIndex(RequireRelative(runtimeConfig, "displaySurface"), "FlatQuad")
                 || screenMode.enumValueIndex
                     != EnumIndex(screenMode, "HeadLocked")
                 || Math.Abs(distance - ScreenDistance) > FloatTolerance
@@ -582,6 +588,7 @@ namespace RobotPov.Editor
             byte[] bytes = address.GetAddressBytes();
             bool isPrivateIpv4 = bytes.Length == 4
                 && (bytes[0] == 10
+                    || (bytes[0] == 100 && bytes[1] >= 64 && bytes[1] <= 127)
                     || (bytes[0] == 172
                         && bytes[1] >= 16
                         && bytes[1] <= 31)

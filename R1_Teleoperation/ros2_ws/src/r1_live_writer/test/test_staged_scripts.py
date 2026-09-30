@@ -1,5 +1,6 @@
 """Static contracts for the fail-closed physical commissioning wrappers."""
 
+import os
 from pathlib import Path
 import subprocess
 
@@ -18,12 +19,89 @@ def script(name):
 
 def test_all_staged_wrappers_have_valid_bash_syntax():
     """Catch a broken safety wrapper before anyone reaches commissioning."""
-    wrappers = sorted(SCRIPTS.glob('r1-*'))
+    wrappers = [
+        path for path in sorted(SCRIPTS.glob('r1-*'))
+        if path.read_bytes().splitlines()[0] == b'#!/usr/bin/env bash'
+    ]
     assert wrappers
     subprocess.run(
         ('bash', '-n', *(str(path) for path in wrappers)),
         check=True,
     )
+
+
+def test_live_auto_setup_discovers_pico_and_restores_exact_offline_unit():
+    """Interactive launch owns the reviewed bridge handoff for its lifetime."""
+    text = script('r1-live-auto-run')
+    for required in (
+        'r1-exhibition-offline-handoff',
+        'adb',
+        'ROBOT_VR_SOURCE_IP',
+        'ip -o -4 addr show dev wlan0',
+        'UnityPlayerActivity',
+        'trap restore_offline EXIT',
+        '"${HANDOFF}" stop',
+        '"${HANDOFF}" start',
+    ):
+        assert required in text
+    assert 'pkill' not in text
+    assert 'killall' not in text
+
+    for wrapper in (
+        'r1-arms-live-test',
+        'r1-arms-running-live-test',
+        'r1-head-live-test',
+        'r1-head-running-live-test',
+        'r1-locomotion-live-test',
+        'r1-locomotion-127-probe',
+    ):
+        assert 'r1-live-auto-run' in script(wrapper)
+
+    full = script('r1-teleop-live')
+    assert 'r1-live-session" full' in full
+    assert 'r1-live-auto-run' not in full
+
+
+def test_physical_locomotion_uses_captured_run_and_excludes_phone_control():
+    """The panel selects captured Run/FSM 811 without a competing phone stick."""
+    text = script('r1-live-session')
+    locomotion = text[text.index('locomotion)'):text.index('full)')]
+
+    assert 'ENABLE_LOCOMOTION=true' in locomotion
+    assert 'LOCOMOTION_COMMAND_MODE=wireless_controller' in locomotion
+    assert 'require_exact ROBOT_CONFIRM_RUN_MODE 1' in text
+    assert 'require_exact ROBOT_CONFIRM_NO_PHONE_CONTROL 1' in text
+    assert 'SetFsmId calls used here: 4 and 811' in text
+    assert 'acknowledgement authorizes the session to select Run/FSM 811 itself' in text
+    assert 'locomotion_command_mode:="${LOCOMOTION_COMMAND_MODE}"' in text
+    assert 'wireless_controller_rate_hz:="${WIRELESS_CONTROLLER_RATE_HZ}"' in text
+    full = text[text.index('  full)'):text.index('  *) die', text.index('  full)'))]
+    assert 'ENABLE_HEAD=true' in full
+    assert 'ENABLE_ARMS=true' in full
+    assert 'ENABLE_LOCOMOTION=true' in full
+
+
+def test_status_127_probe_has_a_separate_force_stopped_app_gate():
+    """The ordinary locomotion stage must never inherit this experiment."""
+    text = script('r1-live-session')
+    start = text.index('  locomotion-127-probe)')
+    stage = text[start:text.index('  full)', start)]
+
+    assert 'ENABLE_HEAD=false' in stage
+    assert 'ENABLE_ARMS=false' in stage
+    assert 'ENABLE_LOCOMOTION=true' in stage
+    assert 'VELOCITY_STATUS_127_PROBE=true' in stage
+    assert 'PREPARE_SPEED_MODE=1' in stage
+    assert 'require_exact ROBOT_CONFIRM_VELOCITY_127_PROBE 1' in text
+    assert 'ROBOT_CONFIRM_UNITREE_EXPLORE_CLOSED-} != 1' in text
+    assert 'ROBOT_CONFIRM_NO_PHONE_CONTROL-} != 1' in text
+    assert 'require_exact ROBOT_CONFIRM_AI_SPORT_1_0_2_154 1' in text
+    assert 'LEG_SPEED_SCALE=0.75' in text
+    assert (
+        'velocity_status_127_probe_enabled:="${VELOCITY_STATUS_127_PROBE}"'
+        in text
+    )
+    assert 'prepare_speed_mode:="${PREPARE_SPEED_MODE}"' in text
 
 
 def test_arm_check_is_read_only_and_cannot_delegate_to_live_session():
@@ -59,11 +137,13 @@ def test_sdk_preflight_half_duplex_override_is_explicit_and_cdc_only():
 
 
 def test_sdk_preflight_uses_direct_topic_discovery_for_safety_checks():
-    """An incomplete `topic list` result must not hide feedback or writers."""
+    """One coherent topic snapshot must expose feedback and forbidden writers."""
     text = script('r1-sdk-preflight')
     assert 'ros2 topic type /r1/sdk/joint_states --no-daemon' in text
     assert 'sensor_msgs/msg/JointState --no-daemon' in text
-    assert 'ros2 topic type "$forbidden" --no-daemon' in text
+    assert 'ros2 topic list --no-daemon --spin-time 1.5' in text
+    assert "coherent ROS topic snapshot was unavailable" in text
+    assert 'command topic is present: $forbidden' in text
     assert 'topic list -t --no-daemon' not in text
 
 
@@ -90,6 +170,13 @@ def test_dry_run_wrappers_omit_optional_empty_launch_values():
         in dry_run
     assert 'if [[ -n ${VR_SOURCE_IP} ]]' in head
     assert 'launch_arguments+=("vr_source_ip:=${VR_SOURCE_IP}")' in head
+
+    live = script('r1-live-session')
+    assert 'VR_SOURCE_LAUNCH_ARG=()' in live
+    assert 'if [[ -n ${VR_SOURCE_IP} ]]' in live
+    assert 'VR_SOURCE_LAUNCH_ARG+=("vr_source_ip:=${VR_SOURCE_IP}")' \
+        in live
+    assert 'vr_source_ip:="${VR_SOURCE_IP}"' not in live
 
 
 def test_ue200_driver_test_is_exact_nonpersistent_and_reversible():
@@ -140,6 +227,8 @@ def test_ownership_probe_has_a_new_ack_and_legacy_recenter_is_blocked():
     live = script('r1-live-session')
     prepare = script('r1-robot-prepare')
     assert 'head-probe)' in live
+    head_probe = live[live.index('  head-probe)'):live.index('  recenter)')]
+    assert 'PREPARE_ENTER_LOCOMOTION=true' in head_probe
     assert 'recenter)' in live
     assert 'full physical recenter is suspended' in live
     assert 'require_exact ROBOT_CONFIRM_HEAD_OWNERSHIP_PROBE 1' in live
@@ -153,6 +242,19 @@ def test_ownership_probe_has_a_new_ack_and_legacy_recenter_is_blocked():
     assert 'head_ownership_probe_confirmed' in prepare
     assert 'ROBOT_CONFIRM_HEAD_RECENTER' not in live
     assert 'ROBOT_CONFIRM_HEAD_RECENTER' not in prepare
+
+
+def test_head_running_stage_enters_811_without_velocity_pipeline():
+    live = script('r1-live-session')
+    stage = live[live.index('  head-running)'):live.index('  arms)')]
+    assert 'ENABLE_HEAD=true' in stage
+    assert 'ENABLE_ARMS=false' in stage
+    assert 'ENABLE_LOCOMOTION=false' in stage
+    assert 'PREPARE_ENTER_LOCOMOTION=true' in stage
+    wrapper = script('r1-head-running-live-test')
+    assert 'r1-live-session" head-running' in wrapper
+    assert 'SetVelocity' in wrapper
+    assert 'head-running-live:' in MAKEFILE
 
     request = script('r1-robot-head-ownership-probe')
     for required in (
@@ -196,6 +298,19 @@ def test_ownership_probe_has_a_new_ack_and_legacy_recenter_is_blocked():
         assert 'r1-live-session' not in legacy
 
 
+def test_full_stage_combines_reviewed_head_arms_and_wireless_locomotion():
+    """The exhibition entry point uses one combined freshness barrier."""
+    live = script('r1-live-session')
+    stage = live[live.index('  full)'):live.index('  *) die', live.index('  full)'))]
+    assert 'ENABLE_HEAD=true' in stage
+    assert 'ENABLE_ARMS=true' in stage
+    assert 'ENABLE_LOCOMOTION=true' in stage
+    assert 'PREPARE_ENTER_LOCOMOTION=true' in stage
+    assert 'LOCOMOTION_COMMAND_MODE=wireless_controller' in stage
+    wrapper = script('r1-teleop-live')
+    assert 'r1-live-session" full' in wrapper
+
+
 def test_physical_graph_pins_fastdds_and_matched_unitree_cyclonedds():
     """ROS and SDK DDS implementations must never resolve one mixed ABI."""
     ros_env = script('r1-physical-ros-env')
@@ -232,20 +347,14 @@ def test_reader_reuse_requires_live_node_service_and_fresh_finite_feedback():
     """A stale DDS topic/type must never suppress reader startup."""
     live = script('r1-live-session')
     for required in (
-        "grep -Fxq '/r1_sdk_transport'",
-        'ros2 param get /r1_sdk_transport sdk_enabled',
-        'fresh_finite_reader_sample',
-        'ros2 topic echo --once --full-length',
-        'name_count} -eq 26',
-        'position_count} -eq 26',
-        'bad_value} -eq 0',
+        'r1-exhibition-reader-probe',
+        'reader_probe_status',
+        '10) START_READER=false',
         'START_READER=false',
         'preflight_args+=(--no-reader)',
     ):
         assert required in live
-    assert live.index("grep -Fxq '/r1_sdk_transport'") \
-        < live.index('START_READER=false')
-    assert live.index('fresh_finite_reader_sample') \
+    assert live.index('r1-exhibition-reader-probe') \
         < live.index('START_READER=false')
 
 
@@ -254,8 +363,9 @@ def test_preflight_never_uses_topic_type_as_reader_liveness():
     text = script('r1-sdk-preflight')
     decision = text[text.index("section 'Read-only ROS transport'"):
                     text.index('# Query the exact topic directly.')]
-    assert "grep -Fxq '/r1_sdk_transport'" in decision
-    assert 'ros2 param list /r1_sdk_transport' in decision
+    assert 'r1-exhibition-reader-probe' in decision
+    assert 'reader_probe_status == 10' in decision
+    assert 'reader_probe_status != 0' in decision
     assert 'topic type /r1/sdk/joint_states' not in decision
     assert 'inconsistent/stale /r1_sdk_transport discovery' in decision
 
@@ -293,18 +403,37 @@ def test_prepare_only_calls_an_existing_reviewed_writer():
     assert 'calibrated=(true|True)' in text
 
 
+def test_live_session_reuses_only_a_live_authorized_killed_supervisor():
+    """A stale dry-run supervisor must not inherit a physical live session."""
+    text = script('r1-live-session')
+    reuse = text[text.index('if [[ ${START_SUPERVISOR} == false ]]'):
+                 text.index("echo 'R1 PHYSICAL WRITER SESSION")]
+    emergency_stop = reuse.index('/r1/safety/emergency_stop')
+    status = reuse.index('/r1/safety/get_status')
+    assert emergency_stop < status
+    assert (
+        'mode=live-authorized dry_run=false enable_actuation=true '
+        'off_charger=true clear_area=true estop_ready=true'
+        in reuse
+    )
+    assert 'kill=true reason=emergency_stop_service' in reuse
+    assert 'non-live or mismatched policy' in reuse
+
+
 def test_prepare_retries_read_only_parameter_discovery_fail_closed():
     """A transient empty graph sample may delay prepare, never bypass gates."""
     text = script('r1-robot-prepare')
-    start = text.index('get_live_writer_param()')
+    start = text.index("parameter_dump=''")
     end = text.index('require_param transport', start)
     discovery = text[start:end]
     assert 'for attempt in 1 2 3 4' in discovery
-    assert '--no-daemon --spin-time 1.0' in discovery
-    assert "pattern='^String value is: .+$'" in discovery
-    assert "pattern='^Boolean value is: (true|false)$'" in discovery
-    assert 'grep -Eqi -- "${pattern}"' in discovery
+    assert 'ros2 param dump /r1_live_writer' in discovery
+    assert '--no-daemon --spin-time 1.5' in discovery
+    assert "[[ -n ${parameter_dump} ]]" in discovery
+    assert 'dump_scalar()' in discovery
+    assert '[[ ${value} == true || ${value} == false ]]' in discovery
     assert 'return 1' in discovery
+    assert text.count('ros2 param dump /r1_live_writer') == 1
     assert 'get_live_writer_param enable_head boolean' in text
     assert 'get_live_writer_param enable_locomotion boolean' in text
     assert 'get_live_writer_param enable_arms boolean' in text
@@ -327,8 +456,38 @@ def test_prepare_waits_for_the_structured_post_prepare_state():
     assert 'prepare_result=.*stable FSM 4' not in text
 
 
-def test_prepare_blocks_offcentre_or_moving_head_before_kill_release():
-    """A known sideways seed must be rejected before StandUp is possible."""
+def test_prepare_reports_stand_only_without_claiming_start_for_arms():
+    """The operator message must distinguish arms-only FSM 4 from FSM 811."""
+    text = script('r1-robot-prepare')
+    assert "if grep -Fqi 'boolean value is: true'" in text
+    assert "<<<\"${prepare_enter_locomotion}\"" in text
+    assert 'get_live_writer_param prepare_enter_locomotion boolean' in text
+    assert 'enable_locomotion' in text
+    assert 'official R1 StandUp is confirmed by stable FSM 4.' in text
+    assert (
+        'Locomotion is disabled: Start/FSM 811 and velocity commands were not requested.'
+        in text
+    )
+    assert 'head/arms-only mode skips the neutral-velocity gate.' in text
+
+
+def test_arms_running_wrapper_is_explicit_and_fail_closed():
+    """Running-controller arm commissioning never enables stick velocity."""
+    text = script('r1-arms-running-live-test')
+    assert 'r1-live-session' in text
+    assert 'arms-running' in text
+    live = script('r1-live-session')
+    stage = live[live.index('  arms-running)'):live.index('  head-probe)')]
+    assert 'ENABLE_ARMS=true' in stage
+    assert 'ENABLE_LOCOMOTION=false' in stage
+    assert 'PREPARE_ENTER_LOCOMOTION=true' in stage
+    assert 'SetVelocity' not in stage
+    assert 'arms-running-live:' in MAKEFILE
+    assert './scripts/r1-arms-running-live-test' in MAKEFILE
+
+
+def test_prepare_auto_centers_stable_exhibition_head_and_blocks_invalid_or_moving_seed():
+    """Exhibition accepts bounded centering; wider or moving seeds still block."""
     text = script('r1-robot-prepare')
     sample_check = text.index("class HeadSeedCheck(Node):")
     five_samples = text.index('len(node.samples) < 5', sample_check)
@@ -345,25 +504,197 @@ def test_prepare_blocks_offcentre_or_moving_head_before_kill_release():
     assert sample_check < five_samples < seed_window < velocity_limit < release
     assert "'head_yaw_joint', 'head_pitch_joint'" in text[sample_check:release]
     assert "len(message.name) != len(message.velocity)" in text[sample_check:release]
-    assert 'yaw_limit = 2.0071 if probe_mode else 0.35' \
-        in text[sample_check:release]
-    assert 'pitch_limit = 0.6283 if probe_mode else 0.25' \
-        in text[sample_check:release]
+    precheck = text[sample_check:release]
+    assert 'auto_center_mode = sys.argv[2].lower()' in precheck
+    assert 'feedback_margin = 0.01' in precheck
+    assert 'yaw_limit = 2.0071 + feedback_margin' in precheck
+    assert 'pitch_limit = 0.6283 + feedback_margin' in precheck
+    assert 'yaw_limit = 0.35' in precheck
+    assert 'pitch_limit = 0.25' in precheck
     assert 'abs(sample[0]) > yaw_limit' in text[sample_check:release]
     assert 'abs(sample[1]) > pitch_limit' in text[sample_check:release]
     assert 'abs(sample[2]) > 0.05' in text[sample_check:release]
     assert 'abs(sample[3]) > 0.05' in text[sample_check:release]
+    assert '[AUTO_CENTER]' in precheck
+    assert 'head_auto_center_required=true' in text[sample_check:release]
+
+    prepare = text.index('call_trigger /r1/live_writer/prepare')
+    wait_prepare = text.index('wait_for_prepare_confirmation', prepare)
+    wait_center = text.index('wait_for_head_auto_center', wait_prepare)
+    assert prepare < wait_prepare < wait_center
+    assert 'head_auto_center=complete' in text
+    assert 'head_auto_center_complete=true' in text
+    # StandUp/Start may center the head after the wider precheck. A fresh
+    # stable normal seed is an equally valid outcome, not a 45s timeout.
+    assert 'head_tracking_seed_verified=true' in text
 
 
-def test_stop_and_kill_reach_writer_then_independent_supervisor():
-    """Both stop layers remain explicit and the physical E-stop is documented."""
+def test_stop_and_kill_assert_central_latch_before_writer_cleanup():
+    """The independent latch must not wait behind an unresponsive writer."""
     stop = script('r1-robot-stop')
     kill = script('r1-robot-kill')
     assert '/r1/live_writer/stop' in stop
     assert '/r1/live_writer/kill' in kill
-    for text in (stop, kill):
+    for text, writer_endpoint in (
+        (stop, '/r1/live_writer/stop'),
+        (kill, '/r1/live_writer/kill'),
+    ):
         assert '/r1/safety/emergency_stop' in text
         assert 'physical E-stop' in text
+        assert text.index('/r1/safety/emergency_stop') \
+            < text.index(writer_endpoint)
+        central_call = text[text.index('kill_response='):text.index(writer_endpoint)]
+        assert '"${TRIGGER_CLIENT}" /r1/safety/emergency_stop 4' \
+            in central_call
+        assert 'timeout ' not in text
+        assert 'ros2 service call' not in text
+
+
+def test_bounded_trigger_client_owns_one_deadline_without_rclpy_signal_shutdown():
+    """STOP diagnostics must not be corrupted by GNU timeout SIGTERM."""
+    text = script('r1-call-trigger-service')
+    for required in (
+        'time.monotonic()',
+        'SignalHandlerOptions.NO',
+        'client.wait_for_service(',
+        'client.call_async(Trigger.Request())',
+        'executor.spin_once(',
+        '[UNAVAILABLE]',
+        '[TIMEOUT]',
+    ):
+        assert required in text
+    assert 'subprocess' not in text
+    assert 'os.kill' not in text
+
+
+def test_prepare_failure_relocks_central_supervisor_before_writer_cleanup():
+    """A prepare error must latch central kill without waiting on the writer."""
+    text = script('r1-robot-prepare')
+    relock = text[text.index('emergency_relock() {'):
+                  text.index('trap emergency_relock ERR')]
+    central = relock.index('/r1/safety/emergency_stop')
+    writer = relock.index('/r1/live_writer/kill')
+    assert central < writer
+    assert relock.index('timeout 4s ros2 service call') < central
+    assert relock.index('timeout 5s ros2 service call', central) < writer
+
+
+def test_stop_and_kill_reach_central_latch_when_writer_is_unavailable(tmp_path):
+    """A missing writer must not make the independent kill path unreachable."""
+    fake_client = """#!/usr/bin/env bash
+set -eu
+endpoint=$1
+duration=$2
+printf '%s %s\\n' "${duration}" "${endpoint}" >> "${R1_TEST_CALL_LOG}"
+if [[ ${endpoint} == /r1/safety/emergency_stop ]]; then
+  printf 'response:\\n  success: true\\n  message: central latch asserted\\n'
+  exit 0
+fi
+printf '[UNAVAILABLE] %s was not available within %ss\\n' \
+  "${endpoint}" "${duration}" >&2
+exit 2
+"""
+
+    for name, writer_endpoint in (
+        ('r1-robot-stop', '/r1/live_writer/stop'),
+        ('r1-robot-kill', '/r1/live_writer/kill'),
+    ):
+        project = tmp_path / name
+        scripts = project / 'scripts'
+        install = project / 'ros2_ws' / 'install'
+        scripts.mkdir(parents=True)
+        install.mkdir(parents=True)
+        staged_script = scripts / name
+        staged_script.write_text(script(name), encoding='utf-8')
+        trigger_client = scripts / 'r1-call-trigger-service'
+        trigger_client.write_text(fake_client, encoding='utf-8')
+        trigger_client.chmod(0o755)
+        (scripts / 'r1-physical-ros-env').write_text(':\n', encoding='utf-8')
+        (install / 'setup.bash').write_text(':\n', encoding='utf-8')
+
+        call_log = project / 'calls.log'
+        environment = os.environ.copy()
+        environment['R1_TEST_CALL_LOG'] = str(call_log)
+        result = subprocess.run(
+            ('bash', str(staged_script)),
+            check=False,
+            capture_output=True,
+            env=environment,
+            text=True,
+            timeout=5,
+        )
+
+        assert result.returncode == 1
+        assert call_log.read_text(encoding='utf-8').splitlines() == [
+            '4 /r1/safety/emergency_stop',
+            f'8 {writer_endpoint}',
+        ]
+        assert 'central latch asserted' in result.stdout
+        assert '[UNAVAILABLE]' in result.stdout
+        assert "rcl node's context is invalid" not in result.stdout
+        assert 'could not be confirmed on every layer' in result.stderr
+
+
+def test_stop_and_kill_reject_unsuccessful_trigger_responses(tmp_path):
+    """A completed Trigger with success=false is never accepted as STOP."""
+    project = tmp_path / 'rejected'
+    scripts = project / 'scripts'
+    install = project / 'ros2_ws' / 'install'
+    scripts.mkdir(parents=True)
+    install.mkdir(parents=True)
+    staged_script = scripts / 'r1-robot-stop'
+    staged_script.write_text(script('r1-robot-stop'), encoding='utf-8')
+    trigger_client = scripts / 'r1-call-trigger-service'
+    trigger_client.write_text(
+        """#!/usr/bin/env bash
+set -eu
+printf 'response:\\n  success: false\\n  message: cleanup pending\\n'
+exit 1
+""",
+        encoding='utf-8',
+    )
+    trigger_client.chmod(0o755)
+    (scripts / 'r1-physical-ros-env').write_text(':\n', encoding='utf-8')
+    (install / 'setup.bash').write_text(':\n', encoding='utf-8')
+    result = subprocess.run(
+        ('bash', str(staged_script)),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 1
+    assert result.stdout.count('success: false') == 2
+    assert 'could not be confirmed on every layer' in result.stderr
+
+
+def test_arm_calibration_is_local_and_requires_deadman_release():
+    """Calibration may save VR neutral but must never authorize actuation."""
+    text = script('r1-arms-calibrate')
+    deadman = text.index('/vr/teleop/active')
+    calibrate = text.index(
+        'ros2 service call /vr/calibrate_body', deadman
+    )
+    assert deadman < calibrate
+    assert "data:[[:space:]]*false" in text[deadman:calibrate]
+    assert 'r1-physical-ros-env' in text
+    assert 'r1-unitree-sdk-env' not in text
+    assert 'ROBOT_ENABLE_ACTUATION' not in text
+    assert '/r1/live_writer/reset_kill' not in text
+    assert '/r1/safety/set_kill' not in text
+
+
+def test_exhibition_calibration_captures_arms_then_head_without_sdk():
+    """Complete RUN startup must save both local VR neutral references."""
+    wrapper = script('r1-exhibition-calibrate')
+    text = script('r1-exhibition-ros-client')
+    arms = text.index('"/vr/calibrate_body"')
+    head = text.index('"/r1/head/calibrate_neutral"', arms)
+    assert arms < head
+    assert 'r1-exhibition-ros-client' in wrapper
+    assert 'r1-unitree-sdk-env' not in wrapper + text
+    assert 'ROBOT_ENABLE_ACTUATION' not in text
+    assert '/r1/live_writer/reset_kill' not in text
 
 
 def test_one_live_domain_and_required_make_targets_are_preserved():
@@ -385,7 +716,10 @@ def test_one_live_domain_and_required_make_targets_are_preserved():
         'robot-prepare:',
         'head-live-dry-arm:',
         'head-live-test:',
+        'arms-calibrate:',
+        'arms-running-live:',
         'locomotion-live-test:',
+        'locomotion-127-probe:',
         'teleop-live:',
         'robot-stop:',
         'robot-kill:',

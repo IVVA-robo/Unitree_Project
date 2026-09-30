@@ -74,6 +74,18 @@ def test_probe_sequence_is_zero_weight_ramp_out_verify_return_confirm():
     assert "transport_->command_head(" not in probe
 
 
+def test_probe_accepts_fsm811_zero_without_calling_it_visual_center():
+    service = function_body(NODE, "void on_probe_head_ownership(")
+    probe = function_body(NODE, "void process_head_recenter(")
+    assert "yaw is too close to zero" not in service
+    assert "positive_room" in probe
+    assert "negative_room" in probe
+    assert "positive_room >= negative_room ? 1.0 : -1.0" in probe
+    assert "insufficient_yaw_room_for_probe" in probe
+    assert "head_absolute_limits_.yaw_max" in probe
+    assert "head_absolute_limits_.yaw_min" in probe
+
+
 def test_probe_immutable_ceilings_are_tiny_and_seed_is_stable_first():
     validation = function_body(NODE, "void validate_parameters() const")
     for ceiling in (
@@ -139,24 +151,48 @@ def test_probe_uses_its_own_velocity_ceiling_and_outbound_baseline():
 
 def test_only_yaw_target_changes_and_other_twelve_fields_are_watched():
     publish = function_body(NODE, "bool publish_head_probe_frame(")
-    seed_copy = publish.index("held_head_target_ = head_recenter_seed_")
+    measured_handoff = publish.index("held_head_target_ = latest_state_")
+    settled_hold = publish.index("held_head_target_ = head_probe_full_weight_seed_")
     pitch_write = publish.index(
-        "held_head_target_[kHeadPitchIndex]", seed_copy
+        "held_head_target_[kHeadPitchIndex]", settled_hold
     )
     yaw_write = publish.index("held_head_target_[kHeadYawIndex]", pitch_write)
     weighted_send = publish.index("command_head_weighted(", yaw_write)
-    assert seed_copy < pitch_write < yaw_write < weighted_send
+    assert measured_handoff < settled_hold < pitch_write < yaw_write < weighted_send
+    assert "single weight covers all 13 upper-body joints" in publish
 
     feedback = function_body(NODE, "std::string head_probe_feedback_failure(")
     assert "if (index == kHeadYawIndex)" in feedback
     assert "unexpected_other_joint_motion" in feedback
-    assert "head_probe_other_joint_tolerance_rad_" in feedback
+    assert "head_probe_other_joint_limit(index)" in feedback
 
     probe = function_body(NODE, "void process_head_recenter(")
     assert "head_probe_min_progress_rad_" in probe
     assert "outbound_feedback_reversed" in probe
     assert "yaw_moved_in_wrong_direction" in probe
     assert "yaw_exceeded_probe_excursion" in probe
+
+
+def test_running_handoff_has_a_bounded_settling_envelope_then_restores_tight_guard():
+    validation = function_body(NODE, "void validate_parameters()")
+    assert "head_probe_ramp_other_joint_tolerance_rad_ > 0.02" in validation
+    assert (
+        "head_probe_ramp_other_joint_tolerance_rad_ <\n"
+        "      head_probe_other_joint_tolerance_rad_"
+    ) in validation
+
+    limit = function_body(NODE, "double head_probe_other_joint_limit(")
+    assert "HeadRecenterState::RampingWeight" in limit
+    assert "index <= kWaistYawIndex" in limit
+    assert "head_probe_ramp_other_joint_tolerance_rad_" in limit
+    assert "head_probe_other_joint_tolerance_rad_" in limit
+
+    probe = function_body(NODE, "void process_head_recenter(")
+    ramp_complete = probe.index("if (weight >= 1.0)")
+    capture = probe.index("head_probe_full_weight_seed_ = latest_state_", ramp_complete)
+    valid = probe.index("head_probe_full_weight_seed_valid_ = true", capture)
+    probe_out = probe.index("HeadRecenterState::ProbingOut", valid)
+    assert ramp_complete < capture < valid < probe_out
 
 
 def test_success_releases_then_reports_pass_and_latches_kill():

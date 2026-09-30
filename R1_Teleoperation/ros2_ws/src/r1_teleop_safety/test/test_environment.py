@@ -73,3 +73,12 @@ def test_downstream_writer_can_only_assert_the_supervisor_kill():
     assert '/r1/safety/kill_request' in config
     assert "self._reason = 'downstream_kill_request'" in source
     assert 'if message is None or not bool(message.data):' in source
+
+
+def test_safety_kill_heartbeat_has_margin_over_writer_timeout():
+    """The retained kill state must also refresh well inside the 0.5 s gate."""
+    package = Path(__file__).parents[1]
+    source = (package / 'r1_teleop_safety' / 'supervisor.py').read_text()
+    config = (package / 'config' / 'r1_teleop_safety.yaml').read_text()
+    assert "declare_parameter('publish_rate_hz', 20.0)" in source
+    assert 'publish_rate_hz: 20.0' in config

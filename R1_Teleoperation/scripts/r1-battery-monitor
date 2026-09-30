@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SETUP="${PROJECT_DIR}/ros2_ws/install/setup.bash"
+[[ -f ${SETUP} ]] || { echo 'BATTERY status=UNAVAILABLE detail=workspace_not_built'; exit 20; }
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${SETUP}"
+source "${PROJECT_DIR}/scripts/r1-unitree-sdk-env"
+set -u
+
+INTERFACE=${R1_ROBOT_INTERFACE:-enxb4b024be59fe}
+BINARY="${PROJECT_DIR}/ros2_ws/install/r1_sdk_transport/lib/r1_sdk_transport/r1_battery_observer"
+[[ -x ${BINARY} ]] || { echo 'BATTERY status=UNAVAILABLE detail=observer_not_built'; exit 20; }
+exec "${BINARY}" --interface "${INTERFACE}"

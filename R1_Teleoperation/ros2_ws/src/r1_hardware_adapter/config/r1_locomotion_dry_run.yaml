@@ -8,7 +8,7 @@ r1_locomotion_dry_run:
     # Inputs supplied by vr_teleop_bridge.  The controller independently
     # validates the deadman and never trusts an upstream velocity gate alone.
     input_topic: "/vr/cmd_vel"
-    active_topic: "/vr/teleop/active"
+    active_topic: "/vr/locomotion/active"
     # A supervisor should publish this Bool with reliable + transient-local
     # QoS so the startup kill state reaches a late-joining controller.
     emergency_stop_topic: "/r1/safety/kill"

@@ -34,6 +34,7 @@ from .body_proxy import (
 from .filters import PoseEMA, ScalarEMA
 from .kinematics import IKResult, SerialChain, urdf_joint_names
 from .math3d import matrix_quaternion, pose_matrix
+from .pose_range import ArmPoseRange
 
 
 @dataclass
@@ -87,6 +88,8 @@ class R1KinematicsControl(Node):
         self._right_closure_filter = ScalarEMA()
         self._hands_commanded = False
         self._enabled_last_tick = False
+        self._body_neutral_checked = False
+        self._arms_neutral_requested = False
         self._last_tick = time.monotonic()
         self._last_debug_log = 0.0
         self._warning_times: Dict[str, float] = {}
@@ -192,6 +195,12 @@ class R1KinematicsControl(Node):
             Bool, self._active_topic, self._active_callback, command_qos
         )
         self.create_subscription(
+            Bool,
+            self._arms_neutral_topic,
+            self._arms_neutral_callback,
+            command_qos,
+        )
+        self.create_subscription(
             String,
             self._robot_description_topic,
             self._description_callback,
@@ -209,6 +218,22 @@ class R1KinematicsControl(Node):
 
         self._load_initial_description()
         self._load_body_calibration()
+        self._arm_range_probe = None
+        self._arm_range_probe_targets = {}
+        probe_file = str(self.get_parameter('arm_range_probe_file').value)
+        self._arm_range_probe_fraction = float(
+            self.get_parameter('arm_range_probe_fraction').value)
+        if probe_file:
+            if not self._headset_relative_enabled or set(self._arms) != {'left', 'right'}:
+                raise ValueError('arm range probe requires calibrated body mapping and both URDF chains')
+            self._arm_range_probe = ArmPoseRange.load(
+                os.path.expanduser(probe_file),
+                {side: runtime.chain for side, runtime in self._arms.items()})
+            if not 0.0 < self._arm_range_probe_fraction <= self._arm_range_probe.max_probe_fraction:
+                raise ValueError('arm range probe exceeds validated profile limit')
+            self.get_logger().warning(
+                f'Supervised arm range probe enabled: {self._arm_range_probe_fraction:.0%}; '
+                f'rate capped at {min(self._max_joint_velocity, self._arm_range_probe.max_probe_rate):.2f} rad/s')
         self.get_logger().info(
             'R1 kinematics control started in safe state; '
             f'headset_relative={self._headset_relative_enabled}; '
@@ -216,6 +241,8 @@ class R1KinematicsControl(Node):
         )
 
     def _declare_parameters(self):
+        self.declare_parameter('arm_range_probe_file', '')
+        self.declare_parameter('arm_range_probe_fraction', 0.10)
         self.declare_parameter('control_rate_hz', 60.0)
         self.declare_parameter('pose_timeout_sec', 0.25)
         self.declare_parameter('joy_timeout_sec', 0.5)
@@ -265,7 +292,12 @@ class R1KinematicsControl(Node):
             'body_proxy.calibration_file',
             '~/Unitree_Project/Configs/Calibration/r1_body_calibration.json',
         )
-        self.declare_parameter('body_proxy.sync_tolerance_sec', 0.05)
+        # A saved calibration must match the operator's starting neutral pose.
+        # Without this check a stale controller offset can reach the IK solver.
+        self.declare_parameter('body_proxy.neutral_pose_guard_enabled', True)
+        self.declare_parameter('exhibition_session_mode', False)
+        self.declare_parameter('body_proxy.neutral_pose_max_error_m', 0.15)
+        self.declare_parameter('body_proxy.sync_tolerance_sec', 0.08)
         self.declare_parameter('body_proxy.user_height_m', 0.0)
         self.declare_parameter('body_proxy.fallback_user_height_m', 1.75)
         self.declare_parameter('body_proxy.shoulder_width_m', 0.40)
@@ -275,9 +307,12 @@ class R1KinematicsControl(Node):
         self.declare_parameter('body_proxy.shoulder_height_ratio', 0.82)
         self.declare_parameter('body_proxy.chest_height_ratio', 0.72)
         self.declare_parameter('body_proxy.waist_height_ratio', 0.53)
+        self.declare_parameter('body_proxy.shoulder_height_offset_m', 0.0)
         self.declare_parameter('body_proxy.shoulder_forward_offset_m', -0.02)
         self.declare_parameter('body_proxy.body_position_tau_sec', 0.12)
         self.declare_parameter('body_proxy.body_yaw_tau_sec', 0.20)
+        self.declare_parameter('body_proxy.follow_head_position', False)
+        self.declare_parameter('body_proxy.follow_head_yaw', False)
         self.declare_parameter('body_proxy.motion_scale', 1.0)
         self.declare_parameter('body_proxy.robot_reach_scale', 0.95)
         self.declare_parameter('body_proxy.max_behind_shoulder_m', 0.04)
@@ -314,6 +349,9 @@ class R1KinematicsControl(Node):
         self.declare_parameter('right_pose_topic', '/vr/right_controller/pose')
         self.declare_parameter('joy_topic', '/vr/joy')
         self.declare_parameter('active_topic', '/vr/teleop/active')
+        self.declare_parameter(
+            'arms_neutral_topic', '/vr/actions/arms_neutral'
+        )
         self.declare_parameter('cmd_vel_input_topic', '/vr/cmd_vel')
         self.declare_parameter('cmd_vel_output_topic', '/cmd_vel')
         # Simulation-only hold for the otherwise uncommanded waist joints.
@@ -388,6 +426,13 @@ class R1KinematicsControl(Node):
             value('body_proxy.calibration_service')
         )
         self._body_calibration_file = str(value('body_proxy.calibration_file'))
+        self._body_neutral_guard_enabled = bool(
+            value('body_proxy.neutral_pose_guard_enabled')
+        )
+        self._exhibition_session_mode = bool(value('exhibition_session_mode'))
+        self._body_neutral_max_error = float(
+            value('body_proxy.neutral_pose_max_error_m')
+        )
         self._body_sync_tolerance = float(
             value('body_proxy.sync_tolerance_sec')
         )
@@ -405,6 +450,9 @@ class R1KinematicsControl(Node):
             ),
             chest_height_ratio=float(value('body_proxy.chest_height_ratio')),
             waist_height_ratio=float(value('body_proxy.waist_height_ratio')),
+            shoulder_height_offset_m=float(
+                value('body_proxy.shoulder_height_offset_m')
+            ),
             shoulder_forward_offset_m=float(
                 value('body_proxy.shoulder_forward_offset_m')
             ),
@@ -412,6 +460,10 @@ class R1KinematicsControl(Node):
                 value('body_proxy.body_position_tau_sec')
             ),
             body_yaw_tau_sec=float(value('body_proxy.body_yaw_tau_sec')),
+            follow_head_position=bool(
+                value('body_proxy.follow_head_position')
+            ),
+            follow_head_yaw=bool(value('body_proxy.follow_head_yaw')),
             motion_scale=float(value('body_proxy.motion_scale')),
             robot_reach_scale=float(value('body_proxy.robot_reach_scale')),
             max_behind_shoulder_m=float(
@@ -459,6 +511,7 @@ class R1KinematicsControl(Node):
         self._right_pose_topic = str(value('right_pose_topic'))
         self._joy_topic = str(value('joy_topic'))
         self._active_topic = str(value('active_topic'))
+        self._arms_neutral_topic = str(value('arms_neutral_topic'))
         self._cmd_vel_input_topic = str(value('cmd_vel_input_topic'))
         self._cmd_vel_output_topic = str(value('cmd_vel_output_topic'))
         self._waist_hold_enabled = bool(value('waist_hold_enabled'))
@@ -508,12 +561,28 @@ class R1KinematicsControl(Node):
             raise ValueError('ik.recovery_min_improvement_m must be non-negative')
         if self._ik_recovery_retry_sec <= 0.0:
             raise ValueError('ik.recovery_retry_sec must be positive')
-        if self._body_sync_tolerance <= 0.0:
-            raise ValueError('body_proxy.sync_tolerance_sec must be positive')
+        if (
+            not math.isfinite(self._body_sync_tolerance)
+            or self._body_sync_tolerance <= 0.0
+            or self._body_sync_tolerance > 0.10
+        ):
+            raise ValueError(
+                'body_proxy.sync_tolerance_sec must be within (0, 0.10]'
+            )
+        if (
+            not math.isfinite(self._body_neutral_max_error)
+            or self._body_neutral_max_error <= 0.0
+            or self._body_neutral_max_error > 0.50
+        ):
+            raise ValueError(
+                'body_proxy.neutral_pose_max_error_m must be within (0, 0.50]'
+            )
         if not self._debug_topic_prefix.startswith('/'):
             raise ValueError('debug_topic_prefix must be an absolute ROS topic')
         if not self._head_pose_topic or not self._body_calibration_service:
             raise ValueError('head pose topic and body calibration service are required')
+        if not self._arms_neutral_topic.startswith('/'):
+            raise ValueError('arms_neutral_topic must be an absolute ROS topic')
         if math.isclose(self._trigger_released, self._trigger_pressed):
             raise ValueError('trigger released and pressed values must differ')
         if self._waist_hold_enabled:
@@ -713,6 +782,7 @@ class R1KinematicsControl(Node):
         for runtime in self._arms.values():
             runtime.filter.reset()
             runtime.was_stale = True
+        self._body_neutral_checked = False
         response.success = True
         response.message = (
             f'Calibrated: head_height={calibration.head_height_m:.3f} m, '
@@ -741,9 +811,21 @@ class R1KinematicsControl(Node):
             self._publish_zero_velocity()
             self._publish_hold_trajectories()
             self._body_proxy.reset_filter()
+            if not self._exhibition_session_mode:
+                self._body_neutral_checked = False
             for runtime in self._arms.values():
                 runtime.was_stale = True
             self._enabled_last_tick = False
+
+    def _arms_neutral_callback(self, message):
+        requested = bool(message.data)
+        if requested == self._arms_neutral_requested:
+            return
+        self._arms_neutral_requested = requested
+        if requested:
+            self.get_logger().info('arms_reset_to_neutral')
+        else:
+            self.get_logger().info('arms VR-follow restored')
 
     def _joy_callback(self, message):
         self._joy_arrival = time.monotonic()
@@ -815,6 +897,12 @@ class R1KinematicsControl(Node):
             self._publish_zero_velocity()
 
         if not enabled:
+            # Commissioning checks neutral at each Deadman press. Exhibition
+            # LOCK/reconnect keeps a previously verified calibration: the
+            # operator may have legitimately moved since the first RUN.
+            # Explicit body calibration still resets the verification flag.
+            if not self._exhibition_session_mode:
+                self._body_neutral_checked = False
             return
         self._publish_arm_trajectory(now, dt)
         self._publish_hand_trajectories(now, dt)
@@ -853,6 +941,31 @@ class R1KinematicsControl(Node):
             self._arm_publisher.publish(message)
 
     def _solve_arm(self, runtime, transformed, dt):
+        if self._arm_range_probe is not None:
+            target = self._arm_range_probe_targets.get(runtime.side)
+            if target is None:
+                return None
+            # First frame must be model-neutral for the physical writer's
+            # independent feedback-relative takeover. Do not seed this preview
+            # from physical feedback and then drift toward model-zero.
+            if runtime.command is None:
+                runtime.command = (
+                    self._arm_range_probe.reset_target(runtime.side)
+                    if self._arm_range_probe.absolute_targets
+                    else runtime.chain.neutral_positions())
+                return runtime.command.copy()
+            step = min(self._max_joint_velocity, self._arm_range_probe.max_probe_rate) * max(0.0, min(dt, .05))
+            delta = target - runtime.command
+            # A common interpolation factor preserves the convex pose range.
+            distance = float(np.max(np.abs(delta)))
+            candidate = runtime.command + delta * min(1.0, step / max(distance, 1e-12))
+            candidate = np.clip(candidate, runtime.chain.lower, runtime.chain.upper)
+            if not self._arm_range_probe.contains_target(runtime.side, candidate):
+                self._warn('probe_envelope_' + runtime.side, 'Arm range target held at configured envelope')
+                return runtime.command.copy()
+            runtime.command = candidate
+            runtime.solution = runtime.command.copy()
+            return runtime.command.copy()
         if runtime.was_stale:
             runtime.filter.reset()
             runtime.was_stale = False
@@ -937,6 +1050,7 @@ class R1KinematicsControl(Node):
         return targets
 
     def _headset_relative_targets(self, now, dt):
+        self._arm_range_probe_targets = {}
         poses = self._fresh_tracking_poses(now, warn=True)
         if poses is None:
             for runtime in self._arms.values():
@@ -965,12 +1079,54 @@ class R1KinematicsControl(Node):
             self._warn('body_proxy_update', f'Body proxy rejected poses: {exc}')
             return None
         self._publish_body_debug(result, now)
+        if (
+            self._body_neutral_guard_enabled
+            and not self._body_neutral_checked
+        ):
+            errors = self._body_proxy.neutral_position_errors(
+                result.hands_body_local
+            )
+            largest_side = max(errors, key=errors.get)
+            largest_error = errors[largest_side]
+            rest_start = False
+            if largest_error > self._body_neutral_max_error and self._arm_range_probe is not None:
+                rest_start = self._arm_range_probe.allows_rest_start({
+                    side: result.hands_body_local[side][:3, 3] - getattr(
+                        self._body_proxy.calibration, side + '_neutral_body')[:3, 3]
+                    for side in ('left', 'right')})
+            if largest_error > self._body_neutral_max_error and not rest_start:
+                for runtime in self._arms.values():
+                    runtime.was_stale = True
+                self._warn(
+                    'body_calibration_neutral_mismatch',
+                    f'Starting pose differs from saved body calibration: '
+                    f'{largest_side} error={largest_error:.3f} m > '
+                    f'{self._body_neutral_max_error:.3f} m; release deadman '
+                    f'and call {self._body_calibration_service}',
+                )
+                return None
+            self._body_neutral_checked = True
         for side, reasons in result.clamped.items():
             if reasons:
                 self._warn(
                     f'{side}_body_clamp',
                     f'{side} body target limited by {", ".join(reasons)}',
                 )
+        if self._arms_neutral_requested:
+            if self._arm_range_probe is not None:
+                self._arm_range_probe_targets = {
+                    side: self._arm_range_probe.reset_target(side)
+                    for side, runtime in self._arms.items()}
+            # PoseEMA plus the independent joint-velocity limit below make
+            # both the transition to neutral and the return to VR-follow
+            # continuous.  The teleop/session latch remains unchanged.
+            return self._body_proxy.neutral_targets()
+        if self._arm_range_probe is not None:
+            for side in ('left', 'right'):
+                neutral = getattr(self._body_proxy.calibration, side + '_neutral_body')
+                delta = result.hands_body_local[side][:3, 3] - neutral[:3, 3]
+                self._arm_range_probe_targets[side] = self._arm_range_probe.probe_target(
+                    side, delta, self._arm_range_probe_fraction)
         return result.targets
 
     def _fresh_tracking_poses(self, now, warn):
@@ -1213,7 +1369,8 @@ class R1KinematicsControl(Node):
             ]
             point = JointTrajectoryPoint()
             point.positions = [
-                float(self._joint_positions.get(name, fallback))
+                float(fallback if self._arm_range_probe is not None
+                      else self._joint_positions.get(name, fallback))
                 for runtime in runtimes
                 for name, fallback in zip(runtime.chain.joint_names, runtime.command)
             ]

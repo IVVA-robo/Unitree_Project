@@ -161,6 +161,19 @@ def test_motor_health_is_derived_from_all_configured_lowstate_slots():
     assert "'motor_health_topic': motor_health_topic" in LAUNCH
 
 
+def test_motor_health_transition_logs_preserve_the_primary_cause():
+    """A live stop log must distinguish a slot fault from lost LowState."""
+    for token in (
+        'explicit motor fault: %s',
+        'motor health recovered: %s',
+        'LowState became missing, stale, or nonfinite',
+        'motor_health_observed_',
+        'last_motor_health_',
+        'lowstate_available_',
+    ):
+        assert token in SOURCE
+
+
 def test_preflight_requires_both_boolean_and_detailed_motor_health():
     """Physical preflight must independently verify health and diagnostics."""
     script = PREFLIGHT.read_text()

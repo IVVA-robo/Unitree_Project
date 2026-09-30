@@ -33,7 +33,7 @@ if [[ -z "${LAPTOP_HOST}" ]]; then
 fi
 if [[ "${LAPTOP_HOST}" =~ \.local$ ]]; then
   : # mDNS keeps the video endpoint stable when the laptop DHCP address changes.
-elif [[ ! "${LAPTOP_HOST}" =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.) ]]; then
+elif [[ ! "${LAPTOP_HOST}" =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) ]]; then
   echo "UNITREE_LAPTOP_HOST must be a private-LAN IPv4 address or a .local name; got '${LAPTOP_HOST}'." >&2
   exit 1
 fi

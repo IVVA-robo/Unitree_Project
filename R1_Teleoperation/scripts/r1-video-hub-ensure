@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+INTERFACE=${R1_ROBOT_INTERFACE:-enxb4b024be59fe}
+
+# The Unitree SDK carries a matched CycloneDDS runtime.  Keep it ahead of ROS
+# libraries before constructing the read-only/service-management client.
+# shellcheck source=r1-unitree-sdk-env
+source "${PROJECT_DIR}/scripts/r1-unitree-sdk-env"
+export PYTHONPATH="${PROJECT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+
+exec python3 -m operator_panel.video_hub --interface "${INTERFACE}"

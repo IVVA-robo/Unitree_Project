@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Start the fail-closed arm writer and allow prepare to enter the official
+# FSM 811 controller without creating the joystick velocity pipeline.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ $# -eq 0 ]] || { echo 'Usage: r1-arms-running-live-test' >&2; exit 2; }
+exec "${SCRIPT_DIR}/r1-live-auto-run" "${SCRIPT_DIR}/r1-live-session" arms-running

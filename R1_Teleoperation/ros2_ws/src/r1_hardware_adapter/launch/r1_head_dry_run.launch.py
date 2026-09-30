@@ -19,6 +19,7 @@ def generate_launch_description():
         # ROS graph on the robot-facing Ethernet interface.
         SetEnvironmentVariable('ROS_LOCALHOST_ONLY', '1'),
         DeclareLaunchArgument('use_sim_time', default_value='false'),
+        DeclareLaunchArgument('response_config', default_value=config),
         Node(
             package='r1_hardware_adapter',
             executable='r1_head_dry_run',
@@ -26,6 +27,7 @@ def generate_launch_description():
             output='screen',
             parameters=[
                 config,
+                LaunchConfiguration('response_config'),
                 {
                     'use_sim_time': ParameterValue(
                         LaunchConfiguration('use_sim_time'), value_type=bool

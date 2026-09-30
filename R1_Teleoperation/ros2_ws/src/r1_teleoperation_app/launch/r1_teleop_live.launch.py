@@ -162,12 +162,33 @@ def generate_launch_description():
     r1_urdf = LaunchConfiguration('urdf_path')
 
     declarations = [
+        DeclareLaunchArgument('response_config', default_value=PathJoinSubstitution([
+            FindPackageShare('r1_teleoperation_app'), 'config', 'response_standard.yaml'
+        ])),
         DeclareLaunchArgument('ros_domain_id', default_value='88'),
         DeclareLaunchArgument('network_interface',
                               default_value='enxb4b024be59fe'),
         DeclareLaunchArgument('udp_bind_address', default_value='0.0.0.0'),
         DeclareLaunchArgument('udp_port', default_value='9090'),
+        DeclareLaunchArgument('discovery_port', default_value='9091'),
         DeclareLaunchArgument('vr_source_ip', default_value=''),
+        DeclareLaunchArgument('vr_transport', default_value='lan'),
+        DeclareLaunchArgument('pause_on_packet_timeout', default_value='false'),
+        DeclareLaunchArgument('activation_mode', default_value='deadman'),
+        DeclareLaunchArgument('tracking_grace_sec', default_value='2.0'),
+        DeclareLaunchArgument('recovery_blend_sec', default_value='0.5'),
+        DeclareLaunchArgument('shoulder_height_offset_m', default_value='0.0'),
+        DeclareLaunchArgument('shoulder_forward_offset_m', default_value='-0.02'),
+        DeclareLaunchArgument('shoulder_width_m', default_value='0.40'),
+        DeclareLaunchArgument('arm_motion_scale', default_value='1.15'),
+        # Physical live defaults are the immutable slow-safe ceilings. The
+        # panel/wrapper may only provide smaller positive values.
+        DeclareLaunchArgument('max_forward_mps', default_value='0.20'),
+        DeclareLaunchArgument('max_lateral_mps', default_value='0.12'),
+        DeclareLaunchArgument('max_yaw_rps', default_value='0.35'),
+        DeclareLaunchArgument(
+            'exhibition_session_mode', default_value='false'
+        ),
         DeclareLaunchArgument(
             'motor_health_topic',
             default_value='/r1/sdk_transport/motors_healthy',
@@ -182,8 +203,24 @@ def generate_launch_description():
         DeclareLaunchArgument('start_readonly_reader', default_value='false'),
         DeclareLaunchArgument('enable_head', default_value='false'),
         DeclareLaunchArgument('enable_arms', default_value='false'),
+        DeclareLaunchArgument('arm_sdk_frame_profile', default_value='legacy'),
+        DeclareLaunchArgument('sequential_control', default_value='false'),
         DeclareLaunchArgument('enable_locomotion', default_value='false'),
+        DeclareLaunchArgument(
+            'locomotion_command_mode', default_value='loco_rpc'
+        ),
+        DeclareLaunchArgument(
+            'wireless_controller_rate_hz', default_value='20.0'
+        ),
+        DeclareLaunchArgument(
+            'velocity_status_127_probe_enabled', default_value='false'
+        ),
         DeclareLaunchArgument('enable_prepare', default_value='false'),
+        DeclareLaunchArgument(
+            'prepare_enter_locomotion', default_value='false'
+        ),
+        DeclareLaunchArgument('prepare_speed_mode', default_value='-1'),
+        DeclareLaunchArgument('static_prepare_mode', default_value='false'),
         DeclareLaunchArgument(
             'head_absolute_envelope_confirmed', default_value='false'
         ),
@@ -225,7 +262,19 @@ def generate_launch_description():
                     'ros_localhost_only': '1',
                     'bind_address': LaunchConfiguration('udp_bind_address'),
                     'udp_port': LaunchConfiguration('udp_port'),
+                    'discovery_port': LaunchConfiguration('discovery_port'),
                     'allowed_source_ip': source_ip,
+                    'pause_on_packet_timeout': LaunchConfiguration('pause_on_packet_timeout'),
+                    'activation_mode': LaunchConfiguration('activation_mode'),
+                    'tracking_grace_sec': LaunchConfiguration(
+                        'tracking_grace_sec'
+                    ),
+                    'recovery_blend_sec': LaunchConfiguration(
+                        'recovery_blend_sec'
+                    ),
+                    'max_forward_mps': LaunchConfiguration('max_forward_mps'),
+                    'max_lateral_mps': LaunchConfiguration('max_lateral_mps'),
+                    'max_yaw_rps': LaunchConfiguration('max_yaw_rps'),
                 },
                 IfCondition(LaunchConfiguration('start_bridge')),
             ),
@@ -241,13 +290,31 @@ def generate_launch_description():
                     'joint_states_topic': '/r1/sdk/joint_states',
                     'arm_command_topic': arm_trajectory_topic,
                     'waist_hold_enabled': 'false',
+                    'shoulder_height_offset_m': LaunchConfiguration(
+                        'shoulder_height_offset_m'
+                    ),
+                    'shoulder_forward_offset_m': LaunchConfiguration(
+                        'shoulder_forward_offset_m'
+                    ),
+                    'shoulder_width_m': LaunchConfiguration(
+                        'shoulder_width_m'
+                    ),
+                    'arm_motion_scale': LaunchConfiguration(
+                        'arm_motion_scale'
+                    ),
+                    'response_config': LaunchConfiguration('response_config'),
+                    'exhibition_session_mode': LaunchConfiguration('exhibition_session_mode'),
+                    'max_forward_mps': LaunchConfiguration('max_forward_mps'),
+                    'max_lateral_mps': LaunchConfiguration('max_lateral_mps'),
+                    'max_yaw_rps': LaunchConfiguration('max_yaw_rps'),
                 },
                 IfCondition(LaunchConfiguration('enable_arms')),
             ),
             _include(
                 'r1_hardware_adapter',
                 'launch/r1_head_dry_run.launch.py',
-                {'use_sim_time': 'false'},
+                {'use_sim_time': 'false',
+                 'response_config': LaunchConfiguration('response_config')},
                 IfCondition(LaunchConfiguration('enable_head')),
             ),
             _include(
@@ -256,7 +323,7 @@ def generate_launch_description():
                 {
                     'mode': LaunchConfiguration('profile'),
                     'input_topic': '/vr/cmd_vel',
-                    'active_topic': '/vr/teleop/active',
+                    'active_topic': '/vr/locomotion/active',
                     'emergency_stop_topic': '/r1/safety/kill',
                 },
                 IfCondition(LaunchConfiguration('enable_locomotion')),
@@ -266,13 +333,41 @@ def generate_launch_description():
                 'launch/r1_live_writer.launch.py',
                 {
                     'transport': LaunchConfiguration('transport'),
+                    'arm_sdk_frame_profile': LaunchConfiguration('arm_sdk_frame_profile'),
+                    'sequential_control': LaunchConfiguration('sequential_control'),
+                    'response_config': LaunchConfiguration('response_config'),
                     'send_commands': LaunchConfiguration('send_commands'),
                     'enable_head': LaunchConfiguration('enable_head'),
                     'enable_arms': LaunchConfiguration('enable_arms'),
                     'enable_locomotion': LaunchConfiguration(
                         'enable_locomotion'
                     ),
+                    'locomotion_command_mode': LaunchConfiguration(
+                        'locomotion_command_mode'
+                    ),
+                    'wireless_controller_rate_hz': LaunchConfiguration(
+                        'wireless_controller_rate_hz'
+                    ),
+                    'velocity_status_127_probe_enabled': LaunchConfiguration(
+                        'velocity_status_127_probe_enabled'
+                    ),
                     'enable_prepare': LaunchConfiguration('enable_prepare'),
+                    'prepare_enter_locomotion': LaunchConfiguration(
+                        'prepare_enter_locomotion'
+                    ),
+                    'prepare_speed_mode': LaunchConfiguration(
+                        'prepare_speed_mode'
+                    ),
+                    'static_prepare_mode': LaunchConfiguration(
+                        'static_prepare_mode'
+                    ),
+                    'exhibition_session_mode': LaunchConfiguration(
+                        'exhibition_session_mode'
+                    ),
+                    'exhibition_session_armed_on_start': 'false',
+                    'exhibition_reconnect_grace_sec': LaunchConfiguration(
+                        'tracking_grace_sec'
+                    ),
                     'head_absolute_envelope_confirmed': LaunchConfiguration(
                         'head_absolute_envelope_confirmed'
                     ),
@@ -295,10 +390,18 @@ def generate_launch_description():
                         'commissioning_token'
                     ),
                     'expected_vr_source_ip': source_ip,
+                    'vr_transport': LaunchConfiguration('vr_transport'),
                     'profile': LaunchConfiguration('profile'),
                     'arm_topic': arm_trajectory_topic,
                     'network_interface': interface,
                     'motor_health_topic': motor_health_topic,
+                    'max_forward_mps': LaunchConfiguration(
+                        'max_forward_mps'
+                    ),
+                    'max_lateral_mps': LaunchConfiguration(
+                        'max_lateral_mps'
+                    ),
+                    'max_yaw_rps': LaunchConfiguration('max_yaw_rps'),
                 },
             ),
         ],

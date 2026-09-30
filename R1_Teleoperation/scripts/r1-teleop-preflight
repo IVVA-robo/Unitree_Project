@@ -23,7 +23,10 @@ source /opt/ros/humble/setup.bash
 source "${INSTALL_SETUP}"
 set -u
 
-export ROS_DOMAIN_ID="${R1_TELEOP_HARDWARE_DOMAIN_ID:-89}"
+# Hardware/live sessions share domain 88.  Keep an explicit
+# R1_TELEOP_HARDWARE_DOMAIN_ID override for isolated diagnostics, but do not
+# silently default the read-only gate to the old dry-run domain 89.
+export ROS_DOMAIN_ID="${R1_TELEOP_HARDWARE_DOMAIN_ID:-${R1_LIVE_ROS_DOMAIN_ID:-88}}"
 export ROS_LOCALHOST_ONLY=1
 export ROBOT_DRY_RUN="${ROBOT_DRY_RUN:-1}"
 export ROBOT_ENABLE_ACTUATION="${ROBOT_ENABLE_ACTUATION:-0}"

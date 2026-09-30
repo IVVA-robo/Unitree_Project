@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Local-only readiness check for the documented manual exhibition mock. It
+# deliberately does not inspect Ethernet, DDS, a camera, or any robot state.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+die() {
+  printf '[BLOCKED] exhibition mock preflight: %s\n' "$*" >&2
+  exit 2
+}
+
+[[ $# -eq 3 ]] \
+  || die 'usage: r1-exhibition-mock-preflight TCP_PORT UDP_PORT DISCOVERY_PORT'
+TCP_PORT=$1
+UDP_PORT=$2
+DISCOVERY_PORT=$3
+for value in "${TCP_PORT}" "${UDP_PORT}" "${DISCOVERY_PORT}"; do
+  [[ ${value} =~ ^[0-9]+$ ]] \
+    && ((10#${value} >= 1024 && 10#${value} <= 65535)) \
+    || die 'ports must be integers in 1024..65535'
+done
+[[ ${TCP_PORT} != 8080 ]] || die 'mock TCP port must differ from offline POV port 8080'
+[[ ${UDP_PORT} != 9090 ]] || die 'mock UDP port must differ from offline VR port 9090'
+[[ ${DISCOVERY_PORT} != 9091 ]] \
+  || die 'mock discovery port must differ from offline discovery port 9091'
+[[ ${DISCOVERY_PORT} != "${UDP_PORT}" ]] \
+  || die 'mock UDP command and discovery ports must differ'
+
+[[ -f /opt/ros/humble/setup.bash ]] || die 'ROS 2 Humble setup is missing'
+[[ -f "${PROJECT_DIR}/ros2_ws/install/setup.bash" ]] \
+  || die 'ROS workspace is not built'
+[[ -x "${PROJECT_DIR}/scripts/robot-pov" ]] || die 'mock POV launcher is missing'
+[[ -x "${PROJECT_DIR}/scripts/r1-teleop-dry-run" ]] \
+  || die 'dry-run teleop launcher is missing'
+
+python3 - "${TCP_PORT}" "${UDP_PORT}" "${DISCOVERY_PORT}" <<'PY' || exit 2
+import socket
+import sys
+
+tcp_port, udp_port, discovery_port = (int(value) for value in sys.argv[1:])
+try:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp_socket:
+        tcp_socket.bind(('0.0.0.0', tcp_port))
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket, \
+            socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as discovery_socket:
+        udp_socket.bind(('127.0.0.1', udp_port))
+        discovery_socket.bind(('127.0.0.1', discovery_port))
+except OSError as exception:
+    print(f'[BLOCKED] exhibition mock preflight: alternate port is busy: {exception}', file=sys.stderr)
+    raise SystemExit(2)
+PY
+
+printf '[OK] local exhibition mock is ready (POV :%s, loopback VR :%s/:%s).\n' \
+  "${TCP_PORT}" "${UDP_PORT}" "${DISCOVERY_PORT}"
+printf 'No robot interface, Unitree SDK transport, or physical writer was opened.\n'

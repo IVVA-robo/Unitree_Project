@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Bounded, typed ROS service discovery for an exhibition live graph.  This is
+# readiness only: it calls no service, clears no KILL latch and constructs no
+# Unitree SDK client.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_SETUP="${PROJECT_DIR}/ros2_ws/install/setup.bash"
+[[ -f "${WORKSPACE_SETUP}" ]] \
+  || WORKSPACE_SETUP="${PROJECT_DIR}/install/setup.bash"
+
+die() {
+  printf '[BLOCKED] exhibition readiness: %s\n' "$*" >&2
+  exit 2
+}
+
+[[ $# -eq 1 ]] || die 'usage: r1-exhibition-wait-ready static|control'
+MODE=$1
+[[ ${MODE} == static || ${MODE} == control ]] \
+  || die 'mode must be static or control'
+[[ -f /opt/ros/humble/setup.bash ]] || die 'ROS 2 Humble is unavailable'
+[[ -f "${WORKSPACE_SETUP}" ]] \
+  || die "workspace is not built: ${WORKSPACE_SETUP}"
+
+# A physical writer completes the full robot-facing read-only SDK preflight
+# before its services appear.  On the current R1/TP-Link path that healthy
+# gate takes about 45-60 seconds, so keep a bounded 90-second default.  Tests
+# and maintenance calls can still provide a smaller explicit override.
+TIMEOUT_SEC=${R1_EXHIBITION_READY_TIMEOUT_SEC:-90}
+[[ ${TIMEOUT_SEC} =~ ^[1-9][0-9]*$ ]] \
+  || die 'R1_EXHIBITION_READY_TIMEOUT_SEC must be a positive integer'
+((10#${TIMEOUT_SEC} <= 120)) \
+  || die 'R1_EXHIBITION_READY_TIMEOUT_SEC must be at most 120'
+DOMAIN_ID=${R1_LIVE_ROS_DOMAIN_ID:-88}
+[[ ${DOMAIN_ID} =~ ^[0-9]+$ ]] && ((10#${DOMAIN_ID} <= 232)) \
+  || die 'R1_LIVE_ROS_DOMAIN_ID must be 0..232'
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${WORKSPACE_SETUP}"
+# shellcheck source=r1-physical-ros-env
+source "${SCRIPT_DIR}/r1-physical-ros-env"
+set -u
+export ROS_DOMAIN_ID="$((10#${DOMAIN_ID}))"
+export ROS_LOCALHOST_ONLY=1
+
+required_services=(
+  '/r1/live_writer/prepare|std_srvs/srv/Trigger'
+  '/r1/live_writer/reset_kill|std_srvs/srv/Trigger'
+  '/r1/live_writer/stop|std_srvs/srv/Trigger'
+  '/r1/live_writer/kill|std_srvs/srv/Trigger'
+  '/r1/safety/set_kill|std_srvs/srv/SetBool'
+)
+required_topics=(
+  '/r1/sdk/joint_states|sensor_msgs/msg/JointState'
+  '/r1/sdk_transport/motors_healthy|std_msgs/msg/Bool'
+  '/r1/safety/kill|std_msgs/msg/Bool'
+)
+if [[ ${MODE} == control ]]; then
+  required_services+=(
+    '/vr/teleop/arm_session|std_srvs/srv/Trigger'
+    '/vr/teleop/disarm_session|std_srvs/srv/Trigger'
+    '/vr/teleop/pause_session|std_srvs/srv/Trigger'
+    '/vr/teleop/resume_session|std_srvs/srv/Trigger'
+    '/vr/teleop/clear_emergency_stop|std_srvs/srv/Trigger'
+  )
+  required_topics+=(
+    '/vr/teleop/active|std_msgs/msg/Bool'
+    '/vr/teleop/session_armed|std_msgs/msg/Bool'
+    '/vr/locomotion/active|std_msgs/msg/Bool'
+    '/vr/actions/arms_neutral|std_msgs/msg/Bool'
+    '/vr/actions/emergency_stop|std_msgs/msg/Bool'
+    '/r1_kinematics_control/debug/arm_trajectory|trajectory_msgs/msg/JointTrajectory'
+    '/r1/locomotion_dry_run/debug/cmd_vel|geometry_msgs/msg/TwistStamped'
+  )
+fi
+
+# Keep one DDS participant alive while discovering the complete graph and
+# querying the exact boolean static policy. No motion service is called.
+probe_args=(--mode "${MODE}" --timeout-sec "${TIMEOUT_SEC}")
+for entry in "${required_services[@]}"; do probe_args+=(--service "${entry}"); done
+for entry in "${required_topics[@]}"; do probe_args+=(--topic "${entry}"); done
+if [[ ${MODE} == static ]]; then
+  for expectation in \
+    'static_prepare_mode|true' \
+    'send_commands|true' \
+    'enable_prepare|true' \
+    'enable_head|false' \
+    'enable_arms|false' \
+    'enable_locomotion|false' \
+    'prepare_enter_locomotion|false'; do
+    probe_args+=(--parameter "${expectation}")
+  done
+fi
+exec "${SCRIPT_DIR}/r1-exhibition-graph-probe" "${probe_args[@]}"

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Prefer the recent automatic SDK attestation produced while the panel was
+# connecting.  Fall back to the ordinary read-only ROS/network report when no
+# reusable attestation exists; the live launcher will then run the full SDK
+# preflight before exposing its services.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INTERFACE=${R1_LIVE_NETWORK_INTERFACE:-enxb4b024be59fe}
+DOMAIN_ID=${R1_LIVE_ROS_DOMAIN_ID:-88}
+
+if R1_SDK_NETWORK_INTERFACE="${INTERFACE}" \
+    R1_SDK_ROS_DOMAIN_ID="${DOMAIN_ID}" \
+    "${SCRIPT_DIR}/r1-sdk-preflight-attestation" check; then
+  echo '[OK] Exhibition connection already passed the automatic read-only SDK preflight.'
+  exit 0
+fi
+
+set +e
+"${SCRIPT_DIR}/r1-teleop-preflight"
+status=$?
+set -e
+((status == 0 || status == 2)) || exit "${status}"
+echo '[OK] Basic exhibition preflight complete; full SDK check remains mandatory in the live launcher.'

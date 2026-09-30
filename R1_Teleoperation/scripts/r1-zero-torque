@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Deliberately separate from STOP/KILL.  This action removes actuator holding
+# torque and can let the robot collapse under gravity, so it requires its own
+# short-lived panel acknowledgement and proves that no live writer remains.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SDK_PYTHON_ROOT="${R1_UNITREE_SDK_PYTHON_ROOT:-/home/unitree/Unitree_Project/Legacy_Robotics/robotics/unitree_sdk/unitree_sdk2_python}"
+
+[[ $# -eq 0 ]] || { echo 'Usage: r1-zero-torque' >&2; exit 64; }
+[[ ${ROBOT_CONFIRM_ZERO_TORQUE-} == 1 ]] \
+  || { echo '[BLOCKED] ROBOT_CONFIRM_ZERO_TORQUE=1 is required' >&2; exit 2; }
+[[ ${ROBOT_CONFIRM_ROBOT_SUPPORTED-} == 1 ]] \
+  || { echo '[BLOCKED] ROBOT_CONFIRM_ROBOT_SUPPORTED=1 is required' >&2; exit 2; }
+TOKEN=${ROBOT_ZERO_TORQUE_TOKEN-}
+[[ ${#TOKEN} -ge 16 ]] \
+  || { echo '[BLOCKED] a fresh ROBOT_ZERO_TORQUE_TOKEN is required' >&2; exit 2; }
+WRITER_WAIT_SEC=${R1_ZERO_TORQUE_WRITER_WAIT_SEC:-10}
+[[ ${WRITER_WAIT_SEC} =~ ^[0-9]+$ ]] \
+  || { echo '[BLOCKED] R1_ZERO_TORQUE_WRITER_WAIT_SEC must be an integer' >&2; exit 2; }
+((10#${WRITER_WAIT_SEC} <= 60)) \
+  || { echo '[BLOCKED] R1_ZERO_TORQUE_WRITER_WAIT_SEC must be at most 60' >&2; exit 2; }
+
+INTERFACE=${R1_ROBOT_INTERFACE:-enxb4b024be59fe}
+[[ ${INTERFACE} =~ ^[[:alnum:]_.-]{1,15}$ ]] \
+  || { echo '[BLOCKED] invalid robot interface' >&2; exit 2; }
+ip link show dev "${INTERFACE}" >/dev/null 2>&1 \
+  || { echo "[BLOCKED] robot interface is absent: ${INTERFACE}" >&2; exit 2; }
+[[ -d ${SDK_PYTHON_ROOT}/unitree_sdk2py/r1/loco ]] \
+  || { echo '[BLOCKED] Unitree R1 Python SDK is unavailable' >&2; exit 20; }
+
+writer_is_alive() {
+  pgrep -af '/r1_live_writer_node([[:space:]]|$)' >/dev/null 2>&1
+}
+
+# The exhibition manager normally reaps the writer during STOP, but its ROS
+# children can take a short moment to disappear.  Wait for that bounded
+# cleanup instead of racing the SDK request; a genuinely orphaned writer
+# still fails closed after the timeout.
+writer_deadline=$((SECONDS + 10#${WRITER_WAIT_SEC}))
+while writer_is_alive && ((SECONDS <= writer_deadline)); do
+  echo '[INFO] waiting for live writer cleanup before Zero Torque' >&2
+  sleep 0.10
+done
+if writer_is_alive; then
+  echo '[BLOCKED] live writer still exists; Zero Torque was not sent' >&2
+  exit 2
+fi
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${SCRIPT_DIR}/r1-unitree-sdk-env"
+set -u
+export PYTHONPATH="${SDK_PYTHON_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+
+exec python3 - "${INTERFACE}" <<'PY'
+import json
+import math
+import sys
+import time
+
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+from unitree_sdk2py.r1.loco.r1_loco_api import ROBOT_API_ID_LOCO_GET_FSM_ID
+from unitree_sdk2py.r1.loco.r1_loco_client import LocoClient
+
+
+interface = sys.argv[1]
+ChannelFactoryInitialize(0, interface)
+client = LocoClient()
+client.SetTimeout(2.0)
+client.Init()
+
+
+def read_fsm():
+    code, payload = client._Call(ROBOT_API_ID_LOCO_GET_FSM_ID, "")
+    if code != 0:
+        return code, None
+    try:
+        return code, int(json.loads(payload)["data"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return 3106, None
+
+
+def wait_fsm(expected, timeout):
+    deadline = time.monotonic() + timeout
+    last_code, last_fsm = -1, None
+    while time.monotonic() < deadline:
+        last_code, last_fsm = read_fsm()
+        if last_code == 0 and last_fsm == expected:
+            return True, last_code, last_fsm
+        time.sleep(0.15)
+    return False, last_code, last_fsm
+
+
+# Captured from Unitree Explore on this exact R1: Damping is FSM 1 and the app
+# refuses Zero Torque unless FSM 1 is confirmed first.
+damping_status = client.SetFsmId(1)
+print(f"ZERO_TORQUE damping_status={damping_status} target_fsm=1", flush=True)
+if damping_status != 0:
+    raise SystemExit(10)
+
+confirmed, query_status, fsm = wait_fsm(1, 5.0)
+print(
+    f"ZERO_TORQUE damping_confirmed={str(confirmed).lower()} "
+    f"query_status={query_status} fsm={fsm}",
+    flush=True,
+)
+if not confirmed:
+    print('[BLOCKED] Damping/FSM 1 was not confirmed; Zero Torque was not sent', file=sys.stderr)
+    raise SystemExit(11)
+
+zero_status = client.SetFsmId(0)
+print(f"ZERO_TORQUE command_status={zero_status} target_fsm=0", flush=True)
+if zero_status != 0:
+    raise SystemExit(12)
+
+confirmed, query_status, fsm = wait_fsm(0, 5.0)
+print(
+    f"ZERO_TORQUE confirmed={str(confirmed).lower()} "
+    f"query_status={query_status} fsm={fsm}",
+    flush=True,
+)
+if not confirmed:
+    raise SystemExit(13)
+print('[OK] Damping/FSM 1 -> Zero Torque/FSM 0 confirmed; robot holding torque is off.')
+PY

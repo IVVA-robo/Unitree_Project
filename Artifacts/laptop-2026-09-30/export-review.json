@@ -1,0 +1,389 @@
+{
+  "created_at": "2026-09-30T13:59:03.492832+00:00",
+  "robot_snapshot": "NOT_COLLECTED_PC2_POWERED_OFF",
+  "excluded_directory_names": [
+    ".git",
+    ".gnupg",
+    ".nx",
+    ".pytest_cache",
+    ".ssh",
+    "Library",
+    "Temp",
+    "UserSettings",
+    "__pycache__",
+    "build",
+    "install"
+  ],
+  "source_archive_omissions": [
+    ".cache",
+    "logs",
+    "log",
+    "Builds"
+  ],
+  "review": [
+    {
+      "archive": "Backups/command-handoff-20260929-dy8ve7/source-before.tar",
+      "path": "tests/test_exhibition_orchestrator.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/command-handoff-20260929-dy8ve7/source-before.tar",
+      "path": "tests/test_usb_control.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/command-handoff-20260929-dy8ve7/source-before.tar",
+      "path": "tests/test_operator_panel.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/kill-recovery-20260929-zAbVOu/source-before.tar",
+      "path": "tests/test_exhibition_orchestrator.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/kill-recovery-20260929-zAbVOu/source-before.tar",
+      "path": "tests/test_usb_control.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/kill-recovery-20260929-zAbVOu/source-before.tar",
+      "path": "tests/test_operator_panel.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/kill-recovery-20260929-zAbVOu/source-before.tar",
+      "path": "ros2_ws/src/r1_live_writer/test/test_safety.cpp",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/kill-recovery-20260929-zAbVOu/source-before.tar",
+      "path": "ros2_ws/src/r1_live_writer/src/r1_live_writer_node.cpp",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/kill-recovery-20260929-zAbVOu/source-before.tar",
+      "path": "ros2_ws/src/r1_live_writer/config/r1_live_writer.yaml",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/kill-recovery-20260929-zAbVOu/source-before.tar",
+      "path": "ros2_ws/src/r1_live_writer/launch/r1_live_writer.launch.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/kill-recovery-20260929-zAbVOu/source-tested.tar",
+      "path": "tests/test_exhibition_orchestrator.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/kill-recovery-20260929-zAbVOu/source-tested.tar",
+      "path": "tests/test_usb_control.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/kill-recovery-20260929-zAbVOu/source-tested.tar",
+      "path": "tests/test_operator_panel.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/kill-recovery-20260929-zAbVOu/source-tested.tar",
+      "path": "ros2_ws/src/r1_live_writer/test/test_safety.cpp",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/kill-recovery-20260929-zAbVOu/source-tested.tar",
+      "path": "ros2_ws/src/r1_live_writer/src/r1_live_writer_node.cpp",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/kill-recovery-20260929-zAbVOu/source-tested.tar",
+      "path": "ros2_ws/src/r1_live_writer/config/r1_live_writer.yaml",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/kill-recovery-20260929-zAbVOu/source-tested.tar",
+      "path": "ros2_ws/src/r1_live_writer/launch/r1_live_writer.launch.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-no-robot-20260929-KEjpSt/source-before.tar",
+      "path": "tests/test_exhibition_orchestrator.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-no-robot-20260929-KEjpSt/source-before.tar",
+      "path": "tests/test_usb_control.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-no-robot-20260929-KEjpSt/source-before.tar",
+      "path": "tests/test_operator_panel.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-no-robot-20260929-KEjpSt/source-tested.tar",
+      "path": "tests/test_exhibition_orchestrator.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-no-robot-20260929-KEjpSt/source-tested.tar",
+      "path": "tests/test_usb_control.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-no-robot-20260929-KEjpSt/source-tested.tar",
+      "path": "tests/test_operator_panel.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-20260929-CoLB6z/source-before.tar",
+      "path": "tests/test_exhibition_orchestrator.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-20260929-CoLB6z/source-before.tar",
+      "path": "tests/test_usb_control.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-20260929-CoLB6z/source-before.tar",
+      "path": "tests/test_operator_panel.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-20260929-CoLB6z/source-before.tar",
+      "path": "ros2_ws/src/r1_live_writer/test/test_safety.cpp",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-20260929-CoLB6z/source-before.tar",
+      "path": "ros2_ws/src/r1_live_writer/src/r1_live_writer_node.cpp",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-20260929-CoLB6z/source-before.tar",
+      "path": "ros2_ws/src/r1_live_writer/config/r1_live_writer.yaml",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-20260929-CoLB6z/source-before.tar",
+      "path": "ros2_ws/src/r1_live_writer/launch/r1_live_writer.launch.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-verified-20260929-YxD5eo/source-tested.tar",
+      "path": "tests/test_exhibition_orchestrator.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-verified-20260929-YxD5eo/source-tested.tar",
+      "path": "tests/test_usb_control.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-verified-20260929-YxD5eo/source-tested.tar",
+      "path": "tests/test_operator_panel.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-verified-20260929-YxD5eo/source-tested.tar",
+      "path": "ros2_ws/src/r1_live_writer/test/test_safety.cpp",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-verified-20260929-YxD5eo/source-tested.tar",
+      "path": "ros2_ws/src/r1_live_writer/src/r1_live_writer_node.cpp",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-verified-20260929-YxD5eo/source-tested.tar",
+      "path": "ros2_ws/src/r1_live_writer/config/r1_live_writer.yaml",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-verified-20260929-YxD5eo/source-tested.tar",
+      "path": "ros2_ws/src/r1_live_writer/launch/r1_live_writer.launch.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-verified-20260929-YxD5eo/source-warmup-fixed.tar",
+      "path": "tests/test_exhibition_orchestrator.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-verified-20260929-YxD5eo/source-warmup-fixed.tar",
+      "path": "tests/test_usb_control.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-verified-20260929-YxD5eo/source-warmup-fixed.tar",
+      "path": "tests/test_operator_panel.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-verified-20260929-YxD5eo/source-warmup-fixed.tar",
+      "path": "ros2_ws/src/r1_live_writer/test/test_safety.cpp",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-verified-20260929-YxD5eo/source-warmup-fixed.tar",
+      "path": "ros2_ws/src/r1_live_writer/src/r1_live_writer_node.cpp",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-verified-20260929-YxD5eo/source-warmup-fixed.tar",
+      "path": "ros2_ws/src/r1_live_writer/config/r1_live_writer.yaml",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-reliability-verified-20260929-YxD5eo/source-warmup-fixed.tar",
+      "path": "ros2_ws/src/r1_live_writer/launch/r1_live_writer.launch.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-text-test-20260929-bVC6qu/source-before.tar",
+      "path": "tests/test_exhibition_orchestrator.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-text-test-20260929-bVC6qu/source-before.tar",
+      "path": "tests/test_usb_control.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/offline-text-test-20260929-bVC6qu/source-before.tar",
+      "path": "tests/test_operator_panel.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/pre-usb-20260929-qDx6LT/current-work.tar",
+      "path": "R1_Teleoperation/tests/test_exhibition_orchestrator.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/pre-usb-20260929-qDx6LT/current-work.tar",
+      "path": "R1_Teleoperation/tests/test_operator_panel.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/pre-usb-20260929-qDx6LT/current-work.tar",
+      "path": "R1_Teleoperation/Makefile",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/pre-usb-20260929-qDx6LT/current-work.tar",
+      "path": "R1_Teleoperation/ros2_ws/src/r1_live_writer/test/test_safety.cpp",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/pre-usb-20260929-qDx6LT/current-work.tar",
+      "path": "R1_Teleoperation/ros2_ws/src/r1_live_writer/src/r1_live_writer_node.cpp",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/pre-usb-20260929-qDx6LT/current-work.tar",
+      "path": "R1_Teleoperation/ros2_ws/src/r1_live_writer/config/r1_live_writer.yaml",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/pre-usb-20260929-qDx6LT/current-work.tar",
+      "path": "R1_Teleoperation/ros2_ws/src/r1_live_writer/launch/r1_live_writer.launch.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/pre-usb-20260929-qDx6LT/current-work.tar",
+      "path": "R1_Teleoperation/ros2_ws/src/r1_teleoperation_app/launch/r1_teleop_live.launch.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/usb-working-before-live-20260929-EwjybH/usb-working.tar",
+      "path": "R1_Teleoperation/tests/test_exhibition_orchestrator.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/usb-working-before-live-20260929-EwjybH/usb-working.tar",
+      "path": "R1_Teleoperation/tests/test_operator_panel.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/usb-working-before-live-20260929-EwjybH/usb-working.tar",
+      "path": "R1_Teleoperation/Makefile",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/usb-working-before-live-20260929-EwjybH/usb-working.tar",
+      "path": "R1_Teleoperation/ros2_ws/src/r1_live_writer/test/test_safety.cpp",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/usb-working-before-live-20260929-EwjybH/usb-working.tar",
+      "path": "R1_Teleoperation/ros2_ws/src/r1_live_writer/src/r1_live_writer_node.cpp",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/usb-working-before-live-20260929-EwjybH/usb-working.tar",
+      "path": "R1_Teleoperation/ros2_ws/src/r1_live_writer/config/r1_live_writer.yaml",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/usb-working-before-live-20260929-EwjybH/usb-working.tar",
+      "path": "R1_Teleoperation/ros2_ws/src/r1_live_writer/launch/r1_live_writer.launch.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "Backups/usb-working-before-live-20260929-EwjybH/usb-working.tar",
+      "path": "R1_Teleoperation/ros2_ws/src/r1_teleoperation_app/launch/r1_teleop_live.launch.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "R1_Teleoperation/backups/exhibition-working-20260925-045557/sources.tar.gz",
+      "path": "ros2_ws/src/r1_live_writer/test/test_safety.cpp",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "R1_Teleoperation/backups/exhibition-working-20260925-045557/sources.tar.gz",
+      "path": "ros2_ws/src/r1_live_writer/src/r1_live_writer_node.cpp",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "R1_Teleoperation/backups/exhibition-working-20260925-045557/sources.tar.gz",
+      "path": "ros2_ws/src/r1_live_writer/config/r1_live_writer.yaml",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "R1_Teleoperation/backups/exhibition-working-20260925-045557/sources.tar.gz",
+      "path": "ros2_ws/src/r1_live_writer/launch/r1_live_writer.launch.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "R1_Teleoperation/backups/exhibition-working-20260925-045557/sources.tar.gz",
+      "path": "ros2_ws/src/r1_teleoperation_app/launch/r1_teleop_live.launch.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "R1_Teleoperation/backups/exhibition-working-20260925-045557/sources.tar.gz",
+      "path": "tests/test_exhibition_orchestrator.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "R1_Teleoperation/backups/exhibition-working-20260925-045557/sources.tar.gz",
+      "path": "tests/test_operator_panel.py",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "R1_Teleoperation/backups/exhibition-working-20260925-045557/sources.tar.gz",
+      "path": "Makefile",
+      "reason": "session token redacted"
+    },
+    {
+      "archive": "R1_Teleoperation/backups/yaw-direction-20260925/sources.tar.gz",
+      "path": "ros2_ws/src/r1_live_writer/test/test_safety.cpp",
+      "reason": "session token redacted"
+    },
+    {
+      "path": "vosk-model-small-ru-0.22.full.zip.partial",
+      "reason": "excluded path/link"
+    }
+  ]
+}

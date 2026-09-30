@@ -42,6 +42,7 @@ def generate_launch_description():
     ros_domain_id = LaunchConfiguration('ros_domain_id')
     udp_bind_address = LaunchConfiguration('udp_bind_address')
     udp_port = LaunchConfiguration('udp_port')
+    discovery_port = LaunchConfiguration('discovery_port')
     vr_allowed_source_ip = LaunchConfiguration('vr_allowed_source_ip')
     start_bridge = LaunchConfiguration('start_bridge')
     start_head = LaunchConfiguration('start_head')
@@ -68,6 +69,11 @@ def generate_launch_description():
             'udp_port',
             default_value='9090',
             description='UDP port for the Pico/OpenXR bridge.',
+        ),
+        DeclareLaunchArgument(
+            'discovery_port',
+            default_value='9091',
+            description='UDP discovery port for the Pico/OpenXR bridge.',
         ),
         DeclareLaunchArgument(
             'vr_allowed_source_ip',
@@ -142,6 +148,7 @@ def generate_launch_description():
                         'ros_localhost_only': '1',
                         'bind_address': udp_bind_address,
                         'udp_port': udp_port,
+                        'discovery_port': discovery_port,
                         'allowed_source_ip': vr_allowed_source_ip,
                     },
                     IfCondition(start_bridge),

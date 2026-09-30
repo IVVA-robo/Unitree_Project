@@ -1,0 +1,16 @@
+# Previously tested response. Geometry, gains and locomotion are not changed.
+r1_live_writer:
+  ros__parameters:
+    max_head_yaw_delta_rate_rad_s: 0.35
+    max_head_pitch_delta_rate_rad_s: 0.25
+    max_arm_joint_rate_rad_s: 0.50
+r1_head_dry_run:
+  ros__parameters:
+    smoothing_alpha: 0.22
+r1_kinematics_control:
+  ros__parameters:
+    max_joint_velocity_rad_s: 0.50
+    body_proxy.max_target_speed_mps: 0.25
+    position_ema_tau_sec: 0.075
+    orientation_ema_tau_sec: 0.10
+    trajectory_time_sec: 0.10

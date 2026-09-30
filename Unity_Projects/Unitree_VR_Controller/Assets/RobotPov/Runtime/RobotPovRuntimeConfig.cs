@@ -30,8 +30,9 @@ namespace RobotPov
     [Serializable]
     public sealed class RobotPovRuntimeConfig
     {
-        // Current TP-Link LAN address used by the offline R1 setup. Batch builds
-        // and the Pico scene can still override this with ROBOT_POV_SERVER_URL.
+        // Current TP-Link LAN address used by the offline R1 setup. Combined
+        // builds update this from the UDP discovery result at runtime; it is
+        // retained only as a safe fallback when broadcast is blocked.
         public const string DefaultBaseUrl = "http://192.168.8.9:8080";
         public const string DefaultProfile = "low-latency";
         public const string DefaultClientId = "unity-pico-r1";

@@ -42,12 +42,17 @@ def test_dry_run_launch_is_fail_closed_without_physical_robot():
         if isinstance(action, DeclareLaunchArgument)
     }
     assert arguments['ros_domain_id'] == '89'
+    assert arguments['udp_port'] == '9090'
+    assert arguments['discovery_port'] == '9091'
     assert arguments['start_bridge'] == 'true'
     assert arguments['start_head'] == 'true'
     assert arguments['start_locomotion'] == 'true'
     assert arguments['locomotion_mode'] == 'slow-safe'
     assert arguments['start_arm_pipeline'] == 'false'
     assert arguments['vr_allowed_source_ip'] == ''
+
+    source = LAUNCH_PATH.read_text(encoding='utf-8')
+    assert "'discovery_port': discovery_port" in source
 
     environment = {
         _text(action.name): _text(action.value)

@@ -20,15 +20,21 @@ die() {
 [[ -f "${WORKSPACE_SETUP}" ]] || die "workspace is not built: ${WORKSPACE_SETUP}"
 
 DOMAIN_ID=${R1_HEAD_DRY_ARM_ROS_DOMAIN_ID:-87}
-UDP_PORT=${R1_HEAD_DRY_ARM_UDP_PORT:-9091}
+UDP_PORT=${R1_HEAD_DRY_ARM_UDP_PORT:-19092}
+DISCOVERY_PORT=${R1_HEAD_DRY_ARM_DISCOVERY_PORT:-19093}
 [[ "${DOMAIN_ID}" =~ ^[0-9]+$ ]] && ((10#${DOMAIN_ID} <= 232)) \
   || die 'R1_HEAD_DRY_ARM_ROS_DOMAIN_ID must be 0..232'
 [[ "${UDP_PORT}" =~ ^[0-9]+$ ]] \
   && ((10#${UDP_PORT} >= 1 && 10#${UDP_PORT} <= 65535)) \
   || die 'R1_HEAD_DRY_ARM_UDP_PORT must be 1..65535'
+[[ "${DISCOVERY_PORT}" =~ ^[0-9]+$ ]] \
+  && ((10#${DISCOVERY_PORT} >= 1024 && 10#${DISCOVERY_PORT} <= 65535)) \
+  || die 'R1_HEAD_DRY_ARM_DISCOVERY_PORT must be 1024..65535'
+[[ "${DISCOVERY_PORT}" != "${UDP_PORT}" ]] \
+  || die 'R1_HEAD_DRY_ARM_DISCOVERY_PORT must differ from UDP port'
 if command -v ss >/dev/null 2>&1 \
-  && ss -H -lunp 2>/dev/null | grep -Eq "([.:]|\\])${UDP_PORT}[[:space:]]"; then
-  die "UDP port ${UDP_PORT} is already in use"
+  && ss -H -lunp 2>/dev/null | grep -Eq "([.:]|\\])(${UDP_PORT}|${DISCOVERY_PORT})[[:space:]]"; then
+  die "UDP/discovery port ${UDP_PORT}/${DISCOVERY_PORT} is already in use"
 fi
 
 set +u
@@ -47,12 +53,13 @@ export ROBOT_COMMISSIONING_TOKEN=
 export ROBOT_VR_SOURCE_IP=
 
 echo 'R1 HEAD LIVE DRY-ARM (MOCK ONLY)'
-echo "  domain=${ROS_DOMAIN_ID} udp_port=$((10#${UDP_PORT}))"
+echo "  domain=${ROS_DOMAIN_ID} udp_port=$((10#${UDP_PORT})) discovery_port=$((10#${DISCOVERY_PORT}))"
 echo '  transport=mock send_commands=false reader=false locomotion=false'
 
 launch_arguments=(
   "ros_domain_id:=${ROS_DOMAIN_ID}"
   "udp_port:=$((10#${UDP_PORT}))"
+  "discovery_port:=$((10#${DISCOVERY_PORT}))"
   start_readonly_reader:=false
   start_safety_supervisor:=true
   enable_head:=true

@@ -35,6 +35,12 @@ def _video_only_node(context):
     if enable_mdns == 'false':
         arguments.append('--no-mdns')
 
+    enable_discovery = LaunchConfiguration('enable_discovery').perform(context).lower()
+    if enable_discovery not in ('true', 'false'):
+        raise ValueError('enable_discovery must be true or false')
+    if enable_discovery == 'false':
+        arguments.append('--no-discovery')
+
     return [Node(
         package='r1_robot_pov',
         executable='r1_robot_pov',
@@ -83,6 +89,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'enable_mdns', default_value='true',
             description='Publish robot-pov.local through Avahi when available',
+        ),
+        DeclareLaunchArgument(
+            'enable_discovery', default_value='true',
+            description='Bind UDP 9091 discovery responder',
         ),
         OpaqueFunction(function=_video_only_node),
     ])

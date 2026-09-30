@@ -54,7 +54,7 @@ class R1LocomotionDryRun(Node):
         self.declare_parameter('hardware_enabled', False)
         self.declare_parameter('dry_run', True)
         self.declare_parameter('input_topic', '/vr/cmd_vel')
-        self.declare_parameter('active_topic', '/vr/teleop/active')
+        self.declare_parameter('active_topic', '/vr/locomotion/active')
         self.declare_parameter('emergency_stop_topic', '/r1/safety/kill')
         self.declare_parameter('mode_topic', '/r1/locomotion/mode')
         self.declare_parameter(

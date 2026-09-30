@@ -3,18 +3,27 @@
 from __future__ import annotations
 
 import datetime as _datetime
-import os
+import ipaddress
+import json
+import secrets
+import shlex
+import subprocess
+import re
+import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 from PyQt5.QtCore import QTimer, QUrl, Qt
-from PyQt5.QtGui import QColor, QDesktopServices, QFont, QIcon
+from PyQt5.QtGui import QDesktopServices, QFont, QIcon
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -31,9 +40,79 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from .commands import CommandSpec, command_catalog, spec_by_key
-from .config import CONFIG_PATH, OperatorConfig, load_config, save_config
+from .commands import CommandSpec, command_catalog
+from exhibition.orchestrator import active_session_snapshot
+from .config import OperatorConfig, load_config, save_config
+from .live_ack import (
+    acknowledgement_valid,
+    clear_acknowledgement,
+    record_acknowledgement,
+)
 from .processes import ProcessController
+from .video_preview import VideoPreview
+
+
+# The exhibition manager may spend up to 8 s disarming, 20 s in reviewed
+# robot-stop, 12 s in its kill fallback, and then reap separate POV/control
+# process groups.  Keep this asynchronous so the UI and KILL button remain
+# responsive while giving the manager enough time to avoid orphaned children.
+EXHIBITION_GRACEFUL_STOP_MS = 60_000
+ZERO_TORQUE_HANDOFF_KEY = "zero_torque_offline_handoff"
+ZERO_TORQUE_HANDOFF_COMMAND = (
+    "exec ./scripts/r1-exhibition-offline-handoff stop"
+)
+
+
+def _is_headset_lan_address(value: str) -> bool:
+    """Accept the exhibition Wi-Fi range as well as ordinary private LANs."""
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    if address.version != 4 or address.is_loopback or address.is_multicast:
+        return False
+    return address.is_private or ipaddress.ip_network("100.64.0.0/10").supernet_of(
+        ipaddress.ip_network(f"{address}/32")
+    )
+
+
+def _discover_headset_ip() -> Optional[str]:
+    """Read the one authorized Android headset address without touching control."""
+    adb = shutil.which("adb")
+    if not adb:
+        return None
+    try:
+        devices = subprocess.run(
+            [adb, "devices"], capture_output=True, text=True,
+            timeout=2.0, check=False,
+        ).stdout.splitlines()
+        serials = [
+            line.split()[0] for line in devices[1:]
+            if len(line.split()) >= 2 and line.split()[1] == "device"
+        ]
+        if len(serials) != 1:
+            return None
+        output = subprocess.run(
+            [adb, "-s", serials[0], "shell", "ip", "-o", "-4", "addr", "show", "dev", "wlan0"],
+            capture_output=True, text=True, timeout=2.0, check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for candidate in re.findall(r"\binet\s+(\d+\.\d+\.\d+\.\d+)/", output):
+        if _is_headset_lan_address(candidate):
+            return candidate
+    return None
+
+
+def _tuning_spin(value, minimum, maximum, step, suffix):
+    """Build a compact bounded editor for one exhibition tuning value."""
+    spin = QDoubleSpinBox()
+    spin.setDecimals(2)
+    spin.setRange(minimum, maximum)
+    spin.setSingleStep(step)
+    spin.setValue(value)
+    spin.setSuffix(suffix)
+    return spin
 
 
 class SettingsDialog(QDialog):
@@ -44,14 +123,32 @@ class SettingsDialog(QDialog):
         self.config = config
         form = QFormLayout(self)
         self.project_dir = QLineEdit(config.project_dir)
+        self.robot_name = QLineEdit(config.robot_name)
         self.robot_ip = QLineEdit(config.robot_ip)
         self.pc2_ip = QLineEdit(config.pc2_ip)
         self.robot_interface = QLineEdit(config.robot_interface)
+        self.allow_half_duplex_adapter = QCheckBox(
+            "Разрешить half-duplex только для TP-Link cdc_ether"
+        )
+        self.allow_half_duplex_adapter.setChecked(
+            config.allow_half_duplex_adapter
+        )
+        self.allow_half_duplex_adapter.setToolTip(
+            "Не отключает проверки сети и робота: принимается только драйвер "
+            "cdc_ether при чистых RX-счётчиках, доступном роботе и свежей "
+            "телеметрии. Для другого адаптера preflight останется закрыт."
+        )
         self.laptop_robot_ip = QLineEdit(config.laptop_robot_ip)
         self.ros_domain = QSpinBox()
         self.ros_domain.setRange(0, 232)
         self.ros_domain.setValue(config.ros_domain_id)
         self.vr_ip = QLineEdit(config.vr_headset_ip)
+        self.vr_transport = QComboBox()
+        self.vr_transport.addItem("USB-C — без Wi-Fi", "usb")
+        self.vr_transport.addItem("Wi-Fi / локальная сеть", "lan")
+        self.vr_transport.setCurrentIndex(
+            max(0, self.vr_transport.findData(config.vr_transport))
+        )
         self.video_url = QLineEdit(config.video_url)
         self.logs_dir = QLineEdit(config.logs_dir)
         self.video_profile = QLineEdit(config.video_profile)
@@ -60,22 +157,91 @@ class SettingsDialog(QDialog):
         self.dry_run.setChecked(config.dry_run)
         self.allow_live = QCheckBox("Разрешить кнопкам запрашивать live-сеанс")
         self.allow_live.setChecked(config.allow_live)
+        self.require_preflight = QCheckBox("Требовать успешный preflight перед live")
+        self.require_preflight.setChecked(config.require_preflight)
+        self.auto_start_video = QCheckBox("Автозапуск только video-only POV")
+        self.auto_start_video.setChecked(config.auto_start_video)
+        self.auto_start_bridge = QCheckBox("Автозапуск offline bridge + video-only POV")
+        self.auto_start_bridge.setChecked(config.auto_start_bridge)
+        self.shoulder_height_offset = _tuning_spin(
+            config.shoulder_height_offset_m, -0.15, 0.15, 0.01, " м"
+        )
+        self.shoulder_forward_offset = _tuning_spin(
+            config.shoulder_forward_offset_m, -0.12, 0.08, 0.01, " м"
+        )
+        self.shoulder_width = _tuning_spin(
+            config.shoulder_width_m, 0.25, 0.55, 0.01, " м"
+        )
+        self.arm_motion_scale = _tuning_spin(
+            config.arm_motion_scale, 0.50, 1.20, 0.05, "×"
+        )
+        self.turn_sensitivity = _tuning_spin(
+            config.turn_sensitivity, 0.10, 1.00, 0.05, "×"
+        )
+        self.leg_speed_scale = _tuning_spin(
+            config.leg_speed_scale, 0.10, 1.00, 0.05, "×"
+        )
+        calibration_hint = (
+            "Применится при следующей калибровке рук; сохранённая "
+            "калибровка не переписывается автоматически."
+        )
+        for widget in (
+            self.shoulder_height_offset,
+            self.shoulder_forward_offset,
+            self.shoulder_width,
+        ):
+            widget.setToolTip(calibration_hint)
+        self.arm_motion_scale.setToolTip(
+            "Масштаб движения применяется без повторной калибровки."
+        )
+        self.response_profile = QComboBox()
+        self.response_profile.addItem("Выставочный — быстрый отклик", "exhibition")
+        self.response_profile.addItem("Прежний — плавный отклик", "standard")
+        self.response_profile.setCurrentIndex(
+            max(0, self.response_profile.findData(config.response_profile))
+        )
+        self.response_profile.setToolTip(
+            "Меняет скорость рук и головы при следующем полном запуске. "
+            "Пределы положения суставов и скорость ходьбы сохраняются."
+        )
+        self.turn_sensitivity.setToolTip(
+            "Только уменьшает slow-safe предел поворота 0,35 рад/с."
+        )
+        self.leg_speed_scale.setToolTip(
+            "Только уменьшает slow-safe пределы 0,20/0,12 м/с."
+        )
         form.addRow("Путь проекта", self.project_dir)
+        form.addRow("Имя робота", self.robot_name)
         form.addRow("IP робота / DDS", self.robot_ip)
-        form.addRow("IP PC2 / видеосервис", self.pc2_ip)
+        form.addRow("IP PC2 / диагностика кабеля", self.pc2_ip)
         form.addRow("Ethernet-интерфейс", self.robot_interface)
+        form.addRow(self.allow_half_duplex_adapter)
         form.addRow("IP ноутбука на Ethernet", self.laptop_robot_ip)
         form.addRow("ROS_DOMAIN_ID", self.ros_domain)
         form.addRow("IP VR-шлема", self.vr_ip)
+        form.addRow("Подключение очков", self.vr_transport)
         form.addRow("URL Robot POV", self.video_url)
         form.addRow("Папка логов", self.logs_dir)
         form.addRow("Профиль видео", self.video_profile)
         form.addRow("Профиль locomotion", self.locomotion_profile)
+        tuning_title = QLabel("<b>Настройка движений для выставки</b>")
+        form.addRow(tuning_title)
+        form.addRow("Высота рук", self.shoulder_height_offset)
+        form.addRow("Руки вперёд / назад", self.shoulder_forward_offset)
+        form.addRow("Ширина плеч", self.shoulder_width)
+        form.addRow("Чувствительность рук", self.arm_motion_scale)
+        form.addRow("Отклик рук и головы", self.response_profile)
+        form.addRow("Чувствительность поворота", self.turn_sensitivity)
+        form.addRow("Скорость ног", self.leg_speed_scale)
         form.addRow(self.dry_run)
         form.addRow(self.allow_live)
+        form.addRow(self.require_preflight)
+        form.addRow(self.auto_start_video)
+        form.addRow(self.auto_start_bridge)
         note = QLabel(
             "Live-кнопки всё равно проходят существующие safety gates проекта. "
-            "Токен commissioning и физические подтверждения панель не подставляет."
+            "После ручного safety-чеклиста панель создаёт одноразовый токен; "
+            "он не сохраняется в конфиге или отчётах."
         )
         note.setWordWrap(True)
         form.addRow(note)
@@ -87,18 +253,34 @@ class SettingsDialog(QDialog):
     def values(self) -> OperatorConfig:
         return OperatorConfig(
             project_dir=self.project_dir.text().strip(),
+            robot_name=self.robot_name.text().strip() or "R1",
             robot_ip=self.robot_ip.text().strip(),
             pc2_ip=self.pc2_ip.text().strip(),
             robot_interface=self.robot_interface.text().strip(),
+            allow_half_duplex_adapter=(
+                self.allow_half_duplex_adapter.isChecked()
+            ),
             laptop_robot_ip=self.laptop_robot_ip.text().strip(),
             ros_domain_id=self.ros_domain.value(),
             vr_headset_ip=self.vr_ip.text().strip(),
+            vr_transport=self.vr_transport.currentData(),
             video_url=self.video_url.text().strip(),
             logs_dir=self.logs_dir.text().strip(),
             video_profile=self.video_profile.text().strip() or "low-latency",
             locomotion_profile=self.locomotion_profile.text().strip() or "slow-safe",
             dry_run=self.dry_run.isChecked(),
             allow_live=self.allow_live.isChecked(),
+            require_preflight=self.require_preflight.isChecked(),
+            auto_start_video=self.auto_start_video.isChecked(),
+            auto_start_bridge=self.auto_start_bridge.isChecked(),
+            status_poll_sec=self.config.status_poll_sec,
+            shoulder_height_offset_m=self.shoulder_height_offset.value(),
+            shoulder_forward_offset_m=self.shoulder_forward_offset.value(),
+            shoulder_width_m=self.shoulder_width.value(),
+            arm_motion_scale=self.arm_motion_scale.value(),
+            response_profile=self.response_profile.currentData(),
+            turn_sensitivity=self.turn_sensitivity.value(),
+            leg_speed_scale=self.leg_speed_scale.value(),
         )
 
 
@@ -113,6 +295,34 @@ class OperatorPanel(QMainWindow):
             spec.key: spec for spec in command_catalog()
         }
         self.close_after_stop = False
+        self.preflight_ok = False
+        self.exhibition_mode = "Остановлен"
+        self.exhibition_requested_mode = ""
+        self.pending_exhibition_key: Optional[str] = None
+        self.pending_exhibition_environment: Optional[Dict[str, str]] = None
+        self.pending_warmup_key: Optional[str] = None
+        self.pending_warmup_environment: Optional[Dict[str, str]] = None
+        self.exhibition_session_confirmed = acknowledgement_valid(self.config)
+        self.exhibition_switch_in_progress = False
+        self.exhibition_stop_complete = False
+        self.exhibition_manager_stopped = False
+        self.pending_zero_torque = False
+        self.zero_torque_deadline = 0.0
+        self.zero_torque_idle = False
+        # Zero Torque also owns the video-only systemd session.  Keeping this
+        # state separate from the panel's QProcesses matters when the offline
+        # service was started before the panel: its ROS children can otherwise
+        # retain UDP/TCP ports after the exhibition manager has exited.
+        self.zero_torque_handoff_started = False
+        self.zero_torque_handoff_complete = False
+        self.video_state = "offline"
+        self.connection_state = "offline"
+        self.background_services_started = False
+        self.last_capture_path = ""
+        # One ephemeral token is shared by every live child started during
+        # this panel session. It is never written to config or exported logs.
+        self.live_session_token = secrets.token_urlsafe(24)
+        self.status_values = {}
         self.last_status = "Серый • диагностика ещё не запускалась"
         self.setWindowTitle("Unitree R1 Панель оператора")
         icon_path = (
@@ -126,6 +336,10 @@ class OperatorPanel(QMainWindow):
         self.resize(1220, 820)
         self._build_ui()
         self._connect_controller()
+        self.status_timer = QTimer(self)
+        self.status_timer.setInterval(max(1000, int(self.config.status_poll_sec * 1000)))
+        self.status_timer.timeout.connect(self._poll_panel_status)
+        self.status_timer.start()
         self._refresh_summary()
 
     def _build_ui(self) -> None:
@@ -143,7 +357,13 @@ class OperatorPanel(QMainWindow):
         self.mode_label = QLabel()
         self.mode_label.setObjectName("modeLabel")
         header.addWidget(self.mode_label)
-        settings = QPushButton("Настройки")
+        self.service_toggle = QPushButton("⚙  Расширенные настройки")
+        self.service_toggle.clicked.connect(self.toggle_service_view)
+        header.addWidget(self.service_toggle)
+        help_button = QPushButton("?  Как запустить")
+        help_button.clicked.connect(self.show_quick_start)
+        header.addWidget(help_button)
+        settings = QPushButton("Настройки соединения")
         settings.clicked.connect(self.open_settings)
         header.addWidget(settings)
         layout.addLayout(header)
@@ -154,27 +374,181 @@ class OperatorPanel(QMainWindow):
         safety.addWidget(self.status_label, 1)
         self.active_label = QLabel("Активных процессов: 0")
         safety.addWidget(self.active_label)
-        stop = QPushButton("■  STOP")
-        stop.setObjectName("stopButton")
-        stop.setMinimumHeight(46)
-        stop.clicked.connect(lambda: self.run_key("stop"))
-        safety.addWidget(stop)
-        kill = QPushButton("⚠  KILL")
-        kill.setObjectName("killButton")
-        kill.setMinimumHeight(46)
-        kill.clicked.connect(lambda: self.run_key("kill"))
-        safety.addWidget(kill)
         layout.addLayout(safety)
 
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
+        self._add_exhibition_tab()
+        self.service_tabs = QTabWidget()
+        self.tabs.addTab(self.service_tabs, "Расширенные настройки / Сервис")
         self._add_general_tab()
         self._add_diagnostics_tab()
         self._add_robot_tab()
         self._add_vr_tab()
+        self._add_voice_tab()
+        self._add_command_capture_tab()
         self._add_video_tab()
         self._add_motion_tab()
         self._add_logs_tab()
+        self.tabs.tabBar().hide()
+
+    def _add_exhibition_tab(self) -> None:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        title = QLabel("Выставочный запуск")
+        title.setObjectName("exhibitionTitle")
+        title.setFont(QFont("Sans Serif", 20, QFont.Bold))
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+
+        subtitle = QLabel(
+            "Подключение к роботу идёт только по Ethernet-кабелю. Включите "
+            "робота и VR: приложение само найдёт видео, батарею и контроллеры. "
+            "Телефон и Wi‑Fi робота не нужны."
+        )
+        subtitle.setObjectName("hint")
+        subtitle.setAlignment(Qt.AlignCenter)
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+
+        self.operator_instruction = QLabel(
+            "1  Включите робота и очки    2  Дождитесь зелёного «ПОДКЛЮЧЕНО»    "
+            "3  Нажмите STATIC или RUN"
+        )
+        self.operator_instruction.setObjectName("operatorInstruction")
+        self.operator_instruction.setAlignment(Qt.AlignCenter)
+        self.operator_instruction.setWordWrap(True)
+        layout.addWidget(self.operator_instruction)
+
+        content = QHBoxLayout()
+        video_group = QGroupBox("Видео глазами робота")
+        video_layout = QVBoxLayout(video_group)
+        self.video_preview = VideoPreview(
+            self.config.video_url, self.config.video_profile, video_group
+        )
+        self.video_preview.state_changed.connect(self._on_video_state)
+        video_layout.addWidget(self.video_preview)
+        content.addWidget(video_group, 3)
+
+        controls = QVBoxLayout()
+        device = QGroupBox("Подключение")
+        device_layout = QGridLayout(device)
+        self.robot_name_label = QLabel(f"○  {self.config.robot_name}  — не в сети")
+        self.robot_name_label.setObjectName("robotName")
+        self.robot_name_label.setFont(QFont("Sans Serif", 16, QFont.Bold))
+        device_layout.addWidget(self.robot_name_label, 0, 0)
+        self.battery_label = QLabel("—%")
+        self.battery_label.setObjectName("batteryBadge")
+        self.battery_label.setAlignment(Qt.AlignCenter)
+        self.battery_label.setMinimumSize(88, 64)
+        self.battery_label.setFont(QFont("Sans Serif", 20, QFont.Bold))
+        device_layout.addWidget(self.battery_label, 0, 1, 2, 1)
+        self.connect_button = QPushButton("↻  НАЙТИ И ПОДКЛЮЧИТЬ")
+        self.connect_button.setObjectName("connectButton")
+        self.connect_button.clicked.connect(self.auto_connect)
+        self.connect_button.setMinimumHeight(52)
+        device_layout.addWidget(self.connect_button, 1, 0)
+        controls.addWidget(device)
+        self.static_mode_button = self._action_button(
+            "exhibition_static", "LOCK / СТАТИЧНЫЙ РЕЖИМ\nВидео и устойчивое положение"
+        )
+        self.static_mode_button.setObjectName("staticModeButton")
+        self.static_mode_button.setMinimumHeight(94)
+        self.static_mode_button.setFont(QFont("Sans Serif", 15, QFont.Bold))
+        controls.addWidget(self.static_mode_button)
+        self.control_mode_button = self._action_button(
+            "exhibition_control", "RUN / ПОЛНОЕ УПРАВЛЕНИЕ\nVR: голова, руки и ноги"
+        )
+        self.control_mode_button.setObjectName("controlModeButton")
+        self.control_mode_button.setMinimumHeight(112)
+        self.control_mode_button.setFont(QFont("Sans Serif", 15, QFont.Bold))
+        controls.addWidget(self.control_mode_button)
+        self.stand_mode_button = self._action_button(
+            "exhibition_stand", "СТОЙКА\nШтатная поза • моторы удерживают"
+        )
+        self.stand_mode_button.setObjectName("standModeButton")
+        self.stand_mode_button.setMinimumHeight(78)
+        self.stand_mode_button.setFont(QFont("Sans Serif", 14, QFont.Bold))
+        controls.addWidget(self.stand_mode_button)
+
+        # Keep the physical relaxation action visible on the operator's
+        # normal screen.  It still uses the reviewed confirmation and cleanup
+        # path in request_zero_torque(); this button only makes that path easy
+        # to find when the operator has no time to open the service tab.
+        self.zero_torque_button = QPushButton(
+            "ZERO TORQUE / РАССЛАБИТЬ\nтолько когда робот поддержан"
+        )
+        self.zero_torque_button.setObjectName("zeroTorqueButton")
+        self.zero_torque_button.setMinimumHeight(70)
+        self.zero_torque_button.setFont(QFont("Sans Serif", 13, QFont.Bold))
+        self.zero_torque_button.setToolTip(
+            "Завершить управление и отключить удерживающий момент. "
+            "Используйте только на страховке или с роботом на опоре."
+        )
+        self.zero_torque_button.clicked.connect(self.request_zero_torque)
+        controls.addWidget(self.zero_torque_button)
+
+        status_group = QGroupBox("Состояние системы")
+        status_grid = QGridLayout(status_group)
+        self.exhibition_robot_status = QLabel()
+        self.exhibition_vr_status = QLabel()
+        self.exhibition_controllers_status = QLabel()
+        self.exhibition_video_status = QLabel()
+        self.exhibition_mode_status = QLabel()
+        status_labels = (
+            self.exhibition_robot_status,
+            self.exhibition_vr_status,
+            self.exhibition_controllers_status,
+            self.exhibition_video_status,
+            self.exhibition_mode_status,
+        )
+        for label in status_labels:
+            label.setObjectName("simpleStatus")
+            label.setMinimumHeight(38)
+        status_grid.addWidget(self.exhibition_robot_status, 0, 0)
+        status_grid.addWidget(self.exhibition_vr_status, 0, 1)
+        status_grid.addWidget(self.exhibition_controllers_status, 1, 0)
+        status_grid.addWidget(self.exhibition_video_status, 1, 1)
+        status_grid.addWidget(self.exhibition_mode_status, 2, 0, 1, 2)
+        controls.addWidget(status_group)
+
+        tools = QGridLayout()
+        reconnect = self._action_button("exhibition_reconnect", "↻  Переподключить всё")
+        reconnect.setObjectName("reconnectButton")
+        reconnect.setMinimumHeight(48)
+        tools.addWidget(reconnect, 0, 0)
+        calibrate = self._action_button("exhibition_calibrate", "Перекалибровать руки")
+        calibrate.setMinimumHeight(48)
+        tools.addWidget(calibrate, 0, 1)
+        open_viewer = QPushButton("Открыть Robot POV")
+        open_viewer.setMinimumHeight(48)
+        open_viewer.clicked.connect(self.open_viewer)
+        tools.addWidget(open_viewer, 1, 0, 1, 2)
+        controls.addLayout(tools)
+
+        self.exhibition_voice_status = QLabel("● Голос: проверяется")
+        self.exhibition_voice_status.setObjectName("simpleStatus")
+        controls.addWidget(self.exhibition_voice_status)
+        controls.addStretch(1)
+        content.addLayout(controls, 2)
+        layout.addLayout(content, 1)
+
+        self.controller_action_hint = QLabel(
+            "B на правом контроллере — аварийная остановка.  "
+            "X на левом контроллере — вернуть руки в нейтраль.  "
+            "Стик — ходьба; отпустите стик — после остановки вернётся управление "
+            "руками и головой.  "
+            "После краткой потери VR управление ждёт переподключения и "
+            "возобновляется автоматически. STOP/KILL остаются в разделе «Сервис», "
+            "а ZERO TORQUE теперь доступна здесь на главном экране."
+        )
+        self.controller_action_hint.setObjectName("hint")
+        self.controller_action_hint.setWordWrap(True)
+        layout.addWidget(self.controller_action_hint)
+        layout.addStretch(1)
+        self.tabs.addTab(tab, "Главный экран")
+        self._refresh_exhibition_status()
 
     def _connect_controller(self) -> None:
         self.controller.output.connect(self._on_output)
@@ -196,11 +570,13 @@ class OperatorPanel(QMainWindow):
         self.summary_video = self._card("Видео", self.config.video_url)
         self.summary_mode = self._card("Режим", self._mode_text())
         self.summary_processes = self._card("Процессы", "Нет активных")
+        self.summary_health = self._card("Realtime health", "Проверка ещё не запускалась")
         cards.addWidget(self.summary_project, 0, 0)
         cards.addWidget(self.summary_network, 0, 1)
         cards.addWidget(self.summary_video, 1, 0)
         cards.addWidget(self.summary_mode, 1, 1)
         cards.addWidget(self.summary_processes, 2, 0, 1, 2)
+        cards.addWidget(self.summary_health, 3, 0, 1, 2)
         layout.addLayout(cards)
         explanation = QLabel(
             "Начните с «Проверить всё». Команды движения требуют отдельного "
@@ -210,7 +586,7 @@ class OperatorPanel(QMainWindow):
         explanation.setObjectName("hint")
         layout.addWidget(explanation)
         layout.addStretch(1)
-        self.tabs.addTab(tab, "Общий статус")
+        self.service_tabs.addTab(tab, "Общий статус")
 
     def _add_diagnostics_tab(self) -> None:
         tab = QWidget()
@@ -228,6 +604,8 @@ class OperatorPanel(QMainWindow):
             ("video_check", "Проверить видео"),
             ("ros_check", "Проверить ROS2"),
             ("sdk_check", "Проверить Unitree SDK"),
+            ("writer_check", "Проверить writer/feedback"),
+            ("voice_check", "Проверить голос Добрыни"),
         ]
         for index, (key, text) in enumerate(buttons):
             grid.addWidget(self._action_button(key, text), index // 2, index % 2)
@@ -240,18 +618,18 @@ class OperatorPanel(QMainWindow):
         hint.setObjectName("hint")
         layout.addWidget(hint)
         layout.addStretch(1)
-        self.tabs.addTab(tab, "Сеть и подключения")
+        self.service_tabs.addTab(tab, "Сеть и подключения")
 
     def _add_robot_tab(self) -> None:
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        group = QGroupBox("Робот")
+        group = QGroupBox("Сервис / аварийное управление")
         grid = QGridLayout(group)
         for index, (key, text) in enumerate(
             [
                 ("prepare", "Подготовить робота"),
                 ("stand", "Включить stand/balance"),
-                ("stop", "Остановить робота"),
+                ("exhibition_stop", "STOP — остановить сеанс"),
                 ("kill", "Аварийная остановка"),
                 ("reset_kill", "Снять аварийную остановку"),
             ]
@@ -259,20 +637,28 @@ class OperatorPanel(QMainWindow):
             button = self._action_button(key, text)
             if key == "kill":
                 button.setObjectName("killButton")
-            if key == "stop":
+            if key in ("stop", "exhibition_stop"):
                 button.setObjectName("stopButton")
             grid.addWidget(button, index // 2, index % 2)
         layout.addWidget(group)
+        self.service_zero_torque_button = QPushButton(
+            "ZERO TORQUE / РАССЛАБИТЬ — завершить процессы и снять удержание"
+        )
+        self.service_zero_torque_button.setObjectName("zeroTorqueServiceButton")
+        self.service_zero_torque_button.setMinimumHeight(48)
+        self.service_zero_torque_button.clicked.connect(self.request_zero_torque)
+        layout.addWidget(self.service_zero_torque_button)
         note = QLabel(
-            "Подготовка и stand/balance доступны только после подтверждения "
-            "безопасного положения. Отдельной безопасной команды снятия kill latch "
-            "в проекте сейчас нет."
+            "B на правом VR-контроллере и кнопка «Аварийная остановка» немедленно "
+            "обнуляют ходьбу и фиксируют KILL. Для возврата используйте «Снять "
+            "аварийную остановку» или RUN на главном экране: обе кнопки повторяют "
+            "полную проверку и robot-prepare."
         )
         note.setWordWrap(True)
         note.setObjectName("hint")
         layout.addWidget(note)
         layout.addStretch(1)
-        self.tabs.addTab(tab, "Робот")
+        self.service_tabs.addTab(tab, "Аварийное")
 
     def _add_vr_tab(self) -> None:
         tab = QWidget()
@@ -281,7 +667,8 @@ class OperatorPanel(QMainWindow):
         grid = QGridLayout(group)
         for index, (key, text) in enumerate(
             [
-                ("vr_calibrate", "Калибровать VR"),
+                ("vr_calibrate", "Калибровать HMD и руки"),
+                ("head_calibrate", "Калибровать голову"),
                 ("hands_calibrate", "Калибровать руки"),
                 ("dry_run", "Запустить VR dry-run"),
                 ("vr_check", "Проверить VR-шлем"),
@@ -290,14 +677,113 @@ class OperatorPanel(QMainWindow):
             grid.addWidget(self._action_button(key, text), index // 2, index % 2)
         layout.addWidget(group)
         hint = QLabel(
-            "Калибровочные сервисы вызываются активным ROS-сеансом; панель честно "
-            "показывает их как недоступные, если такой сеанс не запущен."
+            "Сначала запустите arm VR-сеанс, отпустите Deadman и держите HMD и "
+            "оба контроллера в нейтрали. Кнопка сохранит эту позу без команд роботу."
         )
         hint.setWordWrap(True)
         hint.setObjectName("hint")
         layout.addWidget(hint)
         layout.addStretch(1)
-        self.tabs.addTab(tab, "VR и очки")
+        self.service_tabs.addTab(tab, "VR и очки")
+
+    def _add_voice_tab(self) -> None:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        group = QGroupBox("Голосовой ассистент «Добрыня»")
+        grid = QGridLayout(group)
+        self.voice_status = QLabel(
+            "ASR: локальный Vosk\n"
+            "LLM: локальная Ollama\n"
+            "TTS: Unitree RPC / мужской голос\n"
+            "Wake-name: Добрыня"
+        )
+        self.voice_status.setObjectName("cardText")
+        self.voice_status.setWordWrap(True)
+        grid.addWidget(self.voice_status, 0, 0, 1, 2)
+        grid.addWidget(self._action_button("voice_check", "Проверить ASR / LLM / TTS"), 1, 0)
+        layout.addWidget(group)
+        hint = QLabel(
+            "Проверка read-only: микрофон не записывается, команды роботу не "
+            "создаются. Wake-name gate и краткие ответы описаны в "
+            "docs/r1_voice_offline.md."
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("hint")
+        layout.addWidget(hint)
+        layout.addStretch(1)
+        self.service_tabs.addTab(tab, "Голос")
+
+    def _add_command_capture_tab(self) -> None:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        group = QGroupBox("Запись кнопок Unitree Explore")
+        form = QFormLayout(group)
+        self.capture_action = QComboBox()
+        self.capture_action.setEditable(True)
+        self.capture_action.addItems(
+            [
+                "Run",
+                "Lock",
+                "Damping",
+                "Zero Torque",
+                "Handshake",
+                "High Five",
+                "Hug",
+                "High Wave",
+                "Clap",
+                "Face Wave",
+            ]
+        )
+        self.capture_duration = QSpinBox()
+        self.capture_duration.setRange(4, 30)
+        self.capture_duration.setValue(12)
+        self.capture_duration.setSuffix(" с")
+        form.addRow("Какую кнопку записываем", self.capture_action)
+        form.addRow("Окно записи", self.capture_duration)
+        buttons = QHBoxLayout()
+        self.capture_start_button = QPushButton("● Начать запись")
+        self.capture_start_button.setObjectName("captureButton")
+        self.capture_start_button.clicked.connect(self.start_command_capture)
+        buttons.addWidget(self.capture_start_button)
+        self.capture_stop_button = QPushButton("Остановить запись")
+        self.capture_stop_button.clicked.connect(
+            lambda: self.controller.stop("command_capture")
+        )
+        buttons.addWidget(self.capture_stop_button)
+        form.addRow(buttons)
+        self.capture_status = QLabel(
+            "Выберите название, начните запись и один раз нажмите соответствующую "
+            "кнопку в Unitree Explore. Панель только слушает DDS и ничего не отправляет."
+        )
+        self.capture_status.setWordWrap(True)
+        self.capture_status.setObjectName("cardText")
+        form.addRow(self.capture_status)
+        layout.addWidget(group)
+        layout.addStretch(1)
+        self.service_tabs.addTab(tab, "Запись кнопок")
+
+    def start_command_capture(self) -> None:
+        label = self.capture_action.currentText().strip()
+        if not label:
+            QMessageBox.warning(self, "Нет названия", "Укажите название кнопки.")
+            return
+        if self.controller.is_running("command_capture"):
+            self.capture_status.setText("Запись уже идёт — нажмите кнопку в Unitree Explore.")
+            return
+        duration = self.capture_duration.value()
+        self.last_capture_path = ""
+        command = (
+            "exec ./scripts/r1-app-command-capture --label "
+            f"{shlex.quote(label)} --duration-sec {duration}"
+        )
+        self.capture_status.setText(
+            f"Запись «{label}» началась. Нажмите эту кнопку в Unitree Explore один раз."
+        )
+        self.controller.start(
+            "command_capture",
+            self.specs["command_capture"],
+            shell_command=command,
+        )
 
     def _add_video_tab(self) -> None:
         tab = QWidget()
@@ -328,7 +814,7 @@ class OperatorPanel(QMainWindow):
         hint.setObjectName("hint")
         layout.addWidget(hint)
         layout.addStretch(1)
-        self.tabs.addTab(tab, "Видео глазами робота")
+        self.service_tabs.addTab(tab, "Видео глазами робота")
 
     def _add_motion_tab(self) -> None:
         tab = QWidget()
@@ -337,6 +823,26 @@ class OperatorPanel(QMainWindow):
         arms_grid = QGridLayout(arms)
         arms_grid.addWidget(
             self._action_button("arms_live", "Повторять движения рук из VR"), 0, 0
+        )
+        arms_grid.addWidget(
+            self._action_button("hands_calibrate", "Калибровать руки (Deadman отпущен)"),
+            1,
+            0,
+        )
+        arms_grid.addWidget(
+            self._action_button("head_calibrate", "Калибровать голову (смотреть прямо)"),
+            1,
+            1,
+        )
+        arms_grid.addWidget(
+            self._action_button("prepare", "Подготовить руки (Deadman зажат)"),
+            2,
+            0,
+        )
+        arms_grid.addWidget(
+            self._action_button("arms_running_live", "Руки + Running (без стиков)"),
+            3,
+            0,
         )
         layout.addWidget(arms)
         legs = QGroupBox("Ноги")
@@ -357,13 +863,16 @@ class OperatorPanel(QMainWindow):
         warning = QLabel(
             "LIVE-кнопки требуют настройки allow_live, чек-листа оператора и "
             "всех существующих подтверждений проекта. Первый запуск должен быть "
-            "slow/suspended; KILL остаётся доступен сверху."
+            "slow/suspended; KILL остаётся доступен сверху. На текущей прошивке "
+            "переход в Running / FSM 811 сам поворачивает голову вправо даже при "
+            "выключенном head-control. Не пытайтесь исправлять это калибровкой "
+            "HMD: физическое управление головой пока заблокировано."
         )
         warning.setWordWrap(True)
         warning.setObjectName("warning")
         layout.addWidget(warning)
         layout.addStretch(1)
-        self.tabs.addTab(tab, "Руки / ноги / teleop")
+        self.service_tabs.addTab(tab, "Руки / ноги / teleop")
 
     def _add_logs_tab(self) -> None:
         tab = QWidget()
@@ -371,7 +880,7 @@ class OperatorPanel(QMainWindow):
         layout = QVBoxLayout(tab)
         toolbar = QHBoxLayout()
         show_latest = QPushButton("Показать последние логи")
-        show_latest.clicked.connect(lambda: self.tabs.setCurrentWidget(self.logs_tab))
+        show_latest.clicked.connect(self._show_logs)
         toolbar.addWidget(show_latest)
         clear = QPushButton("Очистить экран логов")
         clear.clicked.connect(lambda: self.log_view.clear())
@@ -379,14 +888,24 @@ class OperatorPanel(QMainWindow):
         open_logs = QPushButton("Открыть папку логов")
         open_logs.clicked.connect(self.open_logs)
         toolbar.addWidget(open_logs)
+        export = QPushButton("Экспортировать отчёт")
+        export.clicked.connect(self.export_report)
+        toolbar.addWidget(export)
         toolbar.addStretch(1)
         layout.addLayout(toolbar)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setLineWrapMode(QPlainTextEdit.NoWrap)
+        # A POV/ROS process can run for hours; keep the panel responsive while
+        # retaining enough recent output for diagnosis.
+        self.log_view.setMaximumBlockCount(5000)
         self.log_view.setFont(QFont("Monospace", 9))
         layout.addWidget(self.log_view)
-        self.tabs.addTab(tab, "Логи")
+        self.service_tabs.addTab(tab, "Логи")
+
+    def _show_logs(self) -> None:
+        self.tabs.setCurrentWidget(self.service_tabs)
+        self.service_tabs.setCurrentWidget(self.logs_tab)
 
     def _card(self, title: str, text: str) -> QGroupBox:
         card = QGroupBox(title)
@@ -416,8 +935,353 @@ class OperatorPanel(QMainWindow):
             return "DRY-RUN\nlive выключен"
         return "LIVE-подготовка\nчерез safety gates"
 
+    @staticmethod
+    def _set_simple_status(label: QLabel, text: str, state: str) -> None:
+        colors = {
+            "ok": ("#214f3b", "#83e3ad"),
+            "wait": ("#5a481f", "#ffd166"),
+            "off": ("#44353a", "#d9b6be"),
+        }
+        background, foreground = colors[state]
+        label.setText(text)
+        label.setStyleSheet(
+            "padding: 9px 12px; border-radius: 5px; "
+            f"background: {background}; color: {foreground}; font-weight: bold;"
+        )
+
+    def start_video_preview(self) -> None:
+        if "video_preview" in self.__dict__:
+            self.video_preview.start()
+
+    def start_background_services(self) -> None:
+        """Start read-only camera, battery and voice discovery."""
+        self.background_services_started = True
+        self.start_video_preview()
+        if (
+            self.config.auto_start_bridge
+            and not self.controller.is_running("connection_ensure")
+        ):
+            self.controller.start(
+                "connection_ensure", self.specs["connection_ensure"]
+            )
+        elif (
+            self.config.auto_start_video
+            and not self.config.auto_start_bridge
+            and not self.controller.is_running("video_robot")
+        ):
+            # A video-only deployment may opt out of the bridge. Start just
+            # the read-only POV process in that case; RUN remains manual.
+            self.controller.start("video_robot", self.specs["video_robot"])
+        if not self.controller.is_running("battery_monitor"):
+            self.controller.start(
+                "battery_monitor", self.specs["battery_monitor"]
+            )
+        if not self.controller.is_running("sdk_warmup") and not self.__dict__.get("pending_warmup_key"):
+            self.controller.start("sdk_warmup", self.specs["sdk_warmup"])
+        if not self.controller.is_running("voice:voice_remote"):
+            self.controller.start(
+                "voice:voice_remote", self.specs["voice_remote"]
+            )
+
+    def auto_connect(self) -> None:
+        self.zero_torque_idle = False
+        if "status_timer" in self.__dict__ and not self.status_timer.isActive():
+            self.status_timer.start()
+        self.connection_state = "searching"
+        headset_ip = _discover_headset_ip() if self.config.vr_transport == "lan" else None
+        if headset_ip and headset_ip != self.config.vr_headset_ip:
+            # DHCP changes at exhibitions are normal. Keep the discovered
+            # address in memory for this session; the next launch discovers it
+            # again instead of pinning a stale address in the config file.
+            self.config.vr_headset_ip = headset_ip
+            self.controller.config = self.config
+            self._append_log(
+                "connection_ensure",
+                f"[OK] VR-шлем найден автоматически: {headset_ip}\n",
+            )
+        if "robot_name_label" in self.__dict__:
+            self.robot_name_label.setText(
+                f"◌  {self.config.robot_name}  — подключение…"
+            )
+            self.robot_name_label.setProperty("connectionState", "searching")
+            self.connect_button.setText("ПОИСК И ПОДКЛЮЧЕНИЕ…")
+            self.connect_button.setEnabled(False)
+        self.start_background_services()
+        if not self.controller.is_running("check_all"):
+            self._run_check_all()
+        self.last_status = "Жёлтый • автоматическое подключение выполняется"
+        self._refresh_summary()
+
+    def _run_main_reconnect(self) -> None:
+        """Reconnect the complete operator path with one button.
+
+        The reconnect helper is useful while a manager is already running,
+        but it quite reasonably refuses to act when the panel was opened
+        before any exhibition session existed.  On the main screen that must
+        feel like one automatic action: start discovery/warmup, then create a
+        static session when there is no current owner.
+        """
+        self.auto_connect()
+        existing = active_session_snapshot()
+        if self.controller.is_running("exhibition") or existing.get("mode") in {
+            "static", "control"
+        }:
+            process_key = "exhibition_service:exhibition_reconnect"
+            if not self.controller.is_running(process_key):
+                self.controller.start(
+                    process_key, self.specs["exhibition_reconnect"]
+                )
+            return
+        requested = self.exhibition_requested_mode
+        if requested not in {"exhibition_static", "exhibition_control"}:
+            requested = "exhibition_static"
+        self._run_exhibition_mode(requested)
+
+    def _run_main_calibration(self) -> None:
+        """Calibrate through the live manager, starting it when necessary."""
+        self.auto_connect()
+        existing = active_session_snapshot()
+        control_active = (
+            self.controller.is_running("exhibition")
+            and self.exhibition_requested_mode == "exhibition_control"
+        ) or (
+            existing.get("mode") == "control"
+            and existing.get("status") in {"ready", "locked", "degraded"}
+        )
+        if not control_active:
+            # The control manager performs its read-only neutral capture as
+            # part of startup, so a first calibration click does not require
+            # a separate manual preparation step.
+            self._run_exhibition_mode("exhibition_control")
+            return
+        process_key = "exhibition_service:exhibition_calibrate"
+        if not self.controller.is_running(process_key):
+            self.controller.start(
+                process_key, self.specs["exhibition_calibrate"]
+            )
+
+    def _ensure_main_services(self) -> None:
+        """Make every main-screen action self-starting after panel launch."""
+        # Lightweight __new__ instances used by unit tests do not have a Qt
+        # timer yet; those callers intentionally exercise only the mode logic.
+        if "status_timer" not in self.__dict__:
+            return
+        if not self.status_timer.isActive():
+            self.status_timer.start()
+        if self.connection_state == "offline":
+            self.auto_connect()
+        elif not self.background_services_started:
+            self.start_background_services()
+
+    def toggle_service_view(self) -> None:
+        """Keep the normal operator on one screen; expose service tools on demand."""
+        service_visible = self.tabs.currentIndex() == 1
+        self.tabs.setCurrentIndex(0 if service_visible else 1)
+        self.service_toggle.setText(
+            "⚙  Расширенные настройки" if service_visible else "←  Главный экран"
+        )
+
+    def show_quick_start(self) -> None:
+        QMessageBox.information(
+            self,
+            "Как запустить Unitree R1",
+            "1. Поставьте робота устойчиво и освободите место вокруг него.\n"
+            "2. Включите робота и VR-шлем с контроллерами.\n"
+            "3. Дождитесь зелёного «ПОДКЛЮЧЕНО», изображения с камеры и "
+            "зелёных статусов VR.\n"
+            "4. Для показа видео нажмите «LOCK / СТАТИЧНЫЙ РЕЖИМ».\n"
+            "5. Для головы, рук и ходьбы закройте экран управления Unitree "
+            "Explore и нажмите «RUN / ПОЛНОЕ УПРАВЛЕНИЕ». Панель сама "
+            "переведёт робота в Run.\n"
+            "6. X слева возвращает руки в нейтраль; B справа выполняет "
+            "аварийную остановку.\n\n"
+            "Первый RUN подготавливает управление. Для обычной паузы используйте "
+            "LOCK, затем RUN с отпущенными стиками: полный перезапуск не нужен. "
+            "STOP, KILL и Zero Torque находятся в разделе «Аварийное».",
+        )
+
+    def _on_video_state(self, text: str, state: str) -> None:
+        self.video_state = state
+        if state == "online":
+            self.status_values["video"] = "OK"
+        elif state in {"searching", "offline"}:
+            self.status_values["video"] = "RECONNECTING"
+        self._refresh_exhibition_status()
+
+    def _refresh_exhibition_status(self) -> None:
+        """Render the compact, Russian exhibition status from read-only data."""
+        # Several focused unit tests construct the Python side without calling
+        # QMainWindow.__init__; querying Qt attributes with hasattr() then
+        # raises from SIP, so inspect the plain instance dictionary instead.
+        if "exhibition_robot_status" not in self.__dict__:
+            return
+        robot = self.status_values.get("robot", "UNKNOWN").upper()
+        pc2 = self.status_values.get("pc2", "UNKNOWN").upper()
+        vr = self.status_values.get("vr", "UNKNOWN").upper()
+        controllers = self.status_values.get("controllers", "").upper()
+        deadman = self.status_values.get("deadman", "UNKNOWN").upper()
+        video = self.status_values.get("video", "UNKNOWN").upper()
+        voice = self.status_values.get("voice", "UNKNOWN").upper()
+
+        if robot in {"OK", "FOUND", "RUNNING", "READY"}:
+            self._set_simple_status(self.exhibition_robot_status, "● Робот найден", "ok")
+            self.connection_state = "connected"
+            if "robot_name_label" in self.__dict__:
+                self.robot_name_label.setText(
+                    f"●  {self.config.robot_name}    ETHERNET"
+                )
+                self.robot_name_label.setProperty("connectionState", "connected")
+                self.connect_button.setText("✓  ПОДКЛЮЧЕНО")
+                self.connect_button.setEnabled(True)
+                self.operator_instruction.setText(
+                    "Робот подключён. Проверьте видео и VR ниже, затем выберите режим."
+                )
+        elif pc2 in {"OK", "FOUND", "RUNNING", "READY"}:
+            self._set_simple_status(
+                self.exhibition_robot_status,
+                "◐ PC2 по кабелю; управление не отвечает",
+                "wait",
+            )
+            self.connection_state = "searching"
+            if "robot_name_label" in self.__dict__:
+                self.robot_name_label.setText(
+                    f"◐  {self.config.robot_name}  — PC2 по кабелю"
+                )
+                self.robot_name_label.setProperty("connectionState", "searching")
+                self.connect_button.setText("…  УПРАВЛЕНИЕ НЕ В СЕТИ")
+                self.connect_button.setEnabled(True)
+                self.operator_instruction.setText(
+                    "Кабель и PC2 работают, но управляющий модуль "
+                    "192.168.123.161 не отвечает. Run и камера появятся "
+                    "автоматически после его загрузки."
+                )
+        else:
+            self._set_simple_status(
+                self.exhibition_robot_status, "○ Робот не найден", "off"
+            )
+            if self.connection_state != "searching":
+                self.connection_state = "offline"
+                if "robot_name_label" in self.__dict__:
+                    self.robot_name_label.setText(
+                        f"○  {self.config.robot_name}  — не в сети"
+                    )
+                    self.robot_name_label.setProperty("connectionState", "offline")
+                    self.connect_button.setText("↻  НАЙТИ И ПОДКЛЮЧИТЬ")
+                    self.connect_button.setEnabled(True)
+                    self.operator_instruction.setText(
+                        "Включите робота и проверьте кабель TP-Link. "
+                        "Поиск продолжится автоматически."
+                    )
+        if "robot_name_label" in self.__dict__:
+            self.robot_name_label.style().unpolish(self.robot_name_label)
+            self.robot_name_label.style().polish(self.robot_name_label)
+
+        if vr in {"OK", "FOUND", "RUNNING", "READY"}:
+            self._set_simple_status(self.exhibition_vr_status, "● Очки найдены", "ok")
+        elif vr in {"RECOVERING", "RECONNECTING", "STALE"}:
+            self._set_simple_status(self.exhibition_vr_status, "… Очки переподключаются", "wait")
+        else:
+            self._set_simple_status(self.exhibition_vr_status, "○ Очки не найдены", "off")
+
+        if not controllers:
+            if vr in {"OK", "FOUND", "RUNNING", "READY"} and deadman != "UNKNOWN":
+                controllers = "OK"
+            elif vr in {"OK", "FOUND", "RUNNING", "READY"}:
+                controllers = "RECOVERING"
+            else:
+                controllers = "OFFLINE"
+        if controllers in {"OK", "FOUND", "RUNNING", "READY"}:
+            self._set_simple_status(
+                self.exhibition_controllers_status, "● Контроллеры найдены", "ok"
+            )
+        elif controllers in {"RECOVERING", "RECONNECTING", "STALE", "HOLD"}:
+            self._set_simple_status(
+                self.exhibition_controllers_status,
+                "… Контроллеры восстанавливаются",
+                "wait",
+            )
+        else:
+            self._set_simple_status(
+                self.exhibition_controllers_status, "○ Контроллеры не найдены", "off"
+            )
+
+        if video in {"OK", "RUNNING", "READY"}:
+            self._set_simple_status(self.exhibition_video_status, "● Видео работает", "ok")
+        elif video in {"RECOVERING", "RECONNECTING", "STARTING"}:
+            self._set_simple_status(self.exhibition_video_status, "… Видео запускается", "wait")
+        else:
+            self._set_simple_status(self.exhibition_video_status, "○ Нет видео", "off")
+
+        if "exhibition_voice_status" in self.__dict__:
+            if voice in {"OK", "RUNNING", "READY", "ACTIVE"}:
+                self._set_simple_status(
+                    self.exhibition_voice_status, "● Голос Добрыня работает", "ok"
+                )
+            elif voice in {"STARTING", "RECONNECTING", "UNKNOWN"}:
+                self._set_simple_status(
+                    self.exhibition_voice_status, "… Голос подключается", "wait"
+                )
+            else:
+                self._set_simple_status(
+                    self.exhibition_voice_status, "○ Голос не подключён", "off"
+                )
+
+        reported_mode = self.status_values.get("mode", "").strip().lower()
+        kill = self.status_values.get("kill", "").strip().upper()
+        emergency = self.status_values.get("emergency", "").strip().upper()
+        mode_names = {
+            "static": "Статичный",
+            "control": "Управление",
+            "stopped": "Остановлен",
+            "starting": "Запускается",
+        }
+        mode = mode_names.get(reported_mode, self.exhibition_mode)
+        if (
+            reported_mode == "static"
+            and self.__dict__.get("exhibition_requested_mode") == "exhibition_stand"
+        ):
+            mode = "Стойка"
+        mode_state = "ok" if mode in {"Статичный", "Управление"} else "wait"
+        if mode == "Стойка":
+            mode_state = "ok"
+        if reported_mode == "control":
+            sequential_names = {
+                "arms": "Управление руками и головой",
+                "releasing_arms": "Передача управления для ходьбы…",
+                "waiting_811": "Ожидание режима ходьбы…",
+                "walking": "Ходьба — руки и голова под управлением робота",
+                "stopping": "Остановка перед возвратом VR…",
+                "fault": "Ошибка переключения режима",
+            }
+            mode = sequential_names.get(
+                self.status_values.get("sequential_phase", ""), mode
+            )
+        manager_status = self.status_values.get("exhibition", "")
+        if manager_status and manager_status not in {"ready", "locked", "stopped"}:
+            mode = {
+                "degraded": "Нужно восстановление — нажмите RUN после проверки связи",
+                "blocked": "Запуск заблокирован — см. причину в логах",
+                "reconnecting": "Восстановление связи…",
+                "resuming": "Возврат управления…",
+                "rearming": "Подготовка после остановки…",
+            }.get(manager_status, "Подготовка — жду подтверждения робота…")
+            mode_state = "wait"
+        if emergency == "RIGHT_B":
+            mode = "Аварийная остановка нажата на правом контроллере B"
+            mode_state = "off"
+            if "operator_instruction" in self.__dict__:
+                self.operator_instruction.setText(mode)
+        elif reported_mode == "control" and kill == "LATCHED":
+            mode = "Управление остановлено (KILL)"
+            mode_state = "off"
+        if mode == "Остановлен":
+            mode_state = "off"
+        self._set_simple_status(
+            self.exhibition_mode_status, f"Режим: {mode}", mode_state
+        )
+
     def _refresh_summary(self) -> None:
-        self.mode_label.setText("РЕЖИМ: " + ("DRY-RUN" if self.config.dry_run else "LIVE-подготовка"))
+        self.mode_label.setText("РЕЖИМ: " + self.exhibition_mode.upper())
         self.status_label.setText(self.last_status)
         if self.last_status.startswith("Зелёный"):
             color = "#2d8a57"
@@ -438,18 +1302,71 @@ class OperatorPanel(QMainWindow):
             ", ".join(active) if active else "Нет активных процессов"
         )
         self.summary_mode._value_label.setText(self._mode_text())  # type: ignore[attr-defined]
+        if self.status_values:
+            labels = {
+                "ethernet": "Ethernet", "robot": "робот", "vr": "VR",
+                "hmd": "HMD", "hands": "руки", "sticks": "стики",
+                "deadman": "deadman", "kill": "kill", "writer": "writer",
+                "feedback": "feedback", "video": "video",
+            }
+            health = "  |  ".join(
+                f"{labels.get(key, key)}: {value}"
+                for key, value in self.status_values.items()
+                if key != "project"
+            )
+            self.summary_health._value_label.setText(  # type: ignore[attr-defined]
+                f"{health}\nROS_DOMAIN_ID="
+                f"{self.status_values.get('ros_domain', self.config.ros_domain_id)}"
+            )
+        self._refresh_exhibition_status()
 
     def run_key(self, key: str) -> None:
+        if key == "reset_kill":
+            # This is intentionally the same reviewed path as an explicit RUN;
+            # it never exposes the writer's low-level reset service directly.
+            self._run_exhibition_mode("exhibition_control")
+            return
         spec = self.specs[key]
         if not spec.implemented:
             QMessageBox.information(self, spec.title, spec.note)
             return
+        if key in ("stop", "kill", "exhibition_stop"):
+            # A human STOP/KILL always cancels an already queued mode switch.
+            # Otherwise the stop helper could finish and immediately launch
+            # the pending live mode behind the operator's back.
+            self.pending_exhibition_key = None
+            self.pending_exhibition_environment = None
+            self.pending_warmup_key = None
+            self.pending_warmup_environment = None
+            self.exhibition_switch_in_progress = False
+            self.exhibition_stop_complete = False
+            self.exhibition_manager_stopped = False
+            self.pending_zero_torque = False
+            self._clear_live_confirmation()
         if key == "check_all":
             self._run_check_all()
             return
-        if spec.live and not self._confirm_live(spec):
+        if key in ("exhibition_static", "exhibition_control", "exhibition_stand"):
+            self._run_exhibition_mode(key)
             return
-        if spec.category == "video":
+        if key == "exhibition_reconnect":
+            self._run_main_reconnect()
+            return
+        if key == "exhibition_calibrate":
+            self._run_main_calibration()
+            return
+        live_environment = None
+        if spec.live:
+            if not self._confirm_live(
+                spec, require_run_mode=spec.requires_run_mode
+            ):
+                return
+            live_environment = self._live_environment(
+                run_mode_confirmed=spec.requires_run_mode
+            )
+        if key == "exhibition_stop":
+            process_key = "exhibition_stop"
+        elif spec.category == "video":
             process_key = "video"
         elif spec.category in ("arms", "legs", "full", "vr"):
             process_key = "motion"
@@ -459,21 +1376,462 @@ class OperatorPanel(QMainWindow):
             process_key = spec.category + ":" + key
         if spec.category == "robot" and key in ("stop", "kill"):
             process_key = key
-        self.controller.start(process_key, spec)
+        self.controller.start(
+            process_key,
+            spec,
+            env_overrides=live_environment,
+        )
+
+    def request_zero_torque(self) -> None:
+        """Stop every physical owner, then request confirmed Damping -> FSM 0."""
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setWindowTitle("Zero Torque — робот потеряет удержание")
+        dialog.setText(
+            "После Zero Torque суставы перестанут удерживать робота. "
+            "Он может резко сложиться или упасть."
+        )
+        dialog.setInformativeText(
+            "Продолжайте только если робот лежит или надёжно поддержан. "
+            "Панель сначала завершит VR и управляющие процессы, затем "
+            "подтвердит Damping и включит Zero Torque."
+        )
+        relax = dialog.addButton("РАССЛАБИТЬ РОБОТА", QMessageBox.DestructiveRole)
+        cancel = dialog.addButton("Отмена", QMessageBox.RejectRole)
+        dialog.setDefaultButton(cancel)
+        dialog.exec_()
+        if dialog.clickedButton() is not relax:
+            return
+
+        self.pending_exhibition_key = None
+        self.pending_exhibition_environment = None
+        self.exhibition_switch_in_progress = False
+        self.exhibition_stop_complete = False
+        self.exhibition_manager_stopped = False
+        self.pending_zero_torque = True
+        self.pending_warmup_key = None
+        self.pending_warmup_environment = None
+        self.zero_torque_deadline = time.monotonic() + 75.0
+        self.zero_torque_handoff_started = False
+        self.zero_torque_handoff_complete = False
+        self._clear_live_confirmation()
+        self._append_log(
+            "zero_torque",
+            "[INFO] Сначала завершаю все физические управляющие процессы.\n",
+        )
+
+        if self.controller.is_running("exhibition"):
+            if not self.controller.is_running("exhibition_stop"):
+                self.controller.start(
+                    "exhibition_stop", self.specs["exhibition_stop"]
+                )
+        elif any(
+            self.controller.is_running(key)
+            for key in ("motion", "robot:prepare")
+        ):
+            if not self.controller.is_running("stop"):
+                self.controller.start("stop", self.specs["stop"])
+        self._continue_zero_torque_when_idle()
+
+    def _continue_zero_torque_when_idle(self) -> None:
+        """Wait asynchronously for SDK owners to exit before FSM commands."""
+        if not self.pending_zero_torque:
+            return
+        physical_keys = {
+            "exhibition", "exhibition_stop", "motion", "robot:prepare",
+            "stop", "kill",
+        }
+        active = set(self.controller.active_keys())
+        if active.intersection(physical_keys):
+            if time.monotonic() >= self.zero_torque_deadline:
+                self.pending_zero_torque = False
+                QMessageBox.critical(
+                    self,
+                    "Zero Torque не выполнен",
+                    "Управляющие процессы не завершились вовремя. "
+                    "Команда Zero Torque роботу не отправлялась.",
+                )
+                return
+            QTimer.singleShot(250, self._continue_zero_torque_when_idle)
+            return
+
+        # The requested end state is deliberately quiet: after physical
+        # owners have released the SDK, stop every panel helper as well. The
+        # operator can start discovery again with «НАЙТИ И ПОДКЛЮЧИТЬ».
+        helpers = active.difference({"zero_torque", ZERO_TORQUE_HANDOFF_KEY})
+        if helpers:
+            self.status_timer.stop()
+            if "video_preview" in self.__dict__:
+                self.video_preview.stop()
+            for key in helpers:
+                self.controller.stop(key)
+            self.background_services_started = False
+            QTimer.singleShot(0, self._continue_zero_torque_when_idle)
+            return
+
+        # The offline video/bridge session is usually a user systemd unit,
+        # therefore it is not necessarily present in ``active_keys()``.  Hand
+        # it off explicitly and wait for its exact ports to disappear before
+        # opening the SDK channel for FSM 1 -> 0.  This closes the race where
+        # the next RUN inherits a stale DDS/UDP owner from the previous run.
+        if not self.zero_torque_handoff_complete:
+            if not self.zero_torque_handoff_started:
+                self.zero_torque_handoff_started = True
+                self._append_log(
+                    "zero_torque",
+                    "[INFO] Останавливаю offline bridge/video и жду освобождения "
+                    "портов 8080/9090/9091.\n",
+                )
+                handoff_spec = CommandSpec(
+                    ZERO_TORQUE_HANDOFF_KEY,
+                    "Остановить offline bridge перед Zero Torque",
+                )
+                if not self.controller.start(
+                    ZERO_TORQUE_HANDOFF_KEY,
+                    handoff_spec,
+                    shell_command=ZERO_TORQUE_HANDOFF_COMMAND,
+                ):
+                    self.zero_torque_handoff_started = False
+                    self.pending_zero_torque = False
+                    QMessageBox.critical(
+                        self,
+                        "Zero Torque отменён",
+                        "Не удалось запустить handoff offline-сервиса. "
+                        "Damping и Zero Torque роботу не отправлялись.",
+                    )
+                return
+            # The handoff process has either not emitted finished yet or its
+            # finished callback is queued.  Do not start another copy and do
+            # not open the robot SDK while it is still active.
+            if self.controller.is_running(ZERO_TORQUE_HANDOFF_KEY):
+                return
+            # A non-zero exit is handled in _on_finished().  Reaching this
+            # branch without the completion flag is therefore a fail-closed
+            # guard for mocked controllers and unexpected process removal.
+            self.pending_zero_torque = False
+            QMessageBox.critical(
+                self,
+                "Zero Torque отменён",
+                "Offline bridge не подтвердил освобождение портов. "
+                "Damping и Zero Torque роботу не отправлялись.",
+            )
+            return
+
+        self.pending_zero_torque = False
+        self.zero_torque_idle = True
+        environment = {
+            "ROBOT_CONFIRM_ZERO_TORQUE": "1",
+            "ROBOT_CONFIRM_ROBOT_SUPPORTED": "1",
+            "ROBOT_ZERO_TORQUE_TOKEN": secrets.token_urlsafe(24),
+        }
+        self.controller.start(
+            "zero_torque",
+            self.specs["zero_torque"],
+            env_overrides=environment,
+        )
+
+    def _run_exhibition_mode(self, key: str) -> None:
+        spec = self.specs[key]
+        if self.__dict__.get("pending_zero_torque", False) or self.controller.is_running("zero_torque"):
+            self._append_log(key, "[INFO] Дождитесь завершения Zero Torque; затем нажмите нужный режим.\n")
+            return
+        # Never run a fast rearm against the owner already being stopped.
+        # Only an existing operator-requested switch may have its destination
+        # replaced. An explicit STOP cannot queue or resurrect movement.
+        if self.controller.is_running("exhibition_stop") or self.__dict__.get("exhibition_switch_in_progress", False):
+            if not self.__dict__.get("pending_exhibition_key"):
+                self._append_log(key, "[INFO] Выполняется STOP; после завершения нажмите нужный режим.\n")
+                return
+            if not self._confirm_live(
+                spec, automatic_preflight=True, require_vr=key == "exhibition_control",
+                session_arm=key == "exhibition_control", require_run_mode=spec.requires_run_mode,
+                skip_checklist=True,
+            ):
+                return
+            self.pending_exhibition_key = key
+            self.pending_exhibition_environment = self._live_environment(
+                run_mode_confirmed=spec.requires_run_mode)
+            self._append_log(key, "[INFO] Следующий режим обновлён; жду безопасного завершения текущего.\n")
+            return
+        self._ensure_main_services()
+        existing = active_session_snapshot()
+        if (
+            key == "exhibition_stand"
+            and existing.get("mode") == "static"
+            and existing.get("status") == "ready"
+        ):
+            self.exhibition_mode = "Стойка"
+            self._refresh_summary()
+            return
+        external_control = (
+            existing.get("mode") == "control"
+            and existing.get("session_mode") == "session_arm"
+            and existing.get("status") in {"ready", "locked", "degraded"}
+        )
+        if (
+            key != "exhibition_stand" and external_control
+            and not self.controller.is_running("exhibition")
+        ):
+            # The CLI validates the actual owner and its acknowledgement.
+            # Never start a competing graph just because QProcess did not
+            # launch this session (panel reopen / terminal / service restart).
+            action = (
+                "exhibition_lock"
+                if key == "exhibition_static"
+                else "exhibition_rearm"
+            )
+            if self.controller.is_running(action):
+                return
+            self.exhibition_requested_mode = "exhibition_control"
+            self.exhibition_mode = (
+                "Переход в LOCK…"
+                if key == "exhibition_static"
+                else "Возврат управления…"
+            )
+            self._refresh_summary()
+            self.controller.start(action, self.specs[action])
+            return
+        fast_lock = (
+            key == "exhibition_static"
+            and self.controller.is_running("exhibition")
+            and (
+                self.exhibition_requested_mode == "exhibition_control"
+                or self.status_values.get("mode", "").strip().lower()
+                == "control"
+            )
+        )
+        if fast_lock:
+            # LOCK is a normal operating action, not a teardown.  Keep the
+            # already checked SDK graph, POV and writer alive; the bridge's
+            # pause service continuously holds the upper body and publishes
+            # zero locomotion.  Full STOP/KILL remains in the service tab.
+            if self.controller.is_running("exhibition_lock"):
+                return
+            self.exhibition_mode = "Переход в LOCK…"
+            self._refresh_summary()
+            self.controller.start(
+                "exhibition_lock", self.specs["exhibition_lock"]
+            )
+            return
+        same_mode = (
+            key != "exhibition_stand"
+            and self.controller.is_running("exhibition")
+            and self.exhibition_requested_mode == key
+        )
+        if same_mode:
+            # A writer-side safeguard can latch KILL while the healthy graph,
+            # video and VR bridge remain alive.  Reusing that graph avoids a
+            # minute-long SDK restart and gives RUN the same quick recovery
+            # behavior an operator expects from Unitree Explore.
+            environment = self._live_environment(
+                run_mode_confirmed=spec.requires_run_mode
+            )
+            self.exhibition_mode = "Повторный запуск…"
+            self._refresh_summary()
+            self.controller.start(
+                "exhibition_rearm",
+                self.specs["exhibition_rearm"],
+                env_overrides=environment,
+            )
+            return
+        if self.controller.is_running("exhibition_stop"):
+            self._append_log(key, "[INFO] Дождитесь завершения безопасной остановки.\n")
+            return
+
+        require_vr = key == "exhibition_control"
+        if not self._confirm_live(
+            spec,
+            automatic_preflight=True,
+            require_vr=require_vr,
+            session_arm=require_vr,
+            require_run_mode=spec.requires_run_mode,
+            # LOCK and RUN are the two normal exhibition actions.  They run
+            # the automatic preflight inside the selected mode and must stay
+            # one-click for an untrained operator; do not open the legacy
+            # per-item acknowledgement dialog here.
+            skip_checklist=True,
+        ):
+            return
+        self.exhibition_session_confirmed = True
+        environment = self._live_environment(
+            run_mode_confirmed=spec.requires_run_mode
+        )
+
+        # Stop the read-only worker asynchronously and wait for its owned
+        # temporary reader cleanup. The manager will check any completed
+        # attestation or perform its authoritative preflight itself.
+        if (
+            not self.controller.is_running("exhibition")
+            and self.controller.is_running("sdk_warmup")
+        ):
+            # The exhibition manager owns the authoritative preflight and can
+            # wait for the robot itself. Do not make the operator wait for a
+            # separate background warmup (which may be asleep between its
+            # periodic checks) before the one-click STAND action is accepted.
+            was_pending = bool(self.__dict__.get("pending_warmup_key"))
+            self.pending_warmup_key = key
+            self.pending_warmup_environment = environment
+            self.exhibition_mode = "Завершение фоновой проверки…"
+            self._refresh_summary()
+            if not was_pending:
+                self.controller.stop("sdk_warmup", graceful_timeout_ms=12000, wait=False)
+            return
+
+        if self.controller.is_running("exhibition") or (
+            bool(existing) and key in {"exhibition_stand", "exhibition_control"}
+        ):
+            self.pending_exhibition_key = key
+            self.pending_exhibition_environment = environment
+            self.exhibition_switch_in_progress = True
+            self.exhibition_stop_complete = False
+            self.exhibition_manager_stopped = False
+            self.exhibition_mode = "Переключение…"
+            self._refresh_summary()
+            self._append_log(
+                key,
+                "[INFO] Сначала безопасно останавливаю текущий выставочный режим.\n",
+            )
+            self.controller.start(
+                "exhibition_stop", self.specs["exhibition_stop"]
+            )
+            return
+        self._start_exhibition_mode(key, environment)
+
+    def _start_exhibition_mode(
+        self, key: str, environment: Optional[Dict[str, str]] = None
+    ) -> None:
+        self.exhibition_requested_mode = key
+        self.exhibition_mode = "Запускается…"
+        started = self.controller.start(
+            "exhibition", self.specs[key], env_overrides=environment
+        )
+        if not started:
+            self.exhibition_mode = "Остановлен"
+        self._refresh_summary()
+
+    def _start_pending_exhibition_mode(self) -> None:
+        key = self.pending_exhibition_key
+        environment = self.pending_exhibition_environment
+        self.pending_exhibition_key = None
+        self.pending_exhibition_environment = None
+        self.exhibition_switch_in_progress = False
+        self.exhibition_stop_complete = False
+        self.exhibition_manager_stopped = False
+        if key:
+            self._start_exhibition_mode(key, environment)
+
+    def _start_pending_warmup_mode(self) -> None:
+        if self.controller.is_running("sdk_warmup"):
+            return
+        key = self.pending_warmup_key
+        environment = self.pending_warmup_environment
+        self.pending_warmup_key = None
+        self.pending_warmup_environment = None
+        if not key:
+            return
+        if (
+            self.__dict__.get("pending_zero_torque", False)
+            or self.__dict__.get("close_after_stop", False)
+            or self.__dict__.get("exhibition_switch_in_progress", False)
+            or any(self.controller.is_running(action) for action in (
+                "exhibition", "exhibition_stop", "stop", "kill", "zero_torque"))
+            or active_session_snapshot()
+        ):
+            self._append_log(key, "[BLOCKED] Состояние изменилось во время фоновой проверки; повторите выбор режима после завершения текущего действия.\n")
+            return
+        self._start_exhibition_mode(key, environment)
+
+    def _poll_panel_status(self) -> None:
+        """Refresh the read-only health snapshot without blocking the UI."""
+        if self.zero_torque_idle:
+            return
+        if not self.background_services_started:
+            self.start_background_services()
+        if not self.controller.is_running("battery_monitor"):
+            self.controller.start(
+                "battery_monitor", self.specs["battery_monitor"]
+            )
+        if (
+            not self.controller.is_running("exhibition")
+            and not self.controller.is_running("sdk_warmup")
+            and not self.__dict__.get("pending_warmup_key")
+            and not active_session_snapshot()
+        ):
+            self.controller.start("sdk_warmup", self.specs["sdk_warmup"])
+        spec = self.specs.get("panel_status")
+        if spec and not self.controller.is_running("panel_status"):
+            self.controller.start("panel_status", spec)
+
+    def _parse_status_output(self, text: str) -> None:
+        updated = set()
+        for line in text.splitlines():
+            if not line.startswith("STATUS ") or "=" not in line:
+                continue
+            key, value = line[7:].split("=", 1)
+            self.status_values[key.strip()] = value.strip()
+            updated.add(key.strip())
+            if key.strip() == "robot" and value.strip() == "OFFLINE":
+                # A previously successful check must not authorize a live
+                # session after the robot disappears from the LAN.
+                self.preflight_ok = False
+                self.pending_warmup_key = None
+                self.pending_warmup_environment = None
+                self._clear_live_confirmation()
+            # A latched software KILL is the required startup state for a
+            # physical writer. Keep it visible, but do not invalidate a fresh
+            # read-only preflight merely because the fail-closed latch is set.
+        # Both fields must come from this snapshot, not a previous session.
+        if {"exhibition", "mode"} <= updated and not self.__dict__.get("exhibition_switch_in_progress", False):
+            status = self.status_values["exhibition"]
+            mode = self.status_values["mode"]
+            if status == "ready":
+                self.exhibition_mode = "Управление" if mode == "control" else "Стойка"
+            elif status == "locked":
+                self.exhibition_mode = "LOCK — удержание позы"
+        self._refresh_exhibition_status()
 
     def _run_check_all(self) -> None:
+        # A fresh run must re-open the gate only after all read-only checks
+        # complete successfully; stale success cannot authorize a new session.
+        self.preflight_ok = False
         command = (
-            "set +e; "
-            "echo '=== Сеть и Ethernet ==='; make r1-lan-preflight; "
-            "echo '=== Робот / VR / ROS2 ==='; make robot-preflight; "
-            "echo '=== Камера и DDS ==='; make r1-camera-preflight; "
-            "echo '=== Сводный статус ==='; make r1-teleoperation-status; "
-            "exit 0"
+            "status=0; "
+            "run_check() { \"$@\"; rc=$?; "
+            "if (( rc > status )); then status=$rc; fi; return 0; }; "
+            "run_advisory() { \"$@\"; rc=$?; "
+            "if (( rc > 0 )); then echo '[WARN] advisory check returned '\"$rc\"; fi; "
+            "return 0; }; "
+            "echo '=== Сеть и Ethernet ==='; run_check make r1-lan-preflight; "
+            "echo '=== Робот / VR / ROS2 ==='; run_check make robot-preflight; "
+            "echo '=== Камера и DDS (диагностика) ==='; "
+            "run_advisory make r1-camera-preflight; "
+            "echo '=== Сводный статус ==='; run_check make r1-teleoperation-status; "
+            "exit \"$status\""
         )
         spec = self.specs["check_all"]
         self.controller.start("check_all", spec, shell_command=command)
 
-    def _confirm_live(self, spec: CommandSpec) -> bool:
+    def _confirm_live(
+        self,
+        spec: CommandSpec,
+        *,
+        automatic_preflight: bool = False,
+        require_vr: bool = True,
+        session_arm: bool = False,
+        require_run_mode: bool = False,
+        skip_checklist: bool = False,
+    ) -> bool:
+        if (
+            self.config.require_preflight
+            and not self.preflight_ok
+            and not automatic_preflight
+        ):
+            QMessageBox.warning(
+                self, "Сначала preflight",
+                "Live-сеанс заблокирован. Нажмите «Проверить всё» и дождитесь "
+                "успешного завершения.",
+            )
+            return False
         if not self.config.allow_live:
             QMessageBox.warning(
                 self,
@@ -482,24 +1840,54 @@ class OperatorPanel(QMainWindow):
                 "По умолчанию панель работает в dry-run.",
             )
             return False
+        if self.config.dry_run:
+            QMessageBox.warning(
+                self,
+                "Панель в dry-run",
+                "Для физического запуска выключите «Безопасный dry-run по "
+                "умолчанию» в настройках панели.",
+            )
+            return False
+        # USB authorization/discovery is enforced by usb_link.control before
+        # it starts any manager. Do not block the Qt thread on a 15-second ADB
+        # timeout here: STOP and the other buttons must remain responsive.
+        if require_vr and self.config.vr_transport == "lan" and not _is_headset_lan_address(
+            self.config.vr_headset_ip.strip()
+        ):
+            QMessageBox.warning(
+                self,
+                "Укажите IP VR-шлема",
+                "В настройках панели нужен фиксированный приватный IPv4-адрес "
+                "VR-шлема, например 192.168.8.129.",
+            )
+            return False
+        if skip_checklist:
+            return True
         dialog = QDialog(self)
         dialog.setWindowTitle("Проверка безопасности перед live")
         layout = QVBoxLayout(dialog)
         layout.addWidget(QLabel(f"Перед запуском: {spec.title}"))
         checks = []
-        for text in (
-            "Робот стоит устойчиво на полу или надёжно подвешен для slow-теста",
-            "Вокруг робота свободная зона",
-            "Человек рядом готов нажать физический E-stop",
-            "VR-шлем и контроллеры готовы, deadman проверен",
+        for text in self._live_checklist_items(
+            require_vr, session_arm, require_run_mode
         ):
             check = QCheckBox(text)
             layout.addWidget(check)
             checks.append(check)
-        note = QLabel(
-            "Панель не подставляет commissioning token и не обходит проверки "
-            "скриптов. При любой ошибке процесс завершится fail-closed."
+        note_text = (
+            "После полного чек-листа панель создаёт одноразовый commissioning "
+            "token для этой выставочной сессии. Повторный чек-лист при смене "
+            "режима не потребуется. Остальные KILL/STOP и safety gates остаются "
+            "обязательными."
         )
+        if automatic_preflight:
+            note_text += " Preflight выполнится автоматически внутри выбранного режима."
+        if session_arm:
+            note_text += (
+                " Управление использует session-arm до Статичного режима, STOP "
+                "или KILL; постоянно удерживать Deadman не требуется."
+            )
+        note = QLabel(note_text)
         note.setWordWrap(True)
         layout.addWidget(note)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -511,10 +1899,129 @@ class OperatorPanel(QMainWindow):
         if not all(check.isChecked() for check in checks):
             QMessageBox.warning(self, "Запуск отменён", "Нужно отметить весь safety-чеклист.")
             return False
+        self.exhibition_session_confirmed = True
+        try:
+            record_acknowledgement(self.config)
+        except OSError as exception:
+            self._append_log(
+                "live_ack",
+                f"[WARN] Не удалось сохранить локальное подтверждение: {exception}\n",
+            )
         return True
+
+    def _clear_live_confirmation(self) -> None:
+        """Invalidate the short-lived checklist acknowledgement."""
+        self.exhibition_session_confirmed = False
+        try:
+            clear_acknowledgement()
+        except OSError as exception:
+            self._append_log(
+                "live_ack",
+                f"[WARN] Не удалось удалить локальное подтверждение: {exception}\n",
+            )
+
+    @staticmethod
+    def _live_checklist_items(
+        require_vr: bool,
+        session_arm: bool,
+        require_run_mode: bool = False,
+    ) -> tuple[str, ...]:
+        items = [
+            "Робот снят с зарядки, батарея установлена и питание стабильно",
+            "Робот стоит устойчиво на полу или надёжно подвешен для slow-теста",
+            "Вокруг робота свободная зона",
+            "Человек рядом готов немедленно выключить питание батареи при опасности",
+        ]
+        if require_vr:
+            if session_arm:
+                items.append(
+                    "VR-шлем и контроллеры готовы; примите любую удобную позу и "
+                    "не двигайтесь несколько секунд во время автокалибровки; session-arm "
+                    "останется активен до Статичного режима, STOP или KILL"
+                )
+            else:
+                items.append("VR-шлем и контроллеры готовы, deadman проверен")
+        if require_run_mode:
+            items.append(
+                "Unitree Explore не управляет роботом: закройте экран управления "
+                "и не используйте виртуальный стик телефона; панель автоматически "
+                "переведёт робота в Run (FSM 811)"
+            )
+        return tuple(items)
+
+    def _live_environment(self, *, run_mode_confirmed: bool = False) -> Dict[str, str]:
+        """Build acknowledgements for one explicitly confirmed panel session."""
+        token = getattr(self, "live_session_token", "")
+        if len(token) < 16:
+            token = secrets.token_urlsafe(24)
+            self.live_session_token = token
+        environment = {
+            "ROBOT_DRY_RUN": "0",
+            "ROBOT_ENABLE_ACTUATION": "1",
+            "ROBOT_CONFIRM_OFF_CHARGER": "1",
+            "ROBOT_CONFIRM_CLEAR_AREA": "1",
+            "ROBOT_CONFIRM_ESTOP_READY": "1",
+            "ROBOT_CONFIRM_COMMISSIONING": "1",
+            "ROBOT_COMMISSIONING_TOKEN": token,
+            "ROBOT_VR_SOURCE_IP": (
+                "127.0.0.1" if self.config.vr_transport == "usb"
+                else self.config.vr_headset_ip.strip()
+            ),
+            "R1_VR_TRANSPORT": self.config.vr_transport,
+        }
+        if run_mode_confirmed:
+            environment["ROBOT_CONFIRM_RUN_MODE"] = "1"
+            environment["ROBOT_CONFIRM_NO_PHONE_CONTROL"] = "1"
+        return environment
 
     def _on_output(self, key: str, text: str) -> None:
         self._append_log(key, text)
+        if key == "sdk_warmup":
+            for line in text.splitlines():
+                if not line.startswith("SDK_WARMUP state="):
+                    continue
+                phase = line.split("state=", 1)[1].split()[0]
+                self.status_values["sdk_warmup"] = phase
+        if key == "panel_status":
+            self._parse_status_output(text)
+        if key == "voice_check" and hasattr(self, "voice_status"):
+            self.voice_status.setText(
+                "ASR/LLM/TTS preflight:\n" + text[-1600:].strip()
+            )
+        if key == "voice:voice_remote":
+            if "VOICE status=ACTIVE" in text:
+                self.status_values["voice"] = "ACTIVE"
+            elif "VOICE status=" in text:
+                self.status_values["voice"] = "OFFLINE"
+        if key == "connection_ensure" and "CONNECT state=" in text:
+            if "CONNECT state=ERROR" in text:
+                self.connection_state = "offline"
+            elif "CONNECT state=" in text and self.connection_state != "connected":
+                self.connection_state = "searching"
+        if key == "battery_monitor":
+            for line in text.splitlines():
+                if not line.startswith("BATTERY soc="):
+                    continue
+                try:
+                    percent = int(line.split("soc=", 1)[1].split()[0])
+                except (ValueError, IndexError):
+                    continue
+                if 0 <= percent <= 100:
+                    self.status_values["battery"] = str(percent)
+                    if "battery_label" in self.__dict__:
+                        self.battery_label.setText(f"{percent}%")
+                        self.battery_label.setProperty(
+                            "batteryLow", percent <= 20
+                        )
+                        self.battery_label.style().unpolish(self.battery_label)
+                        self.battery_label.style().polish(self.battery_label)
+        if key == "command_capture" and "CAPTURE saved=" in text:
+            for line in text.splitlines():
+                if line.startswith("CAPTURE saved="):
+                    self.last_capture_path = line.split("=", 1)[1].strip()
+                    self.capture_status.setText(
+                        "Сохранено: " + self.last_capture_path
+                    )
         if "[FAIL]" in text or "[BLOCKED]" in text:
             self.last_status = "Красный • обнаружена ошибка или блокировка"
         elif "[WARN]" in text:
@@ -526,20 +2033,174 @@ class OperatorPanel(QMainWindow):
     def _append_log(self, key: str, text: str) -> None:
         stamp = _datetime.datetime.now().strftime("%H:%M:%S")
         for line in text.splitlines(True):
-            self.log_view.appendPlainText(f"[{stamp}] [{key}] {line.rstrip()}" )
+            self.log_view.appendPlainText(f"[{stamp}] [{key}] {line.rstrip()}")
 
     def _on_started(self, key: str) -> None:
         self._append_log(key, "[INFO] процесс запущен\n")
+        if key == "exhibition":
+            # Starting the Python process does not confirm the robot's FSM.
+            self.exhibition_mode = "Подготовка — жду подтверждения робота…"
         self._refresh_summary()
 
     def _on_finished(self, key: str, code: int, _status: int) -> None:
         level = "OK" if code == 0 else "WARN"
         self._append_log(key, f"[{level}] процесс завершён с кодом {code}\n")
+        if key == "sdk_warmup" and self.__dict__.get("pending_warmup_key"):
+            if code == 0:
+                QTimer.singleShot(0, self._start_pending_warmup_mode)
+            else:
+                self.pending_warmup_key = None
+                self.pending_warmup_environment = None
+                self.exhibition_mode = "Фоновая проверка завершилась с ошибкой — повторите выбор режима"
+                self._append_log(key, "[BLOCKED] Штатное завершение фоновой проверки не подтверждено; отложенный запуск отменён.\n")
+        if key == ZERO_TORQUE_HANDOFF_KEY:
+            if self.__dict__.get("pending_zero_torque", False):
+                if code == 0:
+                    self.zero_torque_handoff_complete = True
+                    self._append_log(
+                        "zero_torque",
+                        "[OK] offline bridge остановлен, порты освобождены; "
+                        "продолжаю к Damping → Zero Torque.\n",
+                    )
+                else:
+                    self.pending_zero_torque = False
+                    self.zero_torque_handoff_complete = False
+                    QMessageBox.critical(
+                        self,
+                        "Zero Torque отменён",
+                        "Offline bridge не завершился штатно или его порты остались заняты. "
+                        "Damping и Zero Torque роботу не отправлялись.",
+                    )
+        if (
+            self.__dict__.get("pending_zero_torque", False)
+            and key in ("stop", "kill", "exhibition_stop")
+            and code != 0
+        ):
+            self.pending_zero_torque = False
+            QMessageBox.critical(
+                self,
+                "Zero Torque отменён",
+                "Управляющий сеанс не удалось штатно остановить. "
+                "Damping и Zero Torque роботу не отправлялись.",
+            )
+        if key == "command_capture":
+            if code == 0:
+                if self.last_capture_path:
+                    self.capture_status.setText(
+                        "Запись сохранена: " + self.last_capture_path
+                    )
+                else:
+                    self.capture_status.setText(
+                        "Запись сохранена. Можно выбрать следующую кнопку."
+                    )
+            else:
+                self.capture_status.setText(
+                    "Запись не завершилась — проверьте Ethernet и повторите."
+                )
+        if key in ("stop", "kill", "exhibition_stop"):
+            # STOP/KILL completes the writer's bounded cleanup first. Then
+            # close the owning launch group so SDK readers/writers cannot stay
+            # connected on a charger or contaminate the next fresh session.
+            exhibition_was_running = self.controller.is_running("exhibition")
+            self.controller.stop("motion")
+            self.controller.stop("robot:prepare")
+            self.controller.stop(
+                "exhibition",
+                graceful_timeout_ms=EXHIBITION_GRACEFUL_STOP_MS,
+                wait=False,
+            )
+            self.preflight_ok = False
+            self._append_log(
+                key,
+                "[INFO] STOP/KILL path completed; waiting for physical process "
+                "owners to finish child cleanup before the next live session\n",
+            )
+            pending_switch = (
+                key == "exhibition_stop"
+                and code == 0
+                and bool(self.pending_exhibition_key)
+            )
+            if pending_switch:
+                self.exhibition_stop_complete = True
+                self.exhibition_mode = "Переключение…"
+                # Reuse the logical slot only after both the reviewed STOP
+                # helper and the manager's own child cleanup have completed.
+                if not exhibition_was_running or self.exhibition_manager_stopped:
+                    QTimer.singleShot(0, self._start_pending_exhibition_mode)
+            else:
+                self.pending_exhibition_key = None
+                self.pending_exhibition_environment = None
+                self.exhibition_switch_in_progress = False
+                self.exhibition_stop_complete = False
+                self.exhibition_manager_stopped = False
+                self.exhibition_requested_mode = ""
+                self.exhibition_mode = "Остановлен"
+                self._clear_live_confirmation()
+        elif key == "exhibition":
+            if self.exhibition_switch_in_progress and self.pending_exhibition_key:
+                self.exhibition_manager_stopped = True
+                self.exhibition_mode = "Переключение…"
+                if self.exhibition_stop_complete:
+                    QTimer.singleShot(0, self._start_pending_exhibition_mode)
+            else:
+                self.exhibition_requested_mode = ""
+                self.exhibition_mode = "Остановлен"
+                # A local startup failure does not change the conditions that
+                # the operator just confirmed.  Keep the bounded runtime
+                # acknowledgement for an immediate retry; robot loss,
+                # STOP/KILL, Zero Torque and expiry still invalidate it.
+        elif key == "exhibition_rearm":
+            self.exhibition_mode = (
+                "Управление" if code == 0 else "Возврат управления не подтверждён — см. статус"
+            )
+        elif key == "exhibition_lock":
+            self.exhibition_mode = (
+                "Статичный" if code == 0 else "Управление"
+            )
+        if self.__dict__.get("pending_zero_torque", False):
+            QTimer.singleShot(0, self._continue_zero_torque_when_idle)
+        if key == "zero_torque":
+            self.exhibition_requested_mode = ""
+            self.exhibition_mode = "Zero Torque" if code == 0 else "Остановлен"
+            self.preflight_ok = False
+            self.background_services_started = False
+            if code == 0:
+                QMessageBox.information(
+                    self,
+                    "Zero Torque включён",
+                    "Управляющие процессы завершены. Робот расслаблен, "
+                    "удерживающий момент отключён.",
+                )
+            else:
+                QMessageBox.critical(
+                    self,
+                    "Zero Torque не подтверждён",
+                    "Команда не была подтверждена роботом. Подробности находятся "
+                    "в разделе «Расширенные настройки → Логи».",
+                )
         self._refresh_summary()
+        if key == "check_all":
+            self.preflight_ok = code == 0
+            robot = self.status_values.get("robot", "OFFLINE").upper()
+            self.connection_state = (
+                "connected"
+                if robot in {"OK", "FOUND", "RUNNING", "READY"}
+                else "offline"
+            )
+            self._append_log(
+                key,
+                "[OK] preflight gate открыт\n" if self.preflight_ok
+                else "[BLOCKED] preflight gate остаётся закрыт\n",
+            )
+            self._refresh_summary()
         if self.close_after_stop and not self.controller.active_keys():
             QApplication.instance().quit()
 
     def open_viewer(self) -> None:
+        # Opening POV from the main screen is also a one-click recovery path:
+        # rediscover the headset/robot and restart the read-only services before
+        # handing the browser a URL.  It never starts motors or a live writer.
+        self.auto_connect()
         url = self.config.video_url.strip() or "http://127.0.0.1:8080/"
         QDesktopServices.openUrl(QUrl(url))
         self._append_log("viewer", f"[INFO] открываю {url}\n")
@@ -548,6 +2209,36 @@ class OperatorPanel(QMainWindow):
         path = Path(self.config.project_dir) / self.config.logs_dir
         path.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def export_report(self) -> None:
+        """Write a local JSON snapshot useful for support without secrets."""
+        destination = Path(self.config.project_dir) / self.config.logs_dir / (
+            "operator-report-" + _datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + ".json"
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "generated_at": _datetime.datetime.now(_datetime.timezone.utc).isoformat(),
+            "config": {
+                "robot_ip": self.config.robot_ip,
+                "pc2_ip": self.config.pc2_ip,
+                "interface": self.config.robot_interface,
+                "allow_half_duplex_adapter": (
+                    self.config.allow_half_duplex_adapter
+                ),
+                "ros_domain_id": self.config.ros_domain_id,
+                "video_profile": self.config.video_profile,
+                "locomotion_profile": self.config.locomotion_profile,
+                "dry_run": self.config.dry_run,
+            },
+            "preflight_ok": self.preflight_ok,
+            "active_processes": self.controller.active_keys(),
+            "health": self.status_values,
+        }
+        destination.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self._append_log("report", f"[OK] отчёт сохранён: {destination}\n")
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self.config, self)
@@ -569,8 +2260,28 @@ class OperatorPanel(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API name
         active = self.controller.active_keys()
+        background_only = {
+            "battery_monitor",
+            "connection_ensure",
+            "voice:voice_remote",
+            "panel_status",
+            "check_all",
+            "sdk_warmup",
+        }
+        if active and set(active).issubset(background_only):
+            event.ignore()
+            if not self.close_after_stop:
+                self._begin_close_cleanup()
+            return
         if not active:
+            if "video_preview" in self.__dict__:
+                self.video_preview.stop()
             event.accept()
+            return
+        if self.close_after_stop:
+            # A second window-close gesture must not bypass the cleanup that is
+            # already disarming/stopping the physical session.
+            event.ignore()
             return
         answer = QMessageBox.question(
             self,
@@ -583,8 +2294,56 @@ class OperatorPanel(QMainWindow):
             event.ignore()
             return
         if answer == QMessageBox.Yes:
-            self.controller.stop_all()
+            event.ignore()
+            self._begin_close_cleanup()
+            return
+        if "video_preview" in self.__dict__:
+            self.video_preview.stop()
         event.accept()
+
+    def _begin_close_cleanup(self) -> None:
+        """Close only after the reviewed STOP and manager cleanup complete."""
+        self.close_after_stop = True
+        self.pending_zero_torque = False
+        self.status_timer.stop()
+        if "video_preview" in self.__dict__:
+            self.video_preview.stop()
+        self.pending_exhibition_key = None
+        self.pending_exhibition_environment = None
+        self.pending_warmup_key = None
+        self.pending_warmup_environment = None
+        self.exhibition_switch_in_progress = False
+        self.exhibition_stop_complete = False
+        self.exhibition_manager_stopped = False
+
+        active = set(self.controller.active_keys())
+        physical = bool(
+            active.intersection(
+                {"exhibition", "exhibition_stop", "motion", "robot:prepare"}
+            )
+        )
+        # Diagnostics/video can stop independently.  Physical owners remain
+        # alive until exhibition-stop asserts the reviewed robot STOP path.
+        for key in active.difference(
+            {"exhibition", "exhibition_stop", "motion", "robot:prepare"}
+        ):
+            self.controller.stop(
+                key, graceful_timeout_ms=12000 if key == "sdk_warmup" else 1200,
+                wait=False,
+            )
+
+        if physical:
+            if not self.controller.is_running("exhibition_stop"):
+                self.controller.start(
+                    "exhibition_stop", self.specs["exhibition_stop"]
+                )
+            return
+
+        # No physical graph exists; the remaining helpers have been stopped.
+        if not self.controller.active_keys():
+            app = QApplication.instance()
+            if app is not None:
+                QTimer.singleShot(0, app.quit)
 
 
 def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
@@ -594,20 +2353,48 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
         """
         QWidget { font-size: 11pt; }
         QMainWindow, QWidget { background: #20252b; color: #eef2f5; }
-        QGroupBox { border: 1px solid #46515c; border-radius: 6px; margin-top: 10px; padding: 12px; }
-        QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; color: #a9d6ff; }
-        QPushButton { background: #35414c; border: 1px solid #5b6b79; border-radius: 5px; padding: 8px 12px; }
+        QGroupBox { border: 1px solid #46515c; border-radius: 6px;
+                    margin-top: 10px; padding: 12px; }
+        QGroupBox::title { subcontrol-origin: margin; left: 10px;
+                           padding: 0 5px; color: #a9d6ff; }
+        QPushButton { background: #35414c; border: 1px solid #5b6b79;
+                      border-radius: 5px; padding: 8px 12px; }
         QPushButton:hover { background: #435463; }
         QPushButton[liveAction="true"] { border-color: #d39b3b; }
-        QPushButton[unavailable="true"] { color: #89939d; border-color: #555e66; }
-        #stopButton { background: #a86a22; border-color: #e8a849; font-weight: bold; }
-        #killButton { background: #9d2632; border-color: #ff6875; font-weight: bold; }
+        QPushButton[unavailable="true"] { color: #89939d;
+                                           border-color: #555e66; }
+        #stopButton { background: #a86a22; border-color: #e8a849;
+                      font-weight: bold; }
+        #killButton { background: #9d2632; border-color: #ff6875;
+                      font-weight: bold; }
         #appTitle { color: #9ed5ff; }
         #modeLabel { color: #ffd166; font-weight: bold; padding: 8px; }
         #statusLabel { padding: 8px; background: #2c343c; border-radius: 4px; }
         #hint { color: #b8c2ca; padding: 8px; }
         #warning { color: #ffd166; padding: 8px; }
         #cardText { color: #d7e4ee; padding: 10px; }
+        #operatorInstruction { background: #2b3652; color: #dce7ff;
+                               border: 1px solid #536baf; border-radius: 8px;
+                               padding: 12px; font-size: 12pt; font-weight: bold; }
+        #videoCanvas { background: #090c10; border: 1px solid #3d4b58;
+                       border-radius: 8px; color: #91a0ad; }
+        #videoStatus { background: #161d24; color: #a9d6ff;
+                       border-radius: 5px; padding: 7px; }
+        #batteryBadge { background: #344b9b; color: white;
+                        border: 1px solid #7894ef; border-radius: 8px; }
+        #batteryBadge[batteryLow="true"] { background: #8f2f3b;
+                                             border-color: #ff6875; }
+        #robotName { padding: 8px; color: #d5dde5; }
+        #robotName[connectionState="searching"] { color: #ffd166; }
+        #robotName[connectionState="connected"] { color: #71e3a4; }
+        #connectButton { background: #39477b; border-color: #6e86df;
+                         font-weight: bold; }
+        #controlModeButton { background: #244c9c; border-color: #6f9cff;
+                             font-weight: bold; }
+        #controlModeButton:hover { background: #2d5dbd; }
+        #zeroTorqueButton { background: #672d36; border-color: #dc6877;
+                            color: white; font-weight: bold; }
+        #zeroTorqueButton:hover { background: #843946; }
         QPlainTextEdit { background: #15191d; color: #dbe7ef; }
         QTabBar::tab { padding: 10px 14px; }
         """
@@ -623,6 +2410,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     if "--smoke" in argv:
         print("operator-panel smoke: window constructed")
         QTimer.singleShot(0, app.quit)
+    else:
+        # Automatic startup remains read-only: bridge/video, battery, voice
+        # discovery and preflight. Physical motion begins only from STATIC/RUN.
+        QTimer.singleShot(250, panel.auto_connect)
     return app.exec_()
 
 

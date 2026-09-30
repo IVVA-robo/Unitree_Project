@@ -47,6 +47,10 @@ VIDEO_TIME_BASE = Fraction(1, 90000)
 PREFERRED_CODECS = ('vp8', 'h264')
 CLIENT_TAG_MAX_LENGTH = 64
 SERVER_SHUTDOWN_TIMEOUT_SEC = 1.0
+DISCOVERY_PORT = 9091
+CONTROL_PORT = 9090
+DISCOVERY_PROBE_PREFIX = b'R1_TELEOP_DISCOVER v1 '
+DISCOVERY_RESPONSE_PREFIX = 'R1_TELEOP_ENDPOINT v1'
 
 
 def _normalize_preferred_codec(value):
@@ -183,7 +187,8 @@ def _adapt_frame_layout(
     source_layout: str,
     output_layout: str,
 ) -> np.ndarray:
-    """Convert a hub frame between mono and side-by-side layouts.
+    """
+    Convert a hub frame between mono and side-by-side layouts.
 
     The hub stores the source-native layout.  Native Unity clients may request
     a different presentation layout independently of browser clients, so crop
@@ -371,6 +376,7 @@ class RobotPovWebServer:
         self.started_monotonic = time.monotonic()
         self.runner = None
         self.site = None
+        self.discovery_transport = None
         self.peer_connections: Set[RTCPeerConnection] = set()
         self.client_metrics: Dict[str, dict] = {}
         self.metrics = {
@@ -744,6 +750,26 @@ class RobotPovWebServer:
             ssl_context=self.ssl_context(),
         )
         await self.site.start()
+        # The headset can be opened before the live bridge or robot is ready.
+        # Keep discovery on the video-only process so it can always learn the
+        # current laptop address and reconnect when Wi-Fi/DHCP changes.
+        if self.config.discovery_enabled:
+            try:
+                loop = asyncio.get_running_loop()
+                self.discovery_transport, _ = await loop.create_datagram_endpoint(
+                    lambda: _DiscoveryProtocol(CONTROL_PORT),
+                    local_addr=('0.0.0.0', DISCOVERY_PORT),
+                    allow_broadcast=True,
+                )
+                self.event_log.write('discovery_started', port=DISCOVERY_PORT)
+            except OSError as exc:
+                # The live bridge owns the same discovery port in RUN mode.
+                # Its responder is equivalent, so a collision must not take
+                # the camera down when an older process races the handoff.
+                LOGGER.info('video discovery responder unavailable: %s', exc)
+                self.discovery_transport = None
+        else:
+            self.event_log.write('discovery_disabled', reason='live_bridge_owns_port')
         self.event_log.write(
             'server_started',
             config=self.config.redacted_dict(),
@@ -756,10 +782,41 @@ class RobotPovWebServer:
         peers = tuple(self.peer_connections)
         self.peer_connections.clear()
         await asyncio.gather(*(peer.close() for peer in peers), return_exceptions=True)
+        if self.discovery_transport is not None:
+            self.discovery_transport.close()
+            self.discovery_transport = None
         if self.runner is not None:
             await self.runner.cleanup()
             self.runner = None
         self.event_log.write('server_stopped')
+
+
+class _DiscoveryProtocol(asyncio.DatagramProtocol):
+    """Answer headset endpoint probes without exposing control state."""
+
+    def __init__(self, video_port: int):
+        self.video_port = int(video_port)
+        self.transport = None
+
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def datagram_received(self, data, address):
+        if self.transport is None or not isinstance(data, bytes):
+            return
+        if not data.startswith(DISCOVERY_PROBE_PREFIX):
+            return
+        nonce = data[len(DISCOVERY_PROBE_PREFIX):].strip()
+        if not nonce or len(nonce) > 96 or any(byte > 0x7F for byte in nonce):
+            return
+        response = (
+            f'{DISCOVERY_RESPONSE_PREFIX} {self.video_port} '
+            f'{nonce.decode("ascii", errors="ignore")}\n'
+        ).encode('ascii')
+        try:
+            self.transport.sendto(response, address)
+        except OSError:
+            pass
 
 
 def _safe_number(value):

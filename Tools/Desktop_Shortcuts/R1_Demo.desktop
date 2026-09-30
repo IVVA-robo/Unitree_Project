@@ -1,0 +1,8 @@
+[Desktop Entry]
+Version=1.0
+Name=Unitree R1 Demo
+Comment=Launch Gazebo, RViz2 and Controls
+Exec=/home/unitree/Unitree_Project/Legacy_Robotics/robotics/ros2_ws/run_demo.sh
+Icon=utilities-terminal
+Terminal=false
+Type=Application

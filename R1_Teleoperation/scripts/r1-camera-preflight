@@ -12,6 +12,10 @@ DDS_SECONDS="${R1_DDS_DISCOVERY_SECONDS:-4}"
 DDS_ENABLED=true
 RESULT=0
 
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/r1-network-autodetect
+source "${PROJECT_DIR}/scripts/r1-network-autodetect"
+
 usage() {
   cat <<'EOF'
 Usage: r1-camera-preflight [options]
@@ -127,6 +131,13 @@ fi
 if [[ ! "${DDS_SECONDS}" =~ ^([1-9]|[12][0-9]|30)$ ]]; then
   printf 'DDS discovery time must be an integer from 1 to 30.\n' >&2
   exit 1
+fi
+
+resolved_control_ip="$(r1_resolve_control_ip "${INTERFACE}" "${CONTROL_IP}" "${PC2_IP}" || true)"
+if [[ -n "${resolved_control_ip}" && "${resolved_control_ip}" != "${CONTROL_IP}" ]]; then
+  printf '[INFO] native DDS %s is not reachable; using reachable fallback %s\n' \
+    "${CONTROL_IP}" "${resolved_control_ip}"
+  CONTROL_IP="${resolved_control_ip}"
 fi
 
 printf 'R1 camera/network preflight (read-only)\n'
@@ -293,8 +304,9 @@ else
         server_state+="response-writer=${response_writer}"
         mark_warn "videohub server endpoints incomplete (${server_state})"
         printf '%s\n' \
-          '[ACTION] In Unitree R1 App open Settings -> Service Status and start video_hub.' \
-          '[ACTION] Stop Stereo patch PC1 / R1 push service if it is active; it conflicts with video_hub.' \
+          '[ACTION] This firmware does not expose a Service Status menu in Explore.' \
+          '[ACTION] Explore receives camera video through the R1 Wi-Fi AP; Ethernet-only control cannot provide that stream.' \
+          '[ACTION] For wired-only operation use a second Wi-Fi adapter (or provide the R1 AP password) and bridge the camera path.' \
           '[SAFETY] Do not enable motion, debug, sport, or low-level control services for this video-only check.'
       fi
     fi

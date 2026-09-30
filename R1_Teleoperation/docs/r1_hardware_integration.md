@@ -1,12 +1,78 @@
 # R1 hardware integration readiness
 
+## Current R1 firmware: arm overlay and walking are not jointly verified
+
+On 2026-09-25 the direct main-controller Ethernet path restored real video,
+SDK feedback, and user-confirmed walking in the existing **locomotion-only**
+stage. Full control successfully moved the head and arms, but walking failed
+even with a 2.6-second stick input that reached the configured command ceiling.
+Read-only `GetFsmId` returned **816** twice during the full ArmSdk session,
+although initial `Start()` had confirmed 811. No local kill was active.
+
+The upstream project initially rejected `--motion` with R1_A5/R1_A7 in
+[commit bc55c3f](https://github.com/unitreerobotics/xr_teleoperate/commit/bc55c3f6f68dcc81b343c13a7e083956c538b46d),
+but restored R1_A5 support on August 3 in
+[commit afd77d3](https://github.com/unitreerobotics/xr_teleoperate/commit/afd77d365b3c84fa56b1a5c03ab5e709aa1d77b4).
+The old rejection must not be cited as a current blanket R1_A5 prohibition.
+[Issue 319](https://github.com/unitreerobotics/xr_teleoperate/issues/319)
+reports the same ArmSdk-triggered 811-to-816 transition on ai_sport 1.0.2.154
+and the loss of walking, including physical remote commands. Its September
+17 follow-up still reports the problem. Treat walking and upper-body VR as
+separately demonstrated capabilities on this robot; combined operation is
+unverified. Compare the current supported R1_A5 packet contract before any
+new supervised test; do not guess different weights/FSMs or force the FSM
+back to 811 repeatedly. Current upstream support does not prove compatibility
+with this robot's installed ai_sport build.
+
+The exhibition manager's `ready` state currently confirms that the process
+graph passed startup; it does not continuously observe the sport FSM.
+`LowState.mode_pr` and `mode_machine` are separate raw values and must not be
+used as substitutes for `GetFsmId`. A diagnostic monitor should report the
+last successful API 7001 result with its age, distinguish stale/failed reads,
+and show a changed FSM without silently calling `Start()` or changing modes.
+Even a fresh 811 observation establishes a controller state, not evidence
+that the physical robot stepped; combined walking still needs observation.
+
+The separate false arm-response timeout was fixed: a confirmed unchanged
+target no longer repeatedly demands movement because of static PD error.
+The operator confirmed that raising and holding the right arm continued
+working. New-command response checks, joint/rate limits, emergency B and
+fresh robot feedback requirements remain in place.
+
 This note records the read-only checks, verified Unitree SDK contract, and the
-source-backed `r1_live_writer` safety boundary. The supported operational mode
-is still mock/read-only/dry-run. A staged physical `StandUp` has now confirmed
-stable FSM `4`; locomotion was not repeated after the first post-prepare
-`SetVelocity` returned error `127`. The R1 example requires `Start()` and
-stable FSM `811` before velocity calls, and the writer now enforces that
-sequence. Head output did not start after LowState reported
+source-backed `r1_live_writer` safety boundary. A staged physical `StandUp`
+confirmed stable FSM `4`. On 2026-09-24 an isolated legs-only session also
+confirmed forward walking on the physical R1: after stable FSM `811`, blue
+**Run**, and closing Unitree Explore, the writer published the captured
+`WirelessController_` contract on `rt/wirelesscontroller`; the operator's
+short forward left-stick input produced walking. Returning the stick to neutral
+and releasing Deadman produced zero axes, and the normal STOP latched KILL
+before the live process was closed. Lateral and yaw motion remain to be tested
+separately before any combined upper-body/locomotion session.
+
+Earlier legs-only tests reached stable FSM `811` and crossed several nonzero
+`SetVelocity` RPC boundaries. The robot shifted its body but did not take a
+step, while `ai_sport` returned status `127`. The retired global compatibility
+path must therefore not interpret `127` as accepted velocity during ordinary
+operation.
+In a follow-up test the Unitree Explore running-person icon was visibly blue,
+but the app remained connected; FSM stayed at `811`, the first small
+`SetVelocity` again returned `127`, and the robot did not move. Blue **Run**
+alone therefore does not resolve the rejection. A retained app-side control
+authority is still an unproven possibility and must be isolated by selecting
+Run, fully closing/force-stopping Unitree Explore, and only then repeating the
+bounded legs-only test.
+An independent R1 owner reported in `unitreerobotics/xr_teleoperate#319` that
+high-level walking worked in FSM `811` even while `SetVelocity()` returned
+`127`, whereas FSM `816` blocked it. This supports one separate experiment in
+which only nonzero `SetVelocity=127` is provisionally admitted. It does not
+resolve the stop contract because this robot also returns `127` from
+`StopMove()`.
+It is an undocumented in-process RPC result rather than a Linux process exit
+code or proof that `Start()` was omitted. Read-only API probing also found that
+the server advertises R1 API `1.0.0.0` but returns `3203` (not implemented) for
+both `GetFsmMode` API 7002 and `SetSpeedMode` API 7107. Head output did
+not start after LowState reported
 `pitch=0.0073 rad`, `yaw=1.4299 rad`. The physical pose/direction and its
 joint-zero correlation were not visually confirmed.
 `r1_live_writer` is implemented, but
@@ -97,9 +163,24 @@ and HG IDL slots are:
 
 The example ramps `mode_pr` (SDK weight) to 1.0, seeds every target from the
 measured LowState position, sets bounded `kp/kd`, and releases the weight back
-to zero. `r1_live_writer` preserves this hand-over sequence in its SDK
+to zero. It requires publication at **100 Hz** (every 10 ms), including during
+the one-second release. `r1_live_writer` preserves this hand-over sequence in its SDK
 implementation and must never take control merely because a ROS node started.
 Its physical behavior has not yet been validated on the R1.
+
+The same official R1 Arm Control Routine states that `arm_sdk` does not work
+in Development/Debugging, because that mode shuts down the built-in controller.
+An arm-only test therefore requires the normal Unitree Stand state with balance
+running. It does not require `Start()` or locomotion `FSM=811`; enabling sport
+to work around an arm problem is outside the arm-only path and introduces leg
+authority unnecessarily.
+
+For a physical arm session, the writer also requires meaningful commanded arm
+motion to produce fresh same-direction LowState feedback within `0.80 s`.
+Otherwise it holds/releases ArmSdk, latches kill, and reports
+`arm_feedback_follow_timeout`. This verifies receipt at the robot boundary;
+successful local `unlockAndPublish()` alone only confirms handoff to the SDK
+publisher thread.
 
 The built-in R1 Arm Action service also owns a DDS writer endpoint on
 `rt/arm_sdk`. Unitree explicitly forbids running an Arm Action and a custom
@@ -156,6 +237,28 @@ The official
 - velocity API: `SetVelocity(vx, vy, omega, duration)` (API 7105);
 - safety stop: `StopMove()` sends a zero-velocity command;
 - mode changes include `Start`, `Damp`, `StandUp`, and `ZeroTorque`.
+
+The current writer sends `duration=1.0 s` and refreshes the RPC at `10 Hz`, so
+the one-second lease is renewed about ten times before expiry. The R1 client
+serializes `velocity` and `duration` as JSON; there is no binary velocity IDL
+structure whose alignment could explain the observed status. On the tested
+firmware both `GetFsmMode()` (API 7002) and `SetSpeedMode(0)` (API 7107) return
+`3203` (`API not implemented`), so `SetSpeedMode` cannot be a required working
+precondition on this server.
+
+The first retained Unitree Explore screenshot showed **Lock** selected in blue
+and **Run** unselected. A follow-up test visibly selected blue **Run**, but the
+still-connected app did not change FSM `811` or the `SetVelocity=127` result.
+The working legs-only path therefore selects Run, fully closes/force-stops
+Unitree Explore, verifies the read-only state, and only then sets
+`ROBOT_CONFIRM_RUN_MODE=1`. The dedicated legacy `make locomotion-127-probe` path also
+requires `ROBOT_CONFIRM_UNITREE_EXPLORE_CLOSED=1`,
+`ROBOT_CONFIRM_AI_SPORT_1_0_2_154=1`, and
+`ROBOT_CONFIRM_VELOCITY_127_PROBE=1`. It is legs-only, forward-only, capped at
+`0.15 m/s`, refreshes at `10 Hz`, and terminates after `1.5 s`. The ordinary
+locomotion path still treats `127` as failure and uses the wireless-controller
+transport instead. Combined arm/head/leg live remains disabled until lateral
+and yaw tests also confirm the isolated motion and stop path.
 
 The writer owns an independent watchdog and calls `StopMove()` on deadman
 release, stale packet, invalid command, DDS disconnect, kill, or shutdown.
@@ -294,6 +397,11 @@ ROBOT_CONFIRM_COMMISSIONING=1
 ROBOT_COMMISSIONING_TOKEN=<same configured token, at least 16 characters>
 ROBOT_VR_SOURCE_IP=<same configured fixed VR source IP>
 ```
+
+An isolated or combined locomotion session additionally requires
+`ROBOT_CONFIRM_RUN_MODE=1`. The operator-panel checklist sets it after the
+operator confirms that Unitree Explore is no longer controlling the robot;
+the session then selects the captured official Run/FSM 811 itself.
 
 It also requires `transport=sdk`, `send_commands=true`, the relevant feature
 flag (`enable_head` or `enable_locomotion`), `enable_prepare=true` and

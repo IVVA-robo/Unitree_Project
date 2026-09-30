@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Emergency software path: ask the writer to latch/stop/release and then assert
-# the independent central kill. The physical E-stop remains authoritative.
+# Emergency software path: assert the independent central kill first, then ask
+# the writer to latch/stop/release. The physical E-stop remains authoritative.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -25,26 +25,27 @@ source "${SCRIPT_DIR}/r1-physical-ros-env"
 set -u
 export ROS_DOMAIN_ID="$((10#${DOMAIN_ID}))"
 export ROS_LOCALHOST_ONLY=1
+TRIGGER_CLIENT="${SCRIPT_DIR}/r1-call-trigger-service"
+[[ -x "${TRIGGER_CLIENT}" ]] \
+  || { echo "[FAIL] bounded Trigger client is unavailable: ${TRIGGER_CLIENT}" >&2; exit 1; }
 
 writer_ok=false
 supervisor_ok=false
 set +e
-writer_response="$(timeout 8s ros2 service call \
-  /r1/live_writer/kill std_srvs/srv/Trigger '{}' 2>&1)"
-writer_status=$?
-printf '%s\n' "${writer_response}"
-if ((writer_status == 0)) && grep -Eq \
-  'success[[:space:]]*=[[:space:]]*True|success:[[:space:]]*true' <<<"${writer_response}"; then
-  writer_ok=true
-fi
-
-kill_response="$(timeout 8s ros2 service call \
-  /r1/safety/emergency_stop std_srvs/srv/Trigger '{}' 2>&1)"
+echo 'Asserting the independent central software kill latch first...'
+kill_response="$("${TRIGGER_CLIENT}" /r1/safety/emergency_stop 4 2>&1)"
 kill_status=$?
 printf '%s\n' "${kill_response}"
-if ((kill_status == 0)) && grep -Eq \
-  'success[[:space:]]*=[[:space:]]*True|success:[[:space:]]*true' <<<"${kill_response}"; then
+if ((kill_status == 0)); then
   supervisor_ok=true
+fi
+
+echo 'Requesting writer kill and bounded ArmSdk release...'
+writer_response="$("${TRIGGER_CLIENT}" /r1/live_writer/kill 8 2>&1)"
+writer_status=$?
+printf '%s\n' "${writer_response}"
+if ((writer_status == 0)); then
+  writer_ok=true
 fi
 set -e
 

@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Build and verify a non-actuating pose range using recorded operator poses.
+
+Run with PYTHONNOUSERSITE=1 /usr/bin/python3. Does not import ROS or Unitree.
+"""
+import dataclasses
+import hashlib
+import json
+import pathlib
+import sys
+
+import numpy as np
+import yaml
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'ros2_ws/src/r1_kinematics_control'))
+from r1_kinematics_control.body_proxy import BodyProxyConfig, BodyProxyTransformer
+from r1_kinematics_control.kinematics import SerialChain
+from r1_kinematics_control.math3d import pose_matrix
+from r1_kinematics_control.pose_range import ArmPoseRange
+
+DATA = ROOT / 'logs/arms_calibration'
+config = yaml.safe_load((ROOT / 'ros2_ws/src/r1_kinematics_control/config/r1_control.yaml').read_text())['r1_kinematics_control']['ros__parameters']
+urdf = ROOT.parent / 'Legacy_Robotics/robotics/ros2_ws/install/unitree_r1_description/share/unitree_r1_description/urdf/r1.urdf'
+chains = {}
+for side in ('left', 'right'):
+    arm = config[side + '_arm']
+    chains[side] = SerialChain.from_urdf(urdf.read_text(), arm['base_link'], arm['tip_link'], arm['joint_names'])
+
+files = ['extended-neutral-20260925-063309.json', 'overhead-20260925-063905.json',
+         'tpose-20260925-063958.json', 'bent-20260925-063538.json']
+poses = []
+for filename in files:
+    data = json.loads((DATA / filename).read_text())
+    poses.append({key: pose_matrix(value['position_m'], value['quaternion_xyzw'])
+                  for key, value in data['summary'].items()})
+fields = {f.name for f in dataclasses.fields(BodyProxyConfig)}
+cfg = BodyProxyConfig(**{k: v for k, v in config['body_proxy'].items() if k in fields})
+proxy = BodyProxyTransformer(cfg)
+calibration = proxy.calibrate(poses[0]['head'], poses[0]['left_controller'], poses[0]['right_controller'])
+head = poses[0]['head']
+yaw = np.arctan2(head[1, 0], head[0, 0])
+c, s = np.cos(yaw), np.sin(yaw)
+inverse_rotation = np.array([[c, s, 0], [-s, c, 0], [0, 0, 1]])
+profile = dict(version=1, scope='offline_preview',
+               urdf_sha256=hashlib.sha256(urdf.read_bytes()).hexdigest(),
+               anchors=['overhead', 'tpose', 'near_eyes'],
+               source_files=files, arms={},
+               limitation='Configured model endpoints, not measured mechanical maxima. Live writer feedback offsets and collision clearance require a powered supported test.')
+# The upper-body endpoints are deliberately configured joint poses, not
+# unbounded Cartesian extrapolations through the shoulder. The existing live
+# motion pipeline is not enabled or modified by this preview.
+old_report = json.loads((DATA / 'offline-mapping-report-20260925.json').read_text())
+mirror = np.array([1., -1., -1., 1., -1.])
+bent_left = np.array(old_report['poses']['near_eyes']['arms']['left']['nominal_ik_joint_angles_rad'])
+bent_right = np.array(old_report['poses']['near_eyes']['arms']['right']['nominal_ik_joint_angles_rad'])
+bent = (bent_left + bent_right * mirror) / 2
+for side, chain in chains.items():
+    key = side + '_controller'
+    neutral = chain.neutral_positions()
+    basis = np.column_stack([inverse_rotation @ (p[key][:3, 3] - poses[0][key][:3, 3]) for p in poses[1:]])
+    sign = 1 if side == 'left' else -1
+    up = neutral.copy(); up[0] = -2.0; up[1] = sign * .60
+    tee = neutral.copy(); tee[1] = sign * 1.57
+    folded = bent if side == 'left' else bent * mirror
+    profile['arms'][side] = dict(joint_names=list(chain.joint_names),
+                                 input_basis_m=basis.tolist(), robot_neutral_rad=neutral.tolist(),
+                                 robot_endpoints_rad=[up.tolist(), tee.tolist(), folded.tolist()])
+
+mapper = ArmPoseRange(profile, chains)
+checks = {}
+for side, chain in chains.items():
+    arm = profile['arms'][side]; basis = np.array(arm['input_basis_m'])
+    checks[side] = {'basis_condition': float(np.linalg.cond(basis)), 'anchors': {}}
+    for index, name in enumerate(profile['anchors']):
+        q, _ = mapper.evaluate(side, basis[:, index])
+        assert np.allclose(q, arm['robot_endpoints_rad'][index])
+        beyond, _ = mapper.evaluate(side, 2 * basis[:, index])
+        assert np.allclose(beyond, q)
+        checks[side]['anchors'][name] = chain.forward(q)[:3, 3].tolist()
+    # Convex joint interpolation prevents the Cartesian inner-reach hole.
+    # Check every grid mixture, its path from neutral, and wrist separation.
+    count = 0; min_side = float('inf'); min_forward = float('inf')
+    for a in range(11):
+        for b in range(11 - a):
+            for d in range(11 - a - b):
+                q, weights = mapper.evaluate(side, basis @ (np.array([a, b, d]) / 10))
+                assert np.isfinite(q).all()
+                assert np.all(q >= chain.lower - 1e-10) and np.all(q <= chain.upper + 1e-10)
+                point = chain.forward(q)[:3, 3]
+                min_side = min(min_side, point[1] * (1 if side == 'left' else -1))
+                min_forward = min(min_forward, point[0])
+                count += 1
+    checks[side].update(grid_points=count, minimum_wrist_lateral_m=min_side,
+                        minimum_wrist_forward_m=min_forward)
+    assert min_side >= .08, (side, 'wrist crosses configured torso-side boundary', min_side)
+    assert min_forward >= -.04, (side, 'wrist behind configured shoulder boundary')
+
+out = ROOT / 'config/operator_arm_range.preview.json'
+out.write_text(json.dumps(profile, indent=2) + '\n')
+(DATA / 'pose-range-preview-checks.json').write_text(json.dumps(checks, indent=2) + '\n')
+print(json.dumps({'profile': str(out), 'checks': checks, 'live_control_changed': False}, indent=2))

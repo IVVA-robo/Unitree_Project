@@ -41,6 +41,7 @@ TOKEN=${ROBOT_COMMISSIONING_TOKEN-}
 VR_SOURCE_IP=${ROBOT_VR_SOURCE_IP-}
 python3 - "${VR_SOURCE_IP}" <<'PY' || exit 2
 import ipaddress
+import os
 import sys
 
 try:
@@ -51,9 +52,13 @@ except ValueError:
     raise SystemExit(2)
 private_v4 = tuple(ipaddress.ip_network(prefix) for prefix in (
     '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
-if address.version != 4 or not any(address in subnet for subnet in private_v4) \
-        or address.is_loopback or address.is_multicast or address.is_unspecified:
-    print('[BLOCKED] ROBOT_VR_SOURCE_IP must be a private unicast IPv4 address', file=sys.stderr)
+transport = os.environ.get('R1_VR_TRANSPORT', 'lan')
+usb = transport == 'usb' and str(address) == '127.0.0.1'
+lan = transport == 'lan' and address.version == 4 and any(
+    address in subnet for subnet in private_v4
+) and not (address.is_loopback or address.is_multicast or address.is_unspecified)
+if not (usb or lan):
+    print('[BLOCKED] VR source must match selected LAN or USB transport', file=sys.stderr)
     print('No Unitree command was sent.', file=sys.stderr)
     raise SystemExit(2)
 PY

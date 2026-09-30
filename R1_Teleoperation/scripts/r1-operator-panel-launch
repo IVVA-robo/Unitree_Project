@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -u
+
+# The panel normally belongs to its user service.  Starting that service from
+# the desktop avoids two independent operator windows owning separate process
+# trees.  A direct launch remains available before the service is installed.
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PANEL_COMMAND="${PROJECT_DIR}/scripts/r1-operator-panel"
+UNIT="${R1_OPERATOR_PANEL_UNIT:-r1-operator-panel.service}"
+SYSTEMCTL_COMMAND="${R1_OPERATOR_PANEL_SYSTEMCTL_COMMAND:-systemctl}"
+
+if command -v "${SYSTEMCTL_COMMAND}" >/dev/null 2>&1 \
+  && "${SYSTEMCTL_COMMAND}" --user cat "${UNIT}" >/dev/null 2>&1; then
+  if "${SYSTEMCTL_COMMAND}" --user start "${UNIT}"; then
+    # On X11/GNOME, bring the existing service-owned window forward.  Failure
+    # to activate is harmless: the single panel remains available in the dock.
+    python3 - <<'PY' >/dev/null 2>&1 || true
+import time
+
+import gi
+
+gi.require_version("Wnck", "3.0")
+from gi.repository import Wnck
+
+screen = Wnck.Screen.get_default()
+if screen is None:
+    raise SystemExit(1)
+deadline = time.monotonic() + 4.0
+while time.monotonic() < deadline:
+    screen.force_update()
+    for window in screen.get_windows():
+        if window.get_name() == "Unitree R1 Панель оператора":
+            window.activate(int(time.time() * 1000))
+            raise SystemExit(0)
+    time.sleep(0.10)
+raise SystemExit(1)
+PY
+    exit 0
+  fi
+fi
+
+exec "${PANEL_COMMAND}" "$@"

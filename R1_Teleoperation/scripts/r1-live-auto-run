@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Prepare one interactive live session without asking the operator to manage
+# the video-only boot service or copy the headset address by hand.  Only the
+# exact reviewed r1-offline-session.service may be stopped.  It is restored
+# when the live launcher exits, including SIGINT/SIGTERM cleanup.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HANDOFF="${SCRIPT_DIR}/r1-exhibition-offline-handoff"
+ADB_BIN=${R1_VR_ADB_BIN:-/usr/bin/adb}
+VR_ACTIVITY=${R1_VR_ANDROID_ACTIVITY:-com.ionosrobots.unitree.telepresencedemo/com.unity3d.player.UnityPlayerActivity}
+AUTO_DISCOVERY=${R1_VR_AUTO_DISCOVERY:-1}
+
+die() {
+  printf '[BLOCKED] live auto-setup: %s\n' "$*" >&2
+  exit 2
+}
+
+[[ $# -ge 1 ]] || die 'usage: r1-live-auto-run COMMAND [ARG ...]'
+[[ ${AUTO_DISCOVERY} == 0 || ${AUTO_DISCOVERY} == 1 ]] \
+  || die 'R1_VR_AUTO_DISCOVERY must be 0 or 1'
+[[ -x ${HANDOFF} ]] || die "offline handoff helper is unavailable: ${HANDOFF}"
+
+valid_private_ipv4() {
+  python3 - "$1" <<'PY'
+import ipaddress
+import sys
+
+try:
+    value = ipaddress.ip_address(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+private = tuple(ipaddress.ip_network(item) for item in (
+    '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10'))
+raise SystemExit(
+    0 if value.version == 4 and any(value in subnet for subnet in private)
+    and not value.is_loopback and not value.is_multicast
+    and not value.is_unspecified else 1
+)
+PY
+}
+
+discover_headset() {
+  local serial=${R1_VR_ADB_SERIAL-} address='' device_count=0
+  local -a devices=()
+
+  if [[ ${AUTO_DISCOVERY} == 1 && -x ${ADB_BIN} ]]; then
+    mapfile -t devices < <("${ADB_BIN}" devices 2>/dev/null \
+      | awk 'NR > 1 && $2 == "device" {print $1}')
+    device_count=${#devices[@]}
+    if [[ -n ${serial} ]]; then
+      printf '%s\n' "${devices[@]}" | grep -Fxq -- "${serial}" \
+        || die "requested ADB headset is not connected: ${serial}"
+    elif ((device_count == 1)); then
+      serial=${devices[0]}
+    elif ((device_count > 1)); then
+      die 'more than one ADB device is connected; set R1_VR_ADB_SERIAL'
+    fi
+
+    if [[ -n ${serial} ]]; then
+      address=$("${ADB_BIN}" -s "${serial}" shell \
+        'ip -o -4 addr show dev wlan0 2>/dev/null' 2>/dev/null \
+        | tr -d '\r' | awk '{split($4, part, "/"); print part[1]; exit}')
+      if [[ -n ${address} ]] && valid_private_ipv4 "${address}"; then
+        export ROBOT_VR_SOURCE_IP=${address}
+        export R1_VR_ADB_SERIAL=${serial}
+        printf '[OK] Pico found by ADB: serial=%s ip=%s\n' \
+          "${serial}" "${address}"
+        # Starting an already-open activity is harmless and avoids a separate
+        # manual step after a headset reboot.
+        if ! "${ADB_BIN}" -s "${serial}" shell am start -n \
+          "${VR_ACTIVITY}" >/dev/null 2>&1; then
+          printf '[WARN] Pico was found, but the VR activity could not be opened automatically.\n' >&2
+        fi
+        return 0
+      fi
+      printf '[WARN] ADB headset has no private wlan0 IPv4 address; using configured fallback if valid.\n' >&2
+    fi
+  fi
+
+  address=${ROBOT_VR_SOURCE_IP-}
+  [[ -n ${address} ]] && valid_private_ipv4 "${address}" \
+    || die 'Pico IP was not discovered; connect ADB or set ROBOT_VR_SOURCE_IP'
+  printf '[OK] Pico IP fallback: %s\n' "${address}"
+}
+
+offline_was_active=false
+child_pid=''
+
+restore_offline() {
+  local status=$?
+  trap - EXIT INT TERM HUP
+  if [[ -n ${child_pid} ]] && kill -0 "${child_pid}" 2>/dev/null; then
+    kill -TERM "${child_pid}" 2>/dev/null || true
+    wait "${child_pid}" 2>/dev/null || true
+  fi
+  if [[ ${offline_was_active} == true ]]; then
+    if ! "${HANDOFF}" start; then
+      printf '[WARN] live session ended, but the video-only offline service was not restored.\n' >&2
+      ((status == 0)) && status=1
+    fi
+  fi
+  exit "${status}"
+}
+
+forward_signal() {
+  local signal=$1
+  [[ -n ${child_pid} ]] && kill -"${signal}" "${child_pid}" 2>/dev/null || true
+}
+
+trap restore_offline EXIT
+trap 'forward_signal INT' INT
+trap 'forward_signal TERM' TERM
+trap 'forward_signal HUP' HUP
+
+discover_headset
+
+set +e
+"${HANDOFF}" status >/dev/null 2>&1
+handoff_status=$?
+set -e
+case ${handoff_status} in
+  0)
+    offline_was_active=true
+    "${HANDOFF}" stop
+    ;;
+  3)
+    printf '[OK] video-only offline service is already inactive.\n'
+    ;;
+  *)
+    die 'could not verify the video-only offline service before live startup'
+    ;;
+esac
+
+"$@" &
+child_pid=$!
+set +e
+wait "${child_pid}"
+child_status=$?
+set -e
+child_pid=''
+exit "${child_status}"

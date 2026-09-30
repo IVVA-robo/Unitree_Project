@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SETUP="${PROJECT_DIR}/ros2_ws/install/setup.bash"
+INTERFACE=${R1_ROBOT_INTERFACE:-enxb4b024be59fe}
+LABEL=''
+DURATION=12
+
+usage() {
+  echo 'Usage: r1-app-command-capture --label TEXT [--duration-sec 4..60]'
+}
+
+while (($#)); do
+  case $1 in
+    --label) [[ $# -ge 2 ]] || { usage >&2; exit 64; }; LABEL=$2; shift 2 ;;
+    --duration-sec) [[ $# -ge 2 ]] || { usage >&2; exit 64; }; DURATION=$2; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 64 ;;
+  esac
+done
+[[ -n ${LABEL} ]] || { usage >&2; exit 64; }
+[[ ${DURATION} =~ ^[0-9]+$ ]] && ((10#${DURATION} >= 4 && 10#${DURATION} <= 60)) \
+  || { echo 'duration must be 4..60 seconds' >&2; exit 64; }
+[[ -f ${SETUP} ]] || { echo 'CAPTURE status=UNAVAILABLE detail=workspace_not_built'; exit 20; }
+
+CAPTURE_DIR="${PROJECT_DIR}/logs/app-command-captures"
+mkdir -p "${CAPTURE_DIR}"
+stamp=$(date +%Y%m%d-%H%M%S)
+safe_label=$(python3 - "${LABEL}" <<'PY'
+import re
+import sys
+value = re.sub(r'[^A-Za-z0-9_-]+', '-', sys.argv[1].strip()).strip('-')
+print((value or 'command')[:48])
+PY
+)
+OUTPUT="${CAPTURE_DIR}/${stamp}-${safe_label}.jsonl"
+WIRELESS="${OUTPUT%.jsonl}.wireless.txt"
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${SETUP}"
+source "${PROJECT_DIR}/scripts/r1-unitree-sdk-env"
+set -u
+
+API_BINARY="${PROJECT_DIR}/ros2_ws/install/r1_sdk_transport/lib/r1_sdk_transport/r1_app_command_observer"
+WIRELESS_BINARY="${PROJECT_DIR}/ros2_ws/install/r1_sdk_transport/lib/r1_sdk_transport/r1_wireless_controller_observer"
+[[ -x ${API_BINARY} ]] || { echo 'CAPTURE status=UNAVAILABLE detail=observer_not_built'; exit 20; }
+
+wireless_pid=''
+if [[ -x ${WIRELESS_BINARY} ]]; then
+  "${WIRELESS_BINARY}" --interface "${INTERFACE}" --duration-sec "${DURATION}" \
+    >"${WIRELESS}" 2>&1 &
+  wireless_pid=$!
+fi
+
+set +e
+"${API_BINARY}" --interface "${INTERFACE}" --output "${OUTPUT}" \
+  --label "${LABEL}" --duration-sec "${DURATION}"
+status=$?
+if [[ -n ${wireless_pid} ]]; then
+  wait "${wireless_pid}"
+  wireless_status=$?
+else
+  wireless_status=20
+fi
+set -e
+
+python3 - "${OUTPUT}" "${LABEL}" "${WIRELESS}" "${wireless_status}" <<'PY'
+import datetime
+import json
+from pathlib import Path
+import sys
+
+output, label, wireless, status = sys.argv[1:]
+summary = ''
+path = Path(wireless)
+if path.is_file():
+    summary = path.read_text(encoding='utf-8', errors='replace')[-4000:]
+record = {
+    'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    'label': label,
+    'source': 'wireless_controller_summary',
+    'observer_exit': int(status),
+    'summary': summary,
+}
+with open(output, 'a', encoding='utf-8') as stream:
+    stream.write(json.dumps(record, ensure_ascii=False) + '\n')
+PY
+
+((status == 0)) || exit "${status}"
+echo "CAPTURE saved=${OUTPUT}"

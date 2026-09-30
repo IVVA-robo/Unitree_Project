@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ ${1:-} == --help || ${1:-} == -h ]]; then
+  echo 'Usage: r1-voice-ensure'
+  echo 'Checks and starts the configured robot voice service over passwordless SSH.'
+  exit 0
+fi
+[[ $# -eq 0 ]] || { echo 'Usage: r1-voice-ensure' >&2; exit 64; }
+
+HOST=${R1_VOICE_HOST:-unitree@192.168.123.164}
+SERVICE=${R1_VOICE_SERVICE:-robot-voice-service.service}
+SSH=(ssh -o BatchMode=yes -o ConnectTimeout=3 -o ServerAliveInterval=2 "${HOST}")
+
+if "${SSH[@]}" "systemctl is-active --quiet '${SERVICE}'"; then
+  echo 'VOICE status=ACTIVE'
+  exit 0
+fi
+
+"${SSH[@]}" "systemctl start '${SERVICE}' 2>/dev/null || sudo -n systemctl start '${SERVICE}'"
+if "${SSH[@]}" "systemctl is-active --quiet '${SERVICE}'"; then
+  echo 'VOICE status=ACTIVE'
+  exit 0
+fi
+echo 'VOICE status=OFFLINE'
+exit 20

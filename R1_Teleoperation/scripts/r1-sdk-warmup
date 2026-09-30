@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Keep a recent read-only SDK preflight result ready while the panel connects.
+# The worker never starts a command writer and never clears KILL.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+INTERFACE=${R1_LIVE_NETWORK_INTERFACE:-enxb4b024be59fe}
+PRIMARY_CONTROL_IP=${R1_CONTROL_IP:-192.168.123.161}
+PC2_IP=${R1_PC2_IP:-${R1_ROBOT_IP:-192.168.123.164}}
+DOMAIN_ID=${R1_LIVE_ROS_DOMAIN_ID:-88}
+RETRY_SEC=${R1_SDK_WARMUP_RETRY_SEC:-3}
+REFRESH_SEC=${R1_SDK_WARMUP_REFRESH_SEC:-180}
+CONTROL_IP=${PRIMARY_CONTROL_IP}
+WARMUP_CHILD=''
+
+# shellcheck source=scripts/r1-network-autodetect
+source "${PROJECT_DIR}/scripts/r1-network-autodetect"
+
+[[ ${RETRY_SEC} =~ ^[1-9][0-9]*$ ]] && ((10#${RETRY_SEC} <= 120)) \
+  || { echo '[BLOCKED] R1_SDK_WARMUP_RETRY_SEC must be 1..120' >&2; exit 2; }
+[[ ${REFRESH_SEC} =~ ^[1-9][0-9]*$ ]] && ((10#${REFRESH_SEC} <= 300)) \
+  || { echo '[BLOCKED] R1_SDK_WARMUP_REFRESH_SEC must be 1..300' >&2; exit 2; }
+
+cleanup() {
+  trap - EXIT
+  # Another STOP/window-close may arrive while the first cleanup is waiting.
+  # It must not interrupt the owner before its separate preflight is reaped.
+  trap '' INT TERM
+  if [[ -n ${WARMUP_CHILD} ]]; then
+    # The preflight owns a temporary reader in its own session. Wait for its
+    # trap to reap that reader before the panel starts the next live graph.
+    kill -TERM -- "-${WARMUP_CHILD}" >/dev/null 2>&1 || true
+    wait "${WARMUP_CHILD}" >/dev/null 2>&1 || true
+  fi
+  exit 0
+}
+trap cleanup INT TERM
+
+invalidate_attestation() {
+  R1_SDK_NETWORK_INTERFACE="${INTERFACE}" \
+  R1_SDK_ROS_DOMAIN_ID="${DOMAIN_ID}" \
+  R1_CONTROL_IP="${CONTROL_IP}" \
+    "${SCRIPT_DIR}/r1-sdk-preflight-attestation" invalidate
+}
+
+# A cache can describe a healthy robot that was subsequently power-cycled
+# while the laptop and panel stayed up.  Every fresh warmup owner therefore
+# starts from physical telemetry, never from an attestation inherited from an
+# earlier warmup process (or an earlier robot power cycle).
+invalidate_attestation
+echo 'SDK_WARMUP state=WAITING_FOR_ROBOT'
+while true; do
+  CONTROL_IP="$(r1_resolve_control_ip "${INTERFACE}" "${PRIMARY_CONTROL_IP}" "${PC2_IP}" || true)"
+  if R1_CONTROL_IP="${CONTROL_IP}" \
+      "${SCRIPT_DIR}/r1-sdk-preflight-attestation" check >/dev/null 2>&1; then
+    echo 'SDK_WARMUP state=READY'
+    refresh_deadline=$((SECONDS + REFRESH_SEC))
+    cache_link_ok=true
+    while ((SECONDS < refresh_deadline)); do
+      wait_seconds=${RETRY_SEC}
+      remaining=$((refresh_deadline - SECONDS))
+      ((remaining < wait_seconds)) && wait_seconds=${remaining}
+      sleep "${wait_seconds}" & wait $!
+      if [[ $(cat "/sys/class/net/${INTERFACE}/carrier" 2>/dev/null || true) != 1 ]] \
+          || ! ping -I "${INTERFACE}" -c 1 -W 1 "${CONTROL_IP}" >/dev/null 2>&1; then
+        cache_link_ok=false
+        break
+      fi
+    done
+    # Revalidate from LowState at least once per refresh interval.  A short
+    # robot reboot can otherwise preserve the same MAC, route and error
+    # counters and make a one-hour cache look current after power-on.
+    invalidate_attestation
+    if [[ ${cache_link_ok} == true ]]; then
+      echo 'SDK_WARMUP state=REFRESHING detail=read_only'
+    else
+      echo 'SDK_WARMUP state=WAITING_FOR_ROBOT detail=cache_invalidated_after_link_loss'
+    fi
+    continue
+  fi
+  if pgrep -af '[r]1_live_writer_node' >/dev/null 2>&1; then
+    echo 'SDK_WARMUP state=WAITING detail=live_writer_active'
+    sleep "${RETRY_SEC}" & wait $!
+    continue
+  fi
+  if ! ping -I "${INTERFACE}" -c 1 -W 1 "${CONTROL_IP}" >/dev/null 2>&1; then
+    sleep "${RETRY_SEC}" & wait $!
+    continue
+  fi
+  echo 'SDK_WARMUP state=CHECKING detail=read_only'
+  set +e
+  R1_SDK_NETWORK_INTERFACE="${INTERFACE}" \
+  R1_CONTROL_IP="${CONTROL_IP}" \
+  R1_SDK_ROS_DOMAIN_ID="${DOMAIN_ID}" \
+    setsid "${SCRIPT_DIR}/r1-sdk-preflight" &
+  WARMUP_CHILD=$!
+  wait "${WARMUP_CHILD}"
+  status=$?
+  WARMUP_CHILD=''
+  set -e
+  if ((status == 0)); then
+    R1_SDK_NETWORK_INTERFACE="${INTERFACE}" \
+    R1_SDK_ROS_DOMAIN_ID="${DOMAIN_ID}" \
+    R1_CONTROL_IP="${CONTROL_IP}" \
+      "${SCRIPT_DIR}/r1-sdk-preflight-attestation" record
+    # Enter the cache-monitoring branch immediately. It watches the live link
+    # and forces another physical read-only preflight at REFRESH_SEC.
+    continue
+  else
+    invalidate_attestation
+    echo "SDK_WARMUP state=RETRY detail=preflight_exit_${status}"
+    sleep "${RETRY_SEC}" & wait $!
+  fi
+done

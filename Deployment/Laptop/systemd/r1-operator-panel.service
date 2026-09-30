@@ -1,0 +1,26 @@
+[Unit]
+Description=Unitree R1 exhibition operator panel
+After=graphical-session.target r1-offline-session.service
+Wants=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/unitree/Unitree_Project/R1_Teleoperation
+ExecStart=/home/unitree/Unitree_Project/R1_Teleoperation/scripts/r1-operator-panel --autostart-safe
+# A systemd stop/restart/logout bypasses the Qt close dialog.  This helper
+# waits for an active exhibition manager to complete its reviewed STOP/KILL
+# cleanup before systemd signals the panel cgroup.
+ExecStop=-/home/unitree/Unitree_Project/R1_Teleoperation/scripts/r1-operator-panel-service-stop
+TimeoutStopSec=120s
+KillMode=control-group
+Restart=on-failure
+RestartSec=4
+Environment=PYTHONUNBUFFERED=1
+
+# Autostart-safe may start only configured offline bridge/video actions.  Live
+# actions remain manual and retain the panel and writer safety gates.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=graphical-session.target

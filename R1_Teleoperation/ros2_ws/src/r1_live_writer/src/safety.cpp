@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 
 namespace r1_live_writer
 {
@@ -46,10 +47,12 @@ LiveEnvironment LiveEnvironment::from_process()
   result.commissioning_confirmed = env_is("ROBOT_CONFIRM_COMMISSIONING", "1");
   result.commissioning_token = env_text("ROBOT_COMMISSIONING_TOKEN");
   result.vr_source_ip = env_text("ROBOT_VR_SOURCE_IP");
+  const auto transport = env_text("R1_VR_TRANSPORT");
+  result.vr_transport = transport.empty() ? "lan" : transport;
   return result;
 }
 
-std::vector<std::string> LiveEnvironment::missing() const
+std::vector<std::string> LiveEnvironment::missing(bool require_vr_source) const
 {
   std::vector<std::string> result;
   if (!dry_run_disabled) {
@@ -73,7 +76,7 @@ std::vector<std::string> LiveEnvironment::missing() const
   if (commissioning_token.empty()) {
     result.emplace_back("ROBOT_COMMISSIONING_TOKEN");
   }
-  if (vr_source_ip.empty()) {
+  if (require_vr_source && vr_source_ip.empty()) {
     result.emplace_back("ROBOT_VR_SOURCE_IP");
   }
   return result;
@@ -87,7 +90,7 @@ GateDecision authorize_live_send(const AuthorizationInput & input)
   if (!input.feature_enabled) {
     return {false, "feature_disabled"};
   }
-  const auto missing = input.environment.missing();
+  const auto missing = input.environment.missing(input.require_vr_source);
   if (!missing.empty()) {
     std::ostringstream stream;
     stream << "environment_missing=";
@@ -166,12 +169,22 @@ bool valid_private_unicast_ipv4(const std::string & text)
   const std::uint32_t host = ntohl(address.s_addr);
   const std::uint8_t first = static_cast<std::uint8_t>(host >> 24U);
   const std::uint8_t second = static_cast<std::uint8_t>((host >> 16U) & 0xffU);
-  // A live VR source must remain on an explicitly configured RFC1918 LAN.
+  // Accept a fixed LAN source, including shared-address exhibition networks.
   // This rejects public, loopback, link-local, multicast, unspecified, and
   // broadcast destinations even when they are syntactically valid IPv4.
   return first == 10U ||
          (first == 172U && second >= 16U && second <= 31U) ||
-         (first == 192U && second == 168U);
+         (first == 192U && second == 168U) ||
+         (first == 100U && second >= 64U && second <= 127U);
+}
+
+bool valid_vr_source(const std::string & text, const std::string & transport)
+{
+  // Loopback is an explicit USB relay identity, never a LAN wildcard.
+  if (transport == "usb") {
+    return text == "127.0.0.1";
+  }
+  return transport == "lan" && valid_private_unicast_ipv4(text);
 }
 
 PrepareRearmGate::PrepareRearmGate(double neutral_velocity_epsilon)
@@ -192,6 +205,18 @@ void PrepareRearmGate::prepared(bool locomotion_enabled)
   // method is therefore an explicit post-prepare edge, not a stale state.
   deadman_active_ = true;
   state_ = PrepareRearmState::AwaitDeadmanRelease;
+}
+
+bool PrepareRearmGate::prepared_session(
+  bool locomotion_enabled,
+  const std::array<double, 3> & neutral_velocity)
+{
+  prepared(locomotion_enabled);
+  (void)observe_deadman(false);
+  if (locomotion_enabled && !observe_velocity(neutral_velocity)) {
+    return false;
+  }
+  return observe_deadman(true) && ready();
 }
 
 void PrepareRearmGate::reset()
@@ -268,6 +293,200 @@ std::array<double, 3> clamp_velocity(
     bounded_axis(requested[0], previous[0], limits.forward, limits.linear_rate, dt),
     bounded_axis(requested[1], previous[1], limits.lateral, limits.linear_rate, dt),
     bounded_axis(requested[2], previous[2], limits.yaw, limits.yaw_rate, dt)};
+}
+
+std::array<double, 10> clamp_arm(
+  const std::array<double, 10> & requested,
+  const std::array<double, 10> & previous,
+  double dt,
+  double max_delta,
+  double max_rate)
+{
+  if (!std::all_of(requested.begin(), requested.end(), [](double value) {
+      return std::isfinite(value);
+    }) || !std::all_of(previous.begin(), previous.end(), [](double value) {
+      return std::isfinite(value);
+    }) || !std::isfinite(dt) || !std::isfinite(max_delta) || max_delta <= 0.0 ||
+    !std::isfinite(max_rate) || max_rate <= 0.0)
+  {
+    return previous;
+  }
+  const double bounded_dt = std::clamp(dt, 0.0, 0.10);
+  const double step = std::min(max_delta, max_rate * bounded_dt);
+  std::array<double, 10> result = previous;
+  for (std::size_t index = 0; index < result.size(); ++index) {
+    const double delta = requested[index] - previous[index];
+    result[index] = previous[index] + std::clamp(delta, -step, step);
+  }
+  return result;
+}
+
+void ArmNeutralHold::reset()
+{
+  active_ = false;
+  neutral_captured_ = false;
+  physical_feedback_.fill(0.0);
+  vr_neutral_.fill(0.0);
+}
+
+void ArmNeutralHold::arm(const Positions & physical_feedback)
+{
+  if (!std::all_of(physical_feedback.begin(), physical_feedback.end(), [](double value) {
+      return std::isfinite(value);
+    }))
+  {
+    reset();
+    return;
+  }
+  active_ = true;
+  neutral_captured_ = false;
+  physical_feedback_ = physical_feedback;
+  vr_neutral_.fill(0.0);
+}
+
+bool ArmNeutralHold::capture_first_target(const Positions & vr_target)
+{
+  if (!active_ || neutral_captured_ ||
+    !std::all_of(vr_target.begin(), vr_target.end(), [](double value) {
+      return std::isfinite(value);
+    }))
+  {
+    return false;
+  }
+  vr_neutral_ = vr_target;
+  neutral_captured_ = true;
+  return true;
+}
+
+ArmNeutralHold::Positions ArmNeutralHold::target_for(
+  const Positions & vr_target, bool absolute) const
+{
+  if (!active_ || !neutral_captured_ ||
+    !std::all_of(vr_target.begin(), vr_target.end(), [](double value) {
+      return std::isfinite(value);
+    }))
+  {
+    return physical_feedback_;
+  }
+  // Calibrated joint poses keep the same destination after walking/reacquiring
+  // ArmSdk. The caller still rate-limits from the newly measured physical seed.
+  if (absolute) {return vr_target;}
+  Positions result = physical_feedback_;
+  for (std::size_t index = 0; index < result.size(); ++index) {
+    result[index] += vr_target[index] - vr_neutral_[index];
+  }
+  return result;
+}
+
+ArmResponseGuard::ArmResponseGuard(
+  double command_delta_rad, double min_progress_rad, double timeout_sec)
+: command_delta_rad_(command_delta_rad), min_progress_rad_(min_progress_rad),
+  timeout_sec_(timeout_sec)
+{
+  if (!std::isfinite(command_delta_rad_) || command_delta_rad_ < 0.05 ||
+    command_delta_rad_ > 0.15 || !std::isfinite(min_progress_rad_) ||
+    min_progress_rad_ < 0.001 || min_progress_rad_ > command_delta_rad_ ||
+    !std::isfinite(timeout_sec_) || timeout_sec_ <= 0.0 || timeout_sec_ > 1.50)
+  {
+    throw std::invalid_argument("invalid arm response guard limits");
+  }
+}
+
+void ArmResponseGuard::clear()
+{
+  seeded_ = false;
+  joints_ = {};
+}
+
+void ArmResponseGuard::seed(const Positions & commanded_feedback)
+{
+  clear();
+  for (std::size_t index = 0; index < joints_.size(); ++index) {
+    if (!std::isfinite(commanded_feedback[index])) {
+      throw std::invalid_argument("arm response seed must be finite");
+    }
+    joints_[index].command_reference = commanded_feedback[index];
+    joints_[index].target = commanded_feedback[index];
+  }
+  seeded_ = true;
+}
+
+void ArmResponseGuard::record_target(
+  const Positions & target, const Positions & feedback,
+  std::uint64_t feedback_sequence, double now_sec)
+{
+  if (!seeded_) {
+    throw std::logic_error("arm response guard requires a physical command seed");
+  }
+  for (std::size_t index = 0; index < joints_.size(); ++index) {
+    auto & joint = joints_[index];
+    joint.target = target[index];
+    const double delta = target[index] - joint.command_reference;
+    if (std::abs(delta) < command_delta_rad_) {
+      // A withdrawn command no longer requires a response. Keep the verified
+      // reference so small later changes accumulate rather than evading checks.
+      joint.pending = false;
+      joint.progress_samples = 0;
+      continue;
+    }
+    const double direction = delta > 0.0 ? 1.0 : -1.0;
+    if (!joint.pending || direction != joint.direction) {
+      joint.pending = true;
+      joint.direction = direction;
+      joint.started_sec = now_sec;
+      joint.feedback_baseline = feedback[index];
+      joint.last_sequence = feedback_sequence;
+      joint.progress_samples = 0;
+      joint.observation_target = target[index];
+    } else if (direction * (target[index] - joint.observation_target) < 0.0) {
+      // A smaller demand can replace the observed demand, but a later larger
+      // target must never inherit proof from movement elicited by an older one.
+      joint.observation_target = target[index];
+    }
+  }
+}
+
+std::optional<ArmResponseGuard::Failure> ArmResponseGuard::observe(
+  const Positions & feedback, std::uint64_t feedback_sequence, double now_sec)
+{
+  for (std::size_t index = 0; index < joints_.size(); ++index) {
+    auto & joint = joints_[index];
+    if (!joint.pending) {
+      continue;
+    }
+    if (feedback_sequence > joint.last_sequence) {
+      joint.last_sequence = feedback_sequence;
+      const double progress =
+        (feedback[index] - joint.feedback_baseline) * joint.direction;
+      // With slowly accumulated commands the joint can already have reached
+      // this goal before the observation window starts. Three fresh samples
+      // at that goal prove response without demanding motion past the goal.
+      const bool at_observed_goal =
+        std::abs(feedback[index] - joint.observation_target) <= min_progress_rad_;
+      joint.progress_samples = progress >= min_progress_rad_ || at_observed_goal ?
+        joint.progress_samples + 1 : 0;
+    }
+    if (joint.progress_samples >= kRequiredProgressSamples) {
+      joint.command_reference = joint.observation_target;
+      joint.pending = false;
+      joint.progress_samples = 0;
+      continue;
+    }
+    if (now_sec - joint.started_sec >= timeout_sec_) {
+      return Failure{
+        index, joint.direction, joint.target, joint.observation_target,
+        joint.command_reference, joint.feedback_baseline, feedback[index],
+        joint.progress_samples, now_sec - joint.started_sec};
+    }
+  }
+  return std::nullopt;
+}
+
+bool ArmResponseGuard::pending() const
+{
+  return std::any_of(joints_.begin(), joints_.end(), [](const Joint & joint) {
+      return joint.pending;
+    });
 }
 
 std::array<double, 2> clamp_head(

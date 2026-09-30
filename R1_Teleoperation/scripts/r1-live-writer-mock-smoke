@@ -384,10 +384,13 @@ import sys
 from pathlib import Path
 
 text = Path(sys.argv[1]).read_text(encoding='utf-8', errors='replace')
-values = [float(value) for value in re.findall(
-    r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?', text
-)]
-if not values or not all(math.isfinite(value) for value in values):
+position_fields = re.findall(r'positions=\[([^\]]*)\]', text)
+# ros2 echo merges message-loss warnings into this capture. Their counters
+# and the trajectory duration are not joint positions.
+values = [float(value.strip()) for field in position_fields
+          for value in field.split(',') if value.strip()]
+if (len(position_fields) != 1 or len(values) != 2
+        or not all(math.isfinite(value) for value in values)):
     raise SystemExit('no finite head positions in %s: %r' % (sys.argv[3], text))
 if sys.argv[2] == 'nonzero' and not any(abs(value) > 0.005 for value in values):
     raise SystemExit('%s expected a non-zero head target: %r' % (sys.argv[3], values))

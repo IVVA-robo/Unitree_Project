@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import datetime as _datetime
 import math
+from pathlib import Path
 import threading
 import time
 from typing import Any, Callable, Optional, Union
@@ -53,6 +54,38 @@ except (ImportError, ModuleNotFoundError, OSError) as exc:  # pragma: no cover
     _VideoClient = None
     UNITREE_SDK_AVAILABLE = False
     UNITREE_SDK_IMPORT_ERROR = exc
+
+
+def discover_unitree_interface(preferred: str = 'auto') -> str:
+    """Resolve the current physical Ethernet NIC without pinning its name."""
+    candidate = str(preferred or '').strip()
+    net_root = Path('/sys/class/net')
+    if candidate and candidate.lower() != 'auto':
+        return candidate
+    interfaces = []
+    try:
+        names = sorted(path.name for path in net_root.iterdir())
+    except OSError:
+        names = []
+    for name in names:
+        if name == 'lo' or not (name.startswith('en') or name.startswith('eth')):
+            continue
+        path = net_root / name
+        try:
+            carrier = (path / 'carrier').read_text().strip() == '1'
+        except OSError:
+            carrier = False
+        try:
+            operational = (path / 'operstate').read_text().strip() == 'up'
+        except OSError:
+            operational = False
+        interfaces.append((not (carrier and operational), name))
+    if interfaces:
+        interfaces.sort()
+        return interfaces[0][1]
+    if candidate and candidate.lower() != 'auto':
+        return candidate
+    raise RuntimeError('no physical Ethernet interface is available yet')
 
 
 def ros_image_to_bgr(message: Any) -> np.ndarray:
@@ -470,6 +503,7 @@ class OpenCVSource:
 
 
 _UNITREE_MAX_RECONNECT_DELAY_S = 5.0
+_UNITREE_CLIENT_RECYCLE_AFTER_ERRORS = 2
 
 
 def _next_unitree_reconnect_delay(
@@ -497,6 +531,9 @@ class UnitreeVideoSource:
         domain_id: int = 0,
         rpc_timeout_s: float = 1.0,
         reconnect_delay_s: float = 0.5,
+        client_recycle_after_errors: int = (
+            _UNITREE_CLIENT_RECYCLE_AFTER_ERRORS
+        ),
         name: str = 'unitree-video',
         channel_initializer: Optional[Callable[..., Any]] = None,
         video_client_factory: Optional[Callable[[], Any]] = None,
@@ -516,16 +553,24 @@ class UnitreeVideoSource:
             raise ValueError(
                 'reconnect_delay_s must be finite and non-negative'
             )
+        if int(client_recycle_after_errors) <= 0:
+            raise ValueError(
+                'client_recycle_after_errors must be a positive integer'
+            )
         source_name = str(name).strip()
         if not source_name:
             raise ValueError('name must not be empty')
 
         self.hub = hub
         self.processor = processor or FrameProcessor()
-        self.network_interface = interface
+        self._auto_interface = interface.lower() == 'auto'
+        self.network_interface = discover_unitree_interface(interface)
         self.domain_id = int(domain_id)
         self.rpc_timeout_s = float(rpc_timeout_s)
         self.reconnect_delay_s = float(reconnect_delay_s)
+        self.client_recycle_after_errors = int(
+            client_recycle_after_errors
+        )
         self.name = source_name
         self._channel_initializer = (
             _ChannelFactoryInitialize
@@ -611,6 +656,13 @@ class UnitreeVideoSource:
             raise RuntimeError(
                 'Unitree video SDK dependencies are unavailable'
             )
+        # Re-resolve an automatic USB Ethernet name for every retry. Linux can
+        # rename the adapter after a reconnect, while the headset and server
+        # remain available on Wi-Fi.
+        if self._auto_interface:
+            self.network_interface = discover_unitree_interface('auto')
+        # VideoClient discovers the DDS service on this interface/domain.
+        # ROBOT_POV_ROBOT_IP is only preflight metadata, not its remote target.
         initializer(self.domain_id, self.network_interface)
         client = factory()
         required = ('SetTimeout', 'Init', 'GetImageSample')
@@ -627,6 +679,30 @@ class UnitreeVideoSource:
         client.SetTimeout(self.rpc_timeout_s)
         client.Init()
         return client
+
+    @staticmethod
+    def _close_client(client: Any) -> None:
+        """Best-effort cleanup for SDK clients that expose no public close."""
+        if client is None:
+            return
+        stub = getattr(client, '_ClientBase__stub', None)
+        if stub is None:
+            return
+        channels = (
+            ('_ClientStub__sendChannel', 'CloseWriter'),
+            ('_ClientStub__recvChannel', 'CloseReader'),
+        )
+        for attribute, method_name in channels:
+            channel = getattr(stub, attribute, None)
+            method = getattr(channel, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                method()
+            except Exception:
+                # Recovery must continue even if an older SDK revision uses
+                # a different private channel layout.
+                pass
 
     @staticmethod
     def _decode_sample(result: Any) -> np.ndarray:
@@ -661,6 +737,7 @@ class UnitreeVideoSource:
         reconnect_delay_s: Optional[float] = None
         client = None
         connected = False
+        consecutive_errors = 0
         try:
             while not self._stop_event.is_set():
                 if client is None:
@@ -709,29 +786,39 @@ class UnitreeVideoSource:
                     )
                     pending_dropped = 0
                     reconnect_delay_s = None
+                    consecutive_errors = 0
                 except Exception as exc:
                     if self._stop_event.is_set():
                         break
                     pending_dropped += 1
+                    consecutive_errors += 1
                     connected = False
                     self.hub.mark_source_error(
                         self.name,
                         exc,
                         disconnected=True,
                     )
-                    # Keep the initialized VideoClient alive while the service
-                    # is temporarily unavailable.  Recreating it for every
-                    # non-zero RPC result leaks DDS request/response endpoints
-                    # and can prevent a late-starting videohub from matching.
+                    # Reuse the client through one transient failure.  A
+                    # client matched before an R1 videohub restart can remain
+                    # permanently stale, so recycle it after a bounded run of
+                    # failures while keeping the HTTP/MJPEG server alive.
                     reconnecting = True
                     self.hub.mark_source_reconnect(self.name)
                     reconnect_delay_s = _next_unitree_reconnect_delay(
                         self.reconnect_delay_s,
                         reconnect_delay_s,
                     )
+                    if (
+                        consecutive_errors
+                        >= self.client_recycle_after_errors
+                    ):
+                        self._close_client(client)
+                        client = None
+                        consecutive_errors = 0
                     if self._stop_event.wait(reconnect_delay_s):
                         break
         finally:
+            self._close_client(client)
             self.hub.mark_source_disconnected(self.name)
             with self._lifecycle_lock:
                 if self._thread is threading.current_thread():

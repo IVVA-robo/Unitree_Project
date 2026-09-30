@@ -1,0 +1,32 @@
+{
+  "filename": "google_gemma-3-4b-it-Q4_K_M.gguf",
+  "bytes": 2489758112,
+  "sha256": "4996030242583a40aa151ff93f49ed787ac8c25e4120c3ae4588b2e2a7d1ae94",
+  "parts": [
+    {
+      "file": "part-0000",
+      "bytes": 536870912,
+      "sha256": "67bdddec77a8a3c73501b5deb1e8c58bae92a60712e16f2788dd5e5f278fb63b"
+    },
+    {
+      "file": "part-0001",
+      "bytes": 536870912,
+      "sha256": "6d3d1dfdab019ec9307a276b0ceb4632a81a9a8991db1d2afa20e58f398b99e7"
+    },
+    {
+      "file": "part-0002",
+      "bytes": 536870912,
+      "sha256": "1b40803b8e4638ee32934c94ad9f84e5f1654012dedd386a0dae35eed55fd79d"
+    },
+    {
+      "file": "part-0003",
+      "bytes": 536870912,
+      "sha256": "7c93375c199010b9c4a1a2e2aa00ed68531f232bc736ad31de82276e57cb86d1"
+    },
+    {
+      "file": "part-0004",
+      "bytes": 342274464,
+      "sha256": "b5e547a81db8df6972e437f6f979b8b3f315f59b4a9902127abe59adafa2b2f0"
+    }
+  ]
+}

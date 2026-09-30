@@ -1,0 +1,8 @@
+{
+  "label": "Lock",
+  "service": "sport",
+  "api_id": 7101,
+  "parameter": "{\"data\":4}",
+  "binary_size": 0,
+  "source_capture": "/home/unitree/Unitree_Project/R1_Teleoperation/logs/app-command-captures/20260924-144705-Lock.jsonl"
+}

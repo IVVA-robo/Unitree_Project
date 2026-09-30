@@ -138,7 +138,7 @@ if [[ ! $WAIT_SECONDS =~ ^([1-9]|[1-5][0-9]|60)$ ]]; then
   printf 'Wait time must be an integer from 1 to 60 seconds.\n' >&2; exit 1
 fi
 
-for required in ip ros2 timeout python3 rg setsid; do
+for required in ip ros2 timeout python3 grep setsid; do
   command -v "$required" >/dev/null 2>&1 || mark_fail "required command is unavailable: $required"
 done
 [[ $RESULT -eq 1 ]] && exit 1
@@ -263,7 +263,7 @@ fi
 
 section 'Command-writer interlock'
 processes="$(ps -eo pid=,args= 2>/dev/null || true)"
-writer_processes="$(printf '%s\n' "$processes" | rg -i \
+writer_processes="$(printf '%s\n' "$processes" | grep -Ei \
   'r1_arm_sdk_dds_example|r1_loco_client|ArmSdk|LocoClient|rt/(arm_sdk|lowcmd)|(^|[[:space:]])sport([[:space:]]|$)' || true)"
 if [[ -n $writer_processes ]]; then
   printf '%s\n' "$writer_processes"
@@ -300,22 +300,13 @@ case "$arm_sdk_observer_status" in
 esac
 
 section 'Read-only ROS transport'
-reader_node_present=false
-reader_service_present=false
-for attempt in 1 2 3 4; do
-  reader_nodes="$(timeout 3 ros2 node list --no-daemon --spin-time 0.5 2>/dev/null || true)"
-  grep -Fxq '/r1_sdk_transport' <<<"$reader_nodes" \
-    && reader_node_present=true
-  if timeout 3 ros2 param list /r1_sdk_transport --no-daemon >/dev/null 2>&1; then
-    reader_service_present=true
-  fi
-  [[ $reader_node_present == true && $reader_service_present == true ]] && break
-  sleep 0.25
-done
-
-if [[ $reader_node_present == true && $reader_service_present == true ]]; then
+set +e
+"$SCRIPT_DIR/r1-exhibition-reader-probe"
+reader_probe_status=$?
+set -e
+if ((reader_probe_status == 10)); then
   mark_ok 'existing /r1_sdk_transport node and parameter service are live'
-elif [[ $reader_node_present == true || $reader_service_present == true ]]; then
+elif ((reader_probe_status != 0)); then
   mark_fail 'inconsistent/stale /r1_sdk_transport discovery; refusing to start a duplicate reader'
 elif [[ $START_READER == true ]]; then
   # A topic type alone is intentionally ignored here. DDS graph entries can
@@ -458,56 +449,60 @@ printf '%s\n' \
   '[WARN] verified R1 LowState has no charging field; live motion remains blocked unless ROBOT_CONFIRM_OFF_CHARGER=1 is supplied by the on-site operator.'
 
 section 'Safety parameters'
-node_seen=false
-for attempt in 1 2 3 4; do
-  if timeout 3 ros2 param list /r1_sdk_transport --no-daemon >/dev/null 2>&1; then
-    node_seen=true
-    break
-  fi
-  sleep 0.5
+parameter_dump=''
+for attempt in 1 2 3; do
+  parameter_dump="$(timeout 7 ros2 param dump /r1_sdk_transport \
+    --no-daemon --spin-time 1.5 2>/dev/null || true)"
+  grep -Fq '/r1_sdk_transport:' <<<"$parameter_dump" && break
+  parameter_dump=''
+  sleep 0.25
 done
-if [[ $node_seen != true ]]; then
-  mark_fail '/r1_sdk_transport parameter service was not discovered'
+if [[ -z $parameter_dump ]]; then
+  mark_fail '/r1_sdk_transport parameter snapshot was not discovered'
 else
-  check_bool_param() {
-    local name=$1 expected=$2 result='' result_lc='' result_display attempt
-    for attempt in 1 2 3 4; do
-      result="$(timeout 3 ros2 param get /r1_sdk_transport "$name" --no-daemon 2>&1 || true)"
-      result_lc="$(printf '%s' "$result" | tr '[:upper:]' '[:lower:]')"
-      [[ $result_lc == *'boolean value is:'* ]] && break
-      sleep 0.25
-    done
-    result_display=$result
-    [[ -n $result_display ]] || result_display=unavailable
-    if [[ $expected == true && $result_lc == *'boolean value is: true'* ]]; then
-      mark_ok "$name=true"
-    elif [[ $expected == false && $result_lc == *'boolean value is: false'* ]]; then
-      mark_ok "$name=false"
+  # One coherent parameter snapshot replaces five separate DDS discovery
+  # participants.  This preserves every fail-closed expectation while
+  # removing most of the cold-start latency on the physical Fast DDS graph.
+  for expectation in \
+    'dry_run|true' \
+    'hardware_enabled|false' \
+    'commissioning_interlock|false' \
+    'arm_writer_enabled|false' \
+    'locomotion_writer_enabled|false'; do
+    parameter=${expectation%%|*}
+    expected=${expectation#*|}
+    if grep -Eq \
+      "^[[:space:]]+${parameter}:[[:space:]]+${expected}[[:space:]]*$" \
+      <<<"$parameter_dump"; then
+      mark_ok "$parameter=$expected"
     else
-      printf '[INFO] %s: %s\n' "$name" "$result_display"
-      mark_fail "$name is not the required fail-closed value ($expected)"
+      mark_fail "$parameter is not the required fail-closed value ($expected)"
     fi
-  }
-  check_bool_param dry_run true
-  check_bool_param hardware_enabled false
-  check_bool_param commissioning_interlock false
-  check_bool_param arm_writer_enabled false
-  check_bool_param locomotion_writer_enabled false
+  done
 fi
 
 section 'ROS command topics'
-for forbidden in \
-  '/joint_trajectory_controller/joint_cmd' \
-  '/r1/hardware' \
-  '/r1/arm_cmd' \
-  '/r1/loco_cmd'; do
-  forbidden_type="$(timeout 4 ros2 topic type "$forbidden" --no-daemon 2>/dev/null || true)"
-  if [[ -n $forbidden_type ]]; then
-    mark_fail "command topic is present: $forbidden ($forbidden_type)"
-  else
-    mark_ok "no command topic $forbidden"
-  fi
-done
+set +e
+topic_snapshot="$(timeout 7 ros2 topic list --no-daemon --spin-time 1.5 \
+  --show-types 2>/dev/null)"
+topic_snapshot_status=$?
+set -e
+if ((topic_snapshot_status != 0)) \
+    || ! grep -Eq '^/r1/sdk/joint_states[[:space:]]' <<<"$topic_snapshot"; then
+  mark_fail 'coherent ROS topic snapshot was unavailable'
+else
+  for forbidden in \
+    '/joint_trajectory_controller/joint_cmd' \
+    '/r1/hardware' \
+    '/r1/arm_cmd' \
+    '/r1/loco_cmd'; do
+    if grep -Eq "^${forbidden//\//\\/}[[:space:]]" <<<"$topic_snapshot"; then
+      mark_fail "command topic is present: $forbidden"
+    else
+      mark_ok "no command topic $forbidden"
+    fi
+  done
+fi
 
 section 'Result'
 case "$RESULT" in

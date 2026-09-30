@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Save the current HMD neutral through the already-running local dry/live head
+# node.  This helper never starts a writer, clears KILL, or talks to Unitree.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_SETUP="${PROJECT_DIR}/ros2_ws/install/setup.bash"
+[[ -f "${WORKSPACE_SETUP}" ]] || WORKSPACE_SETUP="${PROJECT_DIR}/install/setup.bash"
+
+die() {
+  echo "[BLOCKED] $*" >&2
+  echo 'No Unitree command was sent and no kill latch was cleared.' >&2
+  exit 2
+}
+
+[[ $# -eq 0 ]] || die 'usage: r1-head-calibrate'
+[[ -f /opt/ros/humble/setup.bash ]] || die 'ROS 2 Humble is unavailable'
+[[ -f "${WORKSPACE_SETUP}" ]] || die "workspace is not built: ${WORKSPACE_SETUP}"
+
+DOMAIN_ID=${R1_LIVE_ROS_DOMAIN_ID:-88}
+[[ "${DOMAIN_ID}" =~ ^[0-9]+$ ]] && ((10#${DOMAIN_ID} <= 232)) \
+  || die 'R1_LIVE_ROS_DOMAIN_ID must be 0..232'
+
+set +u
+source /opt/ros/humble/setup.bash
+source "${WORKSPACE_SETUP}"
+set -u
+export ROS_DOMAIN_ID="$((10#${DOMAIN_ID}))"
+export ROS_LOCALHOST_ONLY=1
+
+HELPER="${SCRIPT_DIR}/r1-call-trigger-service"
+[[ -x "${HELPER}" ]] || die 'bounded ROS Trigger helper is missing'
+echo 'Calibrating the current HMD neutral pose; keep the head still.'
+"${HELPER}" /r1/head/calibrate_neutral "${R1_HEAD_CALIBRATE_TIMEOUT_SEC:-8}"

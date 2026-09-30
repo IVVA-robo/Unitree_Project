@@ -11,8 +11,13 @@ using UnityEngine.XR;
 // It uses OpenXR/CommonUsages, so no Pico-specific API is required.
 public sealed class VRUdpSender : MonoBehaviour
 {
+    // Robot POV shares this result so video and control reconnect to the same
+    // laptop without a separate address setting inside the headset.
+    public static event Action<string> EndpointDiscovered;
+    public static string LastDiscoveredHost { get; private set; }
+
     [Header("ROS host")]
-    [SerializeField] private string host = "192.168.8.120";
+    [SerializeField] private string host = "192.168.8.9";
     [SerializeField] private int port = 9090;
 
     [Header("LAN discovery")]
@@ -34,11 +39,15 @@ public sealed class VRUdpSender : MonoBehaviour
     [SerializeField] private bool requireLeftGripAsDeadman = true;
 
     private UdpClient udp;
+    private R1UsbPoseTransport usbTransport;
     private InputDevice leftDevice;
     private InputDevice rightDevice;
     private InputDevice headDevice;
     private bool analogDeadman;
     private bool deadmanReleaseObserved;
+    private bool lastReportedLeftX;
+    private bool lastReportedRightB;
+    private float nextInputDiagnosticTime;
     private float nextSendTime;
     private float nextReconnectTime;
     private uint sequence;
@@ -50,6 +59,19 @@ public sealed class VRUdpSender : MonoBehaviour
 
     private const float ReconnectDelaySeconds = 1.0f;
     private const string DiscoveryProbePrefix = "R1_TELEOP_DISCOVER v1 ";
+    // Pico's legacy XR provider exposes the squeeze axis under this name on
+    // firmware versions where CommonUsages.grip is absent.
+    private static readonly InputFeatureUsage<float> PicoGrip1DAxisUsage =
+        new InputFeatureUsage<float>("Grip1DAxis");
+    // Most Pico/OpenXR runtimes expose the stick as Primary2DAxis. Some
+    // firmware/plugin combinations publish the same physical control under an
+    // alias. Probe those aliases before treating a valid controller as zero.
+    private static readonly InputFeatureUsage<Vector2>[] StickAxisUsages =
+    {
+        CommonUsages.primary2DAxis,
+        new InputFeatureUsage<Vector2>("Joystick"),
+        new InputFeatureUsage<Vector2>("Thumbstick")
+    };
 
     [Serializable]
     private sealed class PoseWire
@@ -66,6 +88,21 @@ public sealed class VRUdpSender : MonoBehaviour
     }
 
     [Serializable]
+    private sealed class TrackingWire
+    {
+        public bool left;
+        public bool right;
+        public bool head;
+    }
+
+    [Serializable]
+    private sealed class ButtonsWire
+    {
+        public bool left_x;
+        public bool right_b;
+    }
+
+    [Serializable]
     private sealed class PacketWire
     {
         public int v;
@@ -76,6 +113,8 @@ public sealed class VRUdpSender : MonoBehaviour
         public PoseWire head;
         public SticksWire sticks;
         public float[] triggers;
+        public TrackingWire tracking;
+        public ButtonsWire buttons;
         public bool deadman;
     }
 
@@ -83,6 +122,13 @@ public sealed class VRUdpSender : MonoBehaviour
     {
         ResetDeadmanInterlock();
         AcquireDevices();
+        if (R1UsbPoseTransport.Requested())
+        {
+            usbTransport = new R1UsbPoseTransport();
+            NotifyEndpointDiscovered("127.0.0.1");
+            Debug.Log("R1 USB mode selected; video and poses use ADB reverse");
+            return;
+        }
         if (autoDiscoverHost)
             StartDiscovery();
         else
@@ -93,6 +139,8 @@ public sealed class VRUdpSender : MonoBehaviour
     {
         // Send an explicit zero/deadman=false snapshot before closing when possible.
         SendDeadmanFalseBestEffort();
+        usbTransport?.Dispose();
+        usbTransport = null;
         CloseDiscovery();
         CloseEndpoint();
         ResetDeadmanInterlock();
@@ -100,13 +148,19 @@ public sealed class VRUdpSender : MonoBehaviour
 
     private void Update()
     {
+        if (usbTransport != null)
+        {
+            usbTransport.Poll();
+            if (usbTransport.Reconnected) ResetDeadmanInterlock();
+            if (!usbTransport.HasRequest) return;
+        }
         PollDiscovery();
 
         if (Time.unscaledTime < nextSendTime)
             return;
 
         nextSendTime = Time.unscaledTime + 1.0f / sendRateHz;
-        if (udp == null)
+        if (udp == null && usbTransport == null)
         {
             if (autoDiscoverHost && !discoveryResolved)
             {
@@ -118,6 +172,7 @@ public sealed class VRUdpSender : MonoBehaviour
                 // the same deadman interlock and reconnect behavior.
                 discoveryResolved = true;
                 CloseDiscovery();
+                NotifyEndpointDiscovered(host);
                 Debug.LogWarning(
                     $"VR UDP discovery timed out; using fallback endpoint {host}:{port}");
             }
@@ -143,10 +198,18 @@ public sealed class VRUdpSender : MonoBehaviour
             // available, and fall back to the analog grip value otherwise.
             bool gripButton = false;
             float gripAmount = 0.0f;
+            float picoGripAmount = 0.0f;
             bool hasGripButton = leftDevice.TryGetFeatureValue(
                 CommonUsages.gripButton, out gripButton);
             bool hasGripAxis = leftDevice.TryGetFeatureValue(
                 CommonUsages.grip, out gripAmount);
+            bool hasPicoGripAxis = leftDevice.TryGetFeatureValue(
+                PicoGrip1DAxisUsage, out picoGripAmount);
+            if (hasPicoGripAxis && (!hasGripAxis || picoGripAmount > gripAmount))
+            {
+                hasGripAxis = true;
+                gripAmount = picoGripAmount;
+            }
             const float gripOnThreshold = 0.65f;
             const float gripOffThreshold = 0.45f;
 
@@ -173,6 +236,26 @@ public sealed class VRUdpSender : MonoBehaviour
             bool requestedDeadman = (hasGripButton && gripButton) || analogDeadman;
             bool deadmanInputReleased = (!hasGripButton || !gripButton)
                 && (!hasGripAxis || gripAmount <= gripOffThreshold);
+
+            if (Time.unscaledTime >= nextInputDiagnosticTime)
+            {
+                nextInputDiagnosticTime = Time.unscaledTime + 1.0f;
+                bool hasLeftStick = TryReadAxis(
+                    leftDevice, out Vector2 leftStick, out string leftStickSource);
+                bool hasRightStick = TryReadAxis(
+                    rightDevice, out Vector2 rightStick, out string rightStickSource);
+                Debug.Log(
+                    $"VR deadman input: left={leftDevice.name} valid={leftDevice.isValid} "
+                    + $"gripButton={hasGripButton}:{gripButton} "
+                    + $"grip={hasGripAxis}:{gripAmount:F3} "
+                    + $"picoGrip={hasPicoGripAxis}:{picoGripAmount:F3} "
+                    + $"releaseObserved={deadmanReleaseObserved} "
+                    + $"requested={requestedDeadman} "
+                    + $"leftStick={hasLeftStick}:{leftStickSource}:"
+                    + $"({leftStick.x:F3},{leftStick.y:F3}) "
+                    + $"rightStick={hasRightStick}:{rightStickSource}:"
+                    + $"({rightStick.x:F3},{rightStick.y:F3})");
+            }
 
             // A grip that was already held when the app/transport started must
             // never arm motion.  Require one observable release before a later
@@ -231,6 +314,7 @@ public sealed class VRUdpSender : MonoBehaviour
         host = endpointHost.Trim();
         port = endpointPort;
         discoveryResolved = true;
+        NotifyEndpointDiscovered(host);
         CloseDiscovery();
         ResetDeadmanInterlock();
 
@@ -301,6 +385,7 @@ public sealed class VRUdpSender : MonoBehaviour
         {
             CloseDiscovery();
             discoveryResolved = true;
+            NotifyEndpointDiscovered(host);
             Debug.LogWarning(
                 $"VR UDP discovery is unavailable; using fallback endpoint {host}:{port}: "
                 + exception.Message);
@@ -460,8 +545,17 @@ public sealed class VRUdpSender : MonoBehaviour
 
         byte[] octets = address.GetAddressBytes();
         return octets[0] == 10
+            || (octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127)
             || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
             || (octets[0] == 192 && octets[1] == 168);
+    }
+
+    private static void NotifyEndpointDiscovered(string endpointHost)
+    {
+        if (string.IsNullOrWhiteSpace(endpointHost))
+            return;
+        LastDiscoveredHost = endpointHost.Trim();
+        EndpointDiscovered?.Invoke(LastDiscoveredHost);
     }
 
     private void CloseDiscovery()
@@ -509,13 +603,27 @@ public sealed class VRUdpSender : MonoBehaviour
 
     private void SendSnapshot(bool deadman)
     {
-        if (udp == null)
+        if (udp == null && usbTransport == null)
             return;
 
         Vector2 leftStick = ReadAxis(leftDevice);
         Vector2 rightStick = ReadAxis(rightDevice);
         float leftTrigger = ReadTrigger(leftDevice);
         float rightTrigger = ReadTrigger(rightDevice);
+        bool leftTracked = IsPoseTracked(leftDevice);
+        bool rightTracked = IsPoseTracked(rightDevice);
+        bool headTracked = IsPoseTracked(headDevice);
+        // OpenXR/CommonUsages maps the left primary face button to X and the
+        // right secondary face button to B on Pico/Meta-style controllers.
+        bool leftX = ReadButton(leftDevice, CommonUsages.primaryButton);
+        bool rightB = ReadButton(rightDevice, CommonUsages.secondaryButton);
+        if (leftX != lastReportedLeftX || rightB != lastReportedRightB)
+        {
+            lastReportedLeftX = leftX;
+            lastReportedRightB = rightB;
+            Debug.Log(
+                $"VR action buttons: left_x={leftX} right_b={rightB}");
+        }
 
         PacketWire packet = new PacketWire
         {
@@ -531,7 +639,18 @@ public sealed class VRUdpSender : MonoBehaviour
                 right = new[] { rightStick.x, rightStick.y }
             },
             triggers = new[] { leftTrigger, rightTrigger },
-            deadman = deadman && leftDevice.isValid && rightDevice.isValid && headDevice.isValid
+            tracking = new TrackingWire
+            {
+                left = leftTracked,
+                right = rightTracked,
+                head = headTracked
+            },
+            buttons = new ButtonsWire
+            {
+                left_x = leftX,
+                right_b = rightB
+            },
+            deadman = deadman && leftTracked && rightTracked && headTracked
         };
 
         // JsonUtility emits JSON numbers with invariant decimal separators.
@@ -541,21 +660,165 @@ public sealed class VRUdpSender : MonoBehaviour
             Debug.LogError($"VR UDP packet unexpectedly large: {bytes.Length} bytes");
             return;
         }
-        udp.Send(bytes, bytes.Length);
+        if (usbTransport != null)
+            usbTransport.Send(bytes);
+        else
+            udp.Send(bytes, bytes.Length);
     }
 
     private static Vector2 ReadAxis(InputDevice device)
     {
-        return device.TryGetFeatureValue(CommonUsages.primary2DAxis, out Vector2 axis)
-            ? Vector2.ClampMagnitude(axis, 1.0f)
-            : Vector2.zero;
+        return TryReadAxis(device, out Vector2 axis, out string ignoredSource)
+            ? axis : Vector2.zero;
     }
+
+    private static bool ReadButton(
+        InputDevice device,
+        InputFeatureUsage<bool> usage)
+    {
+        return device.isValid
+            && device.TryGetFeatureValue(usage, out bool pressed)
+            && pressed;
+    }
+
+    private static bool TryReadAxis(
+        InputDevice device,
+        out Vector2 axis,
+        out string source)
+    {
+        axis = Vector2.zero;
+        source = "missing";
+        if (!device.isValid)
+            return false;
+
+        bool found = false;
+        foreach (InputFeatureUsage<Vector2> usage in StickAxisUsages)
+        {
+            if (!device.TryGetFeatureValue(usage, out Vector2 candidate))
+                continue;
+            if (float.IsNaN(candidate.x) || float.IsNaN(candidate.y)
+                || float.IsInfinity(candidate.x) || float.IsInfinity(candidate.y))
+                continue;
+            candidate = Vector2.ClampMagnitude(candidate, 1.0f);
+            if (!found || candidate.sqrMagnitude > axis.sqrMagnitude)
+            {
+                axis = candidate;
+                source = usage.name;
+                found = true;
+            }
+        }
+
+#if ENABLE_INPUT_SYSTEM
+        if (TryReadInputSystemAxis(
+                device.characteristics,
+                out Vector2 inputSystemAxis,
+                out string inputSystemSource)
+            && (!found || inputSystemAxis.sqrMagnitude > axis.sqrMagnitude))
+        {
+            axis = inputSystemAxis;
+            source = inputSystemSource;
+            found = true;
+        }
+#endif
+        return found;
+    }
+
+#if ENABLE_INPUT_SYSTEM
+    private static bool TryReadInputSystemAxis(
+        InputDeviceCharacteristics characteristics,
+        out Vector2 axis,
+        out string source)
+    {
+        axis = Vector2.zero;
+        source = "InputSystem:missing";
+        UnityEngine.InputSystem.Utilities.InternedString expectedHand;
+        if ((characteristics & InputDeviceCharacteristics.Left) != 0)
+            expectedHand = UnityEngine.InputSystem.CommonUsages.LeftHand;
+        else if ((characteristics & InputDeviceCharacteristics.Right) != 0)
+            expectedHand = UnityEngine.InputSystem.CommonUsages.RightHand;
+        else
+            return false;
+
+        string[] controlPaths =
+        {
+            "thumbstick", "{Primary2DAxis}", "primary2DAxis", "joystick"
+        };
+        bool found = false;
+        foreach (UnityEngine.InputSystem.InputDevice inputDevice in
+                 UnityEngine.InputSystem.InputSystem.devices)
+        {
+            bool handMatches = false;
+            foreach (UnityEngine.InputSystem.Utilities.InternedString usage in
+                     inputDevice.usages)
+            {
+                if (usage == expectedHand)
+                {
+                    handMatches = true;
+                    break;
+                }
+            }
+            if (!handMatches)
+                continue;
+
+            foreach (string controlPath in controlPaths)
+            {
+                UnityEngine.InputSystem.Controls.Vector2Control control =
+                    inputDevice.TryGetChildControl<
+                        UnityEngine.InputSystem.Controls.Vector2Control>(
+                            controlPath);
+                if (control == null)
+                    continue;
+                Vector2 candidate = control.ReadValue();
+                if (float.IsNaN(candidate.x) || float.IsNaN(candidate.y)
+                    || float.IsInfinity(candidate.x)
+                    || float.IsInfinity(candidate.y))
+                    continue;
+                candidate = Vector2.ClampMagnitude(candidate, 1.0f);
+                if (!found || candidate.sqrMagnitude > axis.sqrMagnitude)
+                {
+                    axis = candidate;
+                    source = "InputSystem:" + inputDevice.displayName
+                        + "/" + control.name;
+                    found = true;
+                }
+            }
+        }
+        return found;
+    }
+#endif
 
     private static float ReadTrigger(InputDevice device)
     {
         return device.TryGetFeatureValue(CommonUsages.trigger, out float value)
             ? Mathf.Clamp01(value)
             : 0.0f;
+    }
+
+    private static bool IsPoseTracked(InputDevice device)
+    {
+        if (!device.isValid)
+            return false;
+
+        bool isTracked;
+        bool reportsTracking = device.TryGetFeatureValue(
+            CommonUsages.isTracked, out isTracked);
+        bool reportsPoseFlags = device.TryGetFeatureValue(
+            CommonUsages.trackingState, out InputTrackingState poseFlags);
+        bool hasPosition = device.TryGetFeatureValue(
+            CommonUsages.devicePosition, out Vector3 ignoredPosition);
+        bool hasRotation = device.TryGetFeatureValue(
+            CommonUsages.deviceRotation, out Quaternion ignoredRotation);
+        InputTrackingState required =
+            InputTrackingState.Position | InputTrackingState.Rotation;
+        bool completePose = !reportsPoseFlags || (poseFlags & required) == required;
+        // OpenXR runtimes can briefly lower isTracked while they continue to
+        // provide a valid predicted pose from controller IMU + camera history.
+        // Games consume the per-component trackingState flags in that window;
+        // do the same here. The bridge still applies its bounded hold/zero
+        // policy when either position or rotation really becomes unavailable.
+        bool runtimeTracked = reportsPoseFlags ? completePose :
+            (!reportsTracking || isTracked);
+        return runtimeTracked && hasPosition && hasRotation;
     }
 
     private static PoseWire ReadPose(InputDevice device)
