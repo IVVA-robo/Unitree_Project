@@ -27,6 +27,9 @@ manager, writer, offline-службы, POV и VR bridge. Полный прогр
 Дополнительно Robot POV получил process-local respawn: живой crash-test
 восстановил поток за `5,716 s`; изменился только PID POV, а offline-служба,
 ROS launch, VR bridge, manager и writer сохранились (`NRestarts=0`).
+ZERO TORQUE также физически проверен на поддержанном роботе: STOP подтверждён
+за `2,400 s`, writer и offline-служба завершены, пять независимых read-only
+выборок подтвердили финальный FSM 0. Остался полный cold-start ноутбука.
 Подробности и таблица замеров находятся в
 [R1_Teleoperation/docs/exhibition_panel_optimization_20261001.md](R1_Teleoperation/docs/exhibition_panel_optimization_20261001.md).
 
