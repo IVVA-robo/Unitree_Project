@@ -102,3 +102,13 @@ def test_cold_preflight_uses_coherent_ros_snapshots_and_fast_gate_has_margin():
     assert "ros2 param get /r1_sdk_transport" not in preflight
     assert "ros2 topic list --no-daemon" in preflight
     assert "arm_sdk_gate_duration=2.25" in prepare
+
+
+def test_cold_preflight_checks_ros2_only_after_desktop_environment_bootstrap():
+    preflight = (PROJECT_DIR / "scripts" / "r1-sdk-preflight").read_text()
+
+    ros_source = preflight.index("source /opt/ros/humble/setup.bash")
+    ros_check = preflight.index("command -v ros2")
+    assert ros_source < ros_check
+    initial_requirements = preflight.split("source /opt/ros/humble/setup.bash", 1)[0]
+    assert "for required in ip ros2" not in initial_requirements

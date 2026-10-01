@@ -46,6 +46,18 @@ set -u
 export ROS_DOMAIN_ID="$((10#${DOMAIN_ID}))"
 export ROS_LOCALHOST_ONLY=1
 
+if [[ ${MODE} == static ]]; then
+  SESSION_ID=${R1_EXHIBITION_SESSION_ID-}
+  ATTESTATION_PATH=${R1_EXHIBITION_READINESS_ATTESTATION-}
+  TOKEN=${ROBOT_COMMISSIONING_TOKEN-}
+  [[ ${SESSION_ID} =~ ^[0-9a-f]{32}$ ]] \
+    || die 'R1_EXHIBITION_SESSION_ID is invalid'
+  [[ ${ATTESTATION_PATH} == /* ]] \
+    || die 'R1_EXHIBITION_READINESS_ATTESTATION must be absolute'
+  [[ ${#TOKEN} -ge 16 ]] \
+    || die 'ROBOT_COMMISSIONING_TOKEN is unavailable'
+fi
+
 required_services=(
   '/r1/live_writer/prepare|std_srvs/srv/Trigger'
   '/r1/live_writer/reset_kill|std_srvs/srv/Trigger'
@@ -78,7 +90,9 @@ if [[ ${MODE} == control ]]; then
 fi
 
 # Keep one DDS participant alive while discovering the complete graph and
-# querying the exact boolean static policy. No motion service is called.
+# querying the exact static policy and current writer token. The token is read
+# from the environment and ROS response only; it is never put on argv, printed
+# or stored. No motion service is called.
 probe_args=(--mode "${MODE}" --timeout-sec "${TIMEOUT_SEC}")
 for entry in "${required_services[@]}"; do probe_args+=(--service "${entry}"); done
 for entry in "${required_topics[@]}"; do probe_args+=(--topic "${entry}"); done
@@ -87,11 +101,21 @@ if [[ ${MODE} == static ]]; then
     'static_prepare_mode|true' \
     'send_commands|true' \
     'enable_prepare|true' \
+    'exhibition_session_mode|false' \
     'enable_head|false' \
     'enable_arms|false' \
     'enable_locomotion|false' \
-    'prepare_enter_locomotion|false'; do
+    'prepare_enter_locomotion|false' \
+    'head_recenter_enabled|false'; do
     probe_args+=(--parameter "${expectation}")
   done
+  probe_args+=(
+    --string-parameter 'transport|sdk'
+    --string-parameter 'profile|slow-safe'
+    --token-parameter commissioning_token
+    --attestation-path "${ATTESTATION_PATH}"
+    --session-id "${SESSION_ID}"
+    --domain-id "$((10#${DOMAIN_ID}))"
+  )
 fi
 exec "${SCRIPT_DIR}/r1-exhibition-graph-probe" "${probe_args[@]}"

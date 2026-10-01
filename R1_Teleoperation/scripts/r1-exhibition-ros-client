@@ -194,6 +194,56 @@ def run_gate(client: ExhibitionClient, action: str, deadline: float) -> int:
     return 0
 
 
+def run_health(client: ExhibitionClient, deadline: float) -> int:
+    """Read fresh session/writer safety state without calling a service."""
+    client.active = None
+    client.armed = None
+    client.writer_armed = None
+    client.kill = None
+    client.phase = "fresh_health"
+    print("[WAIT] " + client.phase, flush=True)
+    if not client.spin_until(
+        lambda: all(
+            value is not None
+            for value in (
+                client.active,
+                client.armed,
+                client.writer_armed,
+                client.kill,
+            )
+        ),
+        deadline,
+    ):
+        print(
+            "[BLOCKED] fresh session health was not confirmed: "
+            + client.diagnostics(),
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
+    if client.kill or not client.writer_armed:
+        print(
+            "[RECOVERY_REQUIRED] writer safety is latched; "
+            "reconnect cannot clear KILL or resume motion",
+            flush=True,
+        )
+        return 3
+    if not client.armed:
+        print(
+            "[BLOCKED] exhibition session is not armed; explicit RUN is required",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
+    print(
+        "[OK] fresh session health confirmed: "
+        f"active={client.active} armed={client.armed} "
+        f"writer_armed={client.writer_armed} kill={client.kill}",
+        flush=True,
+    )
+    return 0
+
+
 def run_calibration(client: ExhibitionClient, deadline: float) -> int:
     client.active = None
     if not client.spin_until(lambda: client.active is not None, deadline):
@@ -217,7 +267,7 @@ def main() -> int:
     # last completed phase/response even when stdout is a pipe.
     sys.stdout.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=(*GATES, "calibrate"))
+    parser.add_argument("action", choices=(*GATES, "health", "calibrate"))
     parser.add_argument("--timeout-sec", type=float, default=8.0)
     arguments = parser.parse_args()
     if not 1.0 <= arguments.timeout_sec <= 30.0:
@@ -244,6 +294,8 @@ def main() -> int:
         client.cancelled = interrupted
         if arguments.action == "calibrate":
             return run_calibration(client, deadline)
+        if arguments.action == "health":
+            return run_health(client, deadline)
         return run_gate(client, arguments.action, deadline)
     except (KeyboardInterrupt, SystemExit):
         return 130

@@ -65,7 +65,7 @@ if os.environ.get('R1_TEST_CAPTURE_ENV'):
         + ':exhibition=' + os.environ.get('ROBOT_EXHIBITION_SESSION', '')
     )
 offline_state = os.environ.get('R1_TEST_OFFLINE_STATE')
-if mode == 'offline-status':
+if mode in {'offline-status', 'offline-pov-status'}:
     probe_count_path = os.environ.get('R1_TEST_OFFLINE_PROBE_COUNT')
     if probe_count_path:
         probe_count = Path(probe_count_path)
@@ -83,6 +83,9 @@ if mode == 'offline-stop':
     Path(offline_state).write_text('inactive')
     raise SystemExit(0)
 if mode == 'offline-start':
+    Path(offline_state).write_text('active')
+    raise SystemExit(0)
+if mode == 'offline-restart':
     Path(offline_state).write_text('active')
     raise SystemExit(0)
 if mode == 'hard-fail':
@@ -305,8 +308,14 @@ def test_plans_use_static_writer_and_control_slow_safe(tmp_path):
         "prepare",
     ]
     assert static["physical_profile"] == "static-stand"
-    assert static["reuse_offline_bridge"] is False
+    assert static["reuse_offline_bridge"] is True
+    assert static["reuse_offline_pov_when_healthy"] is True
+    assert static["offline_service_policy"] == (
+        "reuse-static-stop-restore-control"
+    )
     assert control["physical_profile"] == "slow-safe"
+    assert control["reuse_offline_bridge"] is False
+    assert control["reuse_offline_pov_when_healthy"] is False
     assert control["session_mode"] == "session_arm"
     assert control["tracking_grace_sec"] == 2.0
     assert control["live_writer_restart"] is False
@@ -418,15 +427,18 @@ def test_static_session_reconnects_and_stop_finds_execed_python_pid(tmp_path):
         )
         assert state["mode"] == "static"
         assert "pov" in state["children"]
+        original_children = dict(state["children"])
 
         reconnect = _action(environment, "reconnect")
         assert reconnect.returncode == 0, reconnect.stdout
-        _wait_for_state(
+        reconnected = _wait_for_state(
             environment,
-            lambda item: str(item.get("detail", "")).startswith(
-                "static reconnected"
-            ),
+            lambda item: item.get("reconnect_count") == 1,
         )
+        assert reconnected["detail"] == (
+            "all managed components already healthy; nothing restarted"
+        )
+        assert reconnected["children"] == original_children
 
         stopped = _action(environment, "stop")
         assert stopped.returncode == 0, stopped.stdout
@@ -478,15 +490,18 @@ def test_active_offline_service_is_handed_off_until_exhibition_stop(tmp_path):
             "was_active": True,
             "stopped_for_exhibition": True,
             "restored": False,
+            "reused_for_static": False,
+            "pov_owner": "manager",
         }
 
         reconnect = _action(environment, "reconnect")
         assert reconnect.returncode == 0, reconnect.stdout
-        _wait_for_state(
+        reconnected = _wait_for_state(
             environment,
-            lambda item: str(item.get("detail", "")).startswith(
-                "static reconnected"
-            ),
+            lambda item: item.get("reconnect_count") == 1,
+        )
+        assert reconnected["detail"] == (
+            "all managed components already healthy; nothing restarted"
         )
         assert offline_state.read_text(encoding="utf-8") == "inactive"
         assert "offline-start" not in events.read_text(
@@ -504,6 +519,83 @@ def test_active_offline_service_is_handed_off_until_exhibition_stop(tmp_path):
     sequence = events.read_text(encoding="utf-8").splitlines()
     assert sequence.index("offline-stop") < sequence.index("preflight")
     assert sequence.index("pov-stopped") < sequence.index("offline-start")
+
+
+def test_static_reuses_healthy_offline_pov_and_reconnect_repairs_only_it(
+    tmp_path,
+):
+    worker = _write_worker(tmp_path)
+    environment = _base_environment(tmp_path)
+    events = tmp_path / "events"
+    offline_state = tmp_path / "offline-state"
+    offline_state.write_text("active", encoding="utf-8")
+    environment.update(
+        {
+            "R1_TEST_EVENTS": str(events),
+            "R1_TEST_OFFLINE_STATE": str(offline_state),
+            "R1_EXHIBITION_OFFLINE_STATUS_COMMAND": _command(
+                worker, "offline-status"
+            ),
+            "R1_EXHIBITION_OFFLINE_POV_STATUS_COMMAND": _command(
+                worker, "offline-pov-status"
+            ),
+            "R1_EXHIBITION_OFFLINE_STOP_COMMAND": _command(
+                worker, "offline-stop"
+            ),
+            "R1_EXHIBITION_OFFLINE_START_COMMAND": _command(
+                worker, "offline-start"
+            ),
+            "R1_EXHIBITION_OFFLINE_RESTART_COMMAND": _command(
+                worker, "offline-restart"
+            ),
+            "R1_EXHIBITION_PREFLIGHT_COMMAND": _command(
+                worker, "preflight"
+            ),
+            # A second manager-owned POV would be observable in the event
+            # stream and is forbidden while the healthy service is reused.
+            "R1_EXHIBITION_POV_COMMAND": _command(worker, "pov"),
+        }
+    )
+    process = _manager(environment, "static")
+    try:
+        state = _wait_for_state(
+            environment, lambda item: item.get("status") == "ready"
+        )
+        assert state["offline_session_handoff"] == {
+            "was_active": True,
+            "stopped_for_exhibition": False,
+            "restored": False,
+            "reused_for_static": True,
+            "pov_owner": "offline_service",
+        }
+        assert "pov" not in state["children"]
+        sequence = events.read_text(encoding="utf-8").splitlines()
+        assert "offline-stop" not in sequence
+        assert "pov" not in sequence
+
+        offline_state.write_text("inactive", encoding="utf-8")
+        reconnect = _action(environment, "reconnect")
+        assert reconnect.returncode == 0, reconnect.stdout
+        repaired = _wait_for_state(
+            environment,
+            lambda item: item.get("reconnect_count") == 1,
+        )
+        assert repaired["status"] == "ready"
+        assert repaired["pov_restarts"] == 1
+        assert repaired["detail"] == (
+            "systemd-managed POV restored; static writer stayed warm"
+        )
+        assert offline_state.read_text(encoding="utf-8") == "active"
+        sequence = events.read_text(encoding="utf-8").splitlines()
+        assert sequence.count("offline-restart") == 1
+        assert "pov" not in sequence
+    finally:
+        output, _ = _stop_manager(process, environment)
+        assert process.returncode == 0, output
+
+    assert offline_state.read_text(encoding="utf-8") == "active"
+    sequence = events.read_text(encoding="utf-8").splitlines()
+    assert "offline-start" not in sequence
 
 
 def test_offline_handoff_probe_failure_blocks_before_children(tmp_path):
@@ -623,6 +715,92 @@ def test_video_restart_preserves_locked_control(tmp_path, monkeypatch, previous_
     assert states == ['reconnecting', previous_status]
 
 
+def test_selective_reconnect_restarts_only_a_dead_pov(tmp_path, monkeypatch):
+    manager = ExhibitionManager(
+        ExhibitionSettings.from_environment(_base_environment(tmp_path)), "static"
+    )
+    manager._status = "ready"
+    manager.children["pov"] = type(
+        "ExitedProcess", (), {"poll": lambda self: 9}
+    )()
+    restarts = []
+    states = []
+    monkeypatch.setattr(
+        manager,
+        "_restart_pov",
+        lambda mark_ready=True: restarts.append(mark_ready) or True,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_write_state",
+        lambda status, detail: states.append((status, detail)),
+    )
+    monkeypatch.setattr(manager, "_log", lambda _message: None)
+
+    assert manager._reconnect() is True
+    assert restarts == [True]
+    assert manager.reconnect_count == 1
+    assert states == [
+        (
+            "ready",
+            "POV restored; existing writer and VR/ROS graph stayed warm",
+        )
+    ]
+
+
+def test_selective_reconnect_reports_latched_writer_without_resuming_or_rebuild(
+    tmp_path, monkeypatch
+):
+    environment = _base_environment(tmp_path)
+    environment.update(
+        R1_EXHIBITION_MOCK="0",
+        R1_EXHIBITION_SESSION_MODE="session_arm",
+    )
+    manager = ExhibitionManager(
+        ExhibitionSettings.from_environment(environment), "control"
+    )
+    manager._status = "locked"
+    alive = type("AliveProcess", (), {"poll": lambda self: None})
+    manager.children["control"] = alive()
+    manager.children["pov"] = alive()
+    checked = []
+    states = []
+
+    def health(name, timeout):
+        checked.append((name, timeout))
+        manager.last_action_exit_code = 3
+        return False
+
+    monkeypatch.setattr(manager, "_run_checked", health)
+    monkeypatch.setattr(manager, "_log", lambda _message: None)
+    monkeypatch.setattr(
+        manager,
+        "_write_state",
+        lambda status, detail: states.append((status, detail)),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_restart_pov",
+        lambda **_kwargs: pytest.fail("healthy POV must not restart"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_rebuild_writer",
+        lambda **_kwargs: pytest.fail("reconnect must not rebuild writer"),
+    )
+
+    assert manager._reconnect() is True
+    assert checked == [("health_session", 8.0)]
+    assert manager.reconnect_count == 1
+    assert states == [
+        (
+            "degraded",
+            "writer safety latched after link/feedback loss; reconnect kept "
+            "services warm but explicit RUN is required",
+        )
+    ]
+
+
 def test_stop_interrupts_long_startup_check(tmp_path):
     worker = _write_worker(tmp_path)
     environment = _base_environment(tmp_path)
@@ -683,8 +861,8 @@ def test_control_child_exit_fails_closed_instead_of_auto_restart(tmp_path):
     assert output.count("control: starting") == 1
 
 
-def test_failed_stop_and_kill_abort_writer_reconnect(tmp_path):
-    """A reconnect must never turn unconfirmed cleanup into a new writer."""
+def test_selective_reconnect_never_stops_or_rebuilds_healthy_writer(tmp_path):
+    """Reconnect preserves a healthy writer even when STOP would be available."""
 
     worker = _write_worker(tmp_path)
     environment = _base_environment(tmp_path)
@@ -706,7 +884,7 @@ def test_failed_stop_and_kill_abort_writer_reconnect(tmp_path):
             ),
             "R1_EXHIBITION_READY_STATIC_COMMAND": _command(worker, "ok"),
             "R1_EXHIBITION_PREPARE_COMMAND": _command(worker, "ok"),
-            "R1_EXHIBITION_STOP_COMMAND": _command(worker, "hard-fail"),
+            "R1_EXHIBITION_STOP_COMMAND": _command(worker, "stop"),
             "R1_EXHIBITION_KILL_COMMAND": _command(worker, "hard-fail"),
         }
     )
@@ -717,22 +895,19 @@ def test_failed_stop_and_kill_abort_writer_reconnect(tmp_path):
         )
         reconnect = _action(environment, "reconnect")
         assert reconnect.returncode == 0, reconnect.stdout
-        output, _ = process.communicate(timeout=8)
+        state = _wait_for_state(
+            environment, lambda item: item.get("reconnect_count") == 1
+        )
+        assert state["status"] == "ready"
+        assert process.poll() is None
+        events_before_stop = Path(environment["R1_TEST_EVENTS"]).read_text(
+            encoding="utf-8"
+        ).splitlines()
+        assert events_before_stop.count("static-writer") == 1
+        assert "stop" not in events_before_stop
     finally:
-        if process.poll() is None:
-            process.terminate()
-            process.communicate(timeout=3)
-
-    assert process.returncode == 2, output
-    state = _wait_for_state(
-        environment, lambda item: item.get("status") == "stopped"
-    )
-    assert state["safe_stop_confirmed"] is False
-    assert "STOP/KILL unconfirmed" in state["detail"]
-    events = Path(environment["R1_TEST_EVENTS"]).read_text(
-        encoding="utf-8"
-    ).splitlines()
-    assert events.count("static-writer") == 1
+        output, _ = _stop_manager(process, environment)
+        assert process.returncode == 0, output
 
 
 def test_manager_disappearance_is_not_stop_confirmation(tmp_path, monkeypatch):
@@ -780,7 +955,12 @@ def test_saved_calibrated_arm_profile_preserves_body_and_sets_head_start_referen
     (tmp_path / "config/operator_arm_range.exhibition.json").write_text("{}")
     settings = ExhibitionSettings.from_environment(environment)
     assert settings.calibrate_on_start
-    assert settings.commands['calibrate'] == [str(tmp_path / 'scripts/r1-head-calibrate')]
+    assert settings.commands['startup_calibrate'] == [
+        str(tmp_path / 'scripts/r1-head-calibrate')
+    ]
+    assert settings.commands['calibrate'] == [
+        str(tmp_path / 'scripts/r1-exhibition-calibrate')
+    ]
     environment["R1_EXHIBITION_CALIBRATE_ON_START"] = "0"
     assert not ExhibitionSettings.from_environment(environment).calibrate_on_start
 
@@ -1200,6 +1380,11 @@ def test_session_gate_never_clears_robot_kill_or_constructs_sdk():
     assert "/vr/teleop/pause_session" in script
     assert "/vr/teleop/resume_session" in script
     assert "/vr/teleop/clear_emergency_stop" in script
+    assert "health" in wrapper
+    health_body = client.split("def run_health", 1)[1].split(
+        "def run_calibration", 1
+    )[0]
+    assert ".trigger(" not in health_body
     assert "/r1/live_writer/reset_kill" not in script
     assert "/r1/safety/set_kill" not in script
     assert "unitree_sdk" not in script.lower()
@@ -1225,8 +1410,15 @@ def test_static_prepare_reuses_token_bound_preflight_without_enabling_control(tm
         ExhibitionSettings.from_environment(_base_environment(tmp_path)), 'static')
     environment = manager._command_environment('prepare')
     assert environment['R1_EXHIBITION_FAST_PREPARE'] == '1'
+    assert environment['R1_EXHIBITION_STATIC_READINESS'] == '1'
     assert environment['ROBOT_CONFIRM_STATIC_PREPARE'] == '1'
     assert environment['R1_EXHIBITION_SESSION_MODE'] == 'deadman'
+    assert environment['R1_EXHIBITION_SESSION_ID'] == manager.session_id
+    assert environment['R1_EXHIBITION_READINESS_ATTESTATION'] == str(
+        manager.readiness_attestation_path)
+    ready_environment = manager._command_environment('ready_static')
+    assert ready_environment['R1_EXHIBITION_READINESS_ATTESTATION'] == str(
+        manager.readiness_attestation_path)
     assert 'ROBOT_EXHIBITION_SESSION' not in environment
 
 
@@ -1238,9 +1430,24 @@ def test_offline_handoff_only_manages_the_exact_compatible_user_unit():
     assert "r1-offline-session.service" in script
     assert "--property=ExecStart" in script
     assert "r1-offline-session r1" in script
+    assert "pov-status" in script
+    assert "systemctl --user restart" in script
+    assert "wait_for_video_port" in script
     assert "pkill" not in script
     assert "killall" not in script
     assert "pgrep" not in script
+
+
+def test_static_writer_does_not_reject_the_reused_offline_bridge_port():
+    script = (
+        PROJECT_DIR / "scripts" / "r1-live-session"
+    ).read_text(encoding="utf-8")
+    port_gate = script.index("UDP port ${UDP_PORT} is already in use")
+    start_bridge_gate = script.rfind(
+        "[[ ${START_BRIDGE} == true ]]", 0, port_gate
+    )
+    assert start_bridge_gate != -1
+    assert port_gate - start_bridge_gate < 400
 
 
 def test_readiness_helper_checks_typed_services_topics_and_static_params():
@@ -1267,6 +1474,14 @@ def test_readiness_helper_checks_typed_services_topics_and_static_params():
         "enable_head|false",
         "enable_arms|false",
         "enable_locomotion|false",
+        "exhibition_session_mode|false",
+        "head_recenter_enabled|false",
+        "--string-parameter 'transport|sdk'",
+        "--string-parameter 'profile|slow-safe'",
+        "--token-parameter commissioning_token",
+        "--attestation-path",
+        "--session-id",
+        "--domain-id",
     ):
         assert token in script
     assert "R1_EXHIBITION_READY_TIMEOUT_SEC" in script
@@ -1309,6 +1524,7 @@ def test_manager_propagates_its_validated_readiness_timeout(tmp_path):
 
     assert settings.ready_timeout_sec == 17
     assert child_environment["R1_EXHIBITION_READY_TIMEOUT_SEC"] == "17"
+    assert child_environment["R1_EXHIBITION_SESSION_ID"] == manager.session_id
 
 
 def test_physical_control_defaults_to_calibration_before_session_arm(tmp_path):
@@ -1321,10 +1537,12 @@ def test_physical_control_defaults_to_calibration_before_session_arm(tmp_path):
 
     assert settings.calibrate_on_start is True
     assert settings.preflight_timeout_sec == 3.0
-    assert steps.index("ready_control") < steps.index("calibrate")
-    assert steps.index("calibrate") < steps.index("arm_session")
+    assert steps.index("ready_control") < steps.index("startup_calibrate")
+    assert steps.index("startup_calibrate") < steps.index("arm_session")
     assert steps.index("arm_session") < steps.index("prepare")
-    calibrate = next(step for step in plan["steps"] if step["name"] == "calibrate")
+    calibrate = next(
+        step for step in plan["steps"] if step["name"] == "startup_calibrate"
+    )
     assert calibrate["argv"][-1].endswith("scripts/r1-exhibition-calibrate")
 
 

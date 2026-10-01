@@ -102,7 +102,7 @@ def test_catalog_contains_operator_actions_and_existing_targets():
     assert specs["exhibition_control"].long_running is True
     assert specs["exhibition_lock"].target == "exhibition-lock"
     assert specs["exhibition_reconnect"].target == "exhibition-reconnect"
-    assert specs["exhibition_calibrate"].target == "exhibition-calibrate"
+    assert specs["exhibition_calibrate"].target == "exhibition-calibrate-arms"
     assert specs["exhibition_stop"].target == "exhibition-stop"
 
 
@@ -285,8 +285,8 @@ def test_stop_completion_closes_motion_graph_and_requires_fresh_preflight():
     panel._on_finished("stop", 0, 0)
 
     assert stopped == [
-        ("motion", {}),
-        ("robot:prepare", {}),
+        ("motion", {"wait": False}),
+        ("robot:prepare", {"wait": False}),
         (
             "exhibition",
             {
@@ -315,6 +315,11 @@ def test_exhibition_home_keeps_lock_run_and_adds_separate_stand_button():
     assert panel.specs['exhibition_stand'].requires_run_mode is False
     assert panel.tabs.tabBar().isHidden()
     assert panel.connect_button.text() == "↻  НАЙТИ И ПОДКЛЮЧИТЬ"
+    assert all(
+        "калибровать руки" not in button.text().lower()
+        and "калибровать hmd и руки" not in button.text().lower()
+        for button in panel.findChildren(app_module.QPushButton)
+    )
     assert panel.robot_name_label.text() == "○  R1_03079  — не в сети"
     assert panel.video_preview.stream_url.endswith(
         "/stream.mjpg?profile=low-latency&layout=mono"
@@ -334,7 +339,7 @@ def test_exhibition_home_keeps_lock_run_and_adds_separate_stand_button():
     app.processEvents()
 
 
-def test_main_reconnect_starts_a_safe_static_owner_when_none_exists(monkeypatch):
+def test_main_reconnect_without_owner_never_changes_robot_mode(monkeypatch):
     calls = []
 
     class Controller:
@@ -345,15 +350,110 @@ def test_main_reconnect_starts_a_safe_static_owner_when_none_exists(monkeypatch)
     panel.controller = Controller()
     panel.specs = {spec.key: spec for spec in command_catalog()}
     panel.exhibition_requested_mode = ""
-    panel.auto_connect = lambda: calls.append("connect")
+    panel._begin_action = lambda key: calls.append(("begin", key)) or True
+    panel._ensure_main_services = lambda: calls.append(("services",))
+    panel._append_log = lambda *args: calls.append(("log", args[0]))
+    panel._request_status_refresh = lambda **kwargs: calls.append(("status", kwargs))
     panel._run_exhibition_mode = lambda key: calls.append(key)
 
     panel.run_key("exhibition_reconnect")
 
-    assert calls == ["connect", "exhibition_static"]
+    assert calls == [
+        ("begin", "exhibition_reconnect"),
+        ("services",),
+        ("log", "exhibition_reconnect"),
+        ("status", {"fast": True}),
+    ]
 
 
-def test_main_calibration_starts_control_owner_when_none_exists():
+@pytest.mark.parametrize("connected", [False, True])
+def test_auto_connect_reuses_status_and_never_runs_full_check(connected):
+    calls = []
+    panel = OperatorPanel.__new__(OperatorPanel)
+    panel.config = OperatorConfig(vr_transport="usb")
+    panel.connection_state = "connected" if connected else "offline"
+    panel.status_values = {"robot": "OK" if connected else "OFFLINE"}
+    panel._begin_action = lambda key: calls.append(("begin", key)) or True
+    panel.start_background_services = lambda: calls.append(("services",))
+    panel._request_status_refresh = lambda **kwargs: calls.append(("status", kwargs))
+    panel._refresh_summary = lambda: None
+    panel._finish_action = lambda *args: calls.append(("finish", *args))
+    panel._run_check_all = lambda: pytest.fail("full preflight must stay manual")
+
+    panel.auto_connect()
+
+    assert calls[:3] == [
+        ("begin", "connect"),
+        ("services",),
+        ("status", {"fast": True}),
+    ]
+    if connected:
+        assert calls[-1][0:2] == ("finish", "connect")
+
+
+def test_open_viewer_reuses_local_stream_without_auto_connect(monkeypatch):
+    calls = []
+    panel = OperatorPanel.__new__(OperatorPanel)
+    panel.config = OperatorConfig(video_url="http://127.0.0.1:8080/")
+    panel.video_state = "online"
+    panel._begin_action = lambda key: calls.append(("begin", key)) or True
+    panel._ensure_main_services = lambda: calls.append(("services",))
+    panel._finish_action = lambda *args: calls.append(("finish", *args))
+    panel.auto_connect = lambda *args, **kwargs: pytest.fail("viewer must not run discovery")
+    monkeypatch.setattr(app_module.QDesktopServices, "openUrl", lambda _url: True)
+
+    panel.open_viewer()
+
+    assert calls == [
+        ("begin", "viewer"),
+        ("services",),
+        (
+            "finish",
+            "viewer",
+            "готово",
+            "использован уже работающий локальный поток",
+        ),
+    ]
+
+
+def test_structured_manager_state_updates_mode_without_poll_delay():
+    finished = []
+    panel = OperatorPanel.__new__(OperatorPanel)
+    panel.output_line_buffers = {}
+    panel.status_values = {}
+    panel.action_started_at = {"exhibition_control": 1.0}
+    panel._finish_action = lambda *args: finished.append(args)
+    panel._refresh_exhibition_status = lambda: None
+
+    panel._consume_exhibition_events(
+        "exhibition",
+        'EXHIBITION_STATE {"mode":"control","status":"ready",'
+        '"detail":"warm graph"}\n',
+    )
+
+    assert panel.exhibition_mode == "Управление"
+    assert panel.status_values["exhibition"] == "ready"
+    assert finished == [("exhibition_control", "готово", "warm graph")]
+
+
+def test_button_timing_records_monotonic_elapsed(monkeypatch):
+    ticks = iter((10.0, 10.125))
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(ticks))
+    panel = OperatorPanel.__new__(OperatorPanel)
+    panel.action_started_at = {}
+    panel.action_generations = {}
+    panel.last_action_timings = {}
+
+    assert panel._begin_action("viewer") is True
+    assert panel._finish_action("viewer", "готово", "test") == pytest.approx(0.125)
+    assert panel.last_action_timings["viewer"] == {
+        "elapsed_sec": 0.125,
+        "result": "готово",
+        "detail": "test",
+    }
+
+
+def test_hidden_main_calibration_never_starts_control_owner():
     calls = []
 
     class Controller:
@@ -364,12 +464,12 @@ def test_main_calibration_starts_control_owner_when_none_exists():
     panel.controller = Controller()
     panel.specs = {spec.key: spec for spec in command_catalog()}
     panel.exhibition_requested_mode = ""
-    panel.auto_connect = lambda: calls.append("connect")
+    panel._append_log = lambda *args: calls.append(("blocked", args[0]))
     panel._run_exhibition_mode = lambda key: calls.append(key)
 
     panel.run_key("exhibition_calibrate")
 
-    assert calls == ["connect", "exhibition_control"]
+    assert calls == [("blocked", "exhibition_calibrate")]
 
 
 def test_main_calibration_reuses_existing_control_owner(monkeypatch):
@@ -387,12 +487,10 @@ def test_main_calibration_reuses_existing_control_owner(monkeypatch):
     panel.controller = Controller()
     panel.specs = {spec.key: spec for spec in command_catalog()}
     panel.exhibition_requested_mode = "exhibition_control"
-    panel.auto_connect = lambda: calls.append(("connect",))
 
     panel.run_key("exhibition_calibrate")
 
     assert calls == [
-        ("connect",),
         ("exhibition_service:exhibition_calibrate", "exhibition_calibrate", {}),
     ]
 
@@ -445,6 +543,27 @@ def test_exhibition_status_shows_latched_kill_over_stale_ready_mode():
     panel.status_values.update({
         "robot": "OK",
         "mode": "control",
+        "kill": "LATCHED",
+    })
+    panel._refresh_exhibition_status()
+
+    assert (
+        panel.exhibition_mode_status.text()
+        == "Режим: Управление остановлено (KILL)"
+    )
+
+    panel.close()
+    app.processEvents()
+
+
+def test_exhibition_status_shows_latched_kill_after_lock_aliases_mode_static():
+    app = QApplication.instance() or QApplication([])
+    panel = OperatorPanel(OperatorConfig(status_poll_sec=60))
+    panel.status_timer.stop()
+    panel.status_values.update({
+        "robot": "OK",
+        "mode": "static",
+        "exhibition": "degraded",
         "kill": "LATCHED",
     })
     panel._refresh_exhibition_status()
@@ -768,17 +887,42 @@ def test_stand_switch_waits_for_owner_cleanup(monkeypatch, owned, source_mode, k
     assert confirmations[0]['skip_checklist'] is True
 
 
-def test_repeated_stand_does_not_rearm_run(monkeypatch):
+@pytest.mark.parametrize(
+    ("key", "expected_mode"),
+    [
+        ("exhibition_stand", "Стойка"),
+        ("exhibition_static", "Статичный"),
+    ],
+)
+def test_repeated_static_action_does_not_rearm_run(
+    monkeypatch, key, expected_mode
+):
     monkeypatch.setattr(app_module, 'active_session_snapshot', lambda: {
         'mode': 'static', 'session_mode': 'deadman', 'status': 'ready',
     })
     panel = OperatorPanel.__new__(OperatorPanel)
-    from types import SimpleNamespace
-    panel.controller = SimpleNamespace(is_running=lambda key: False)
+    starts = []
+
+    class Controller:
+        def is_running(self, _key):
+            return False
+
+        def start(self, *args, **kwargs):
+            starts.append((args, kwargs))
+            return True
+
+    panel.controller = Controller()
     panel.specs = {spec.key: spec for spec in command_catalog()}
     panel._refresh_summary = lambda: None
-    panel._run_exhibition_mode('exhibition_stand')
-    assert panel.exhibition_mode == 'Стойка'
+    finished = []
+    panel._begin_action = lambda action: True
+    panel._finish_action = lambda *args: finished.append(args)
+
+    panel._run_exhibition_mode(key)
+
+    assert panel.exhibition_mode == expected_mode
+    assert starts == []
+    assert finished[0][0:2] == (key, "уже готово")
 
 
 def test_switch_destination_can_change_but_explicit_stop_cannot_queue_run():

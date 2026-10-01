@@ -138,7 +138,7 @@ if [[ ! $WAIT_SECONDS =~ ^([1-9]|[1-5][0-9]|60)$ ]]; then
   printf 'Wait time must be an integer from 1 to 60 seconds.\n' >&2; exit 1
 fi
 
-for required in ip ros2 timeout python3 grep setsid; do
+for required in ip timeout python3 grep setsid; do
   command -v "$required" >/dev/null 2>&1 || mark_fail "required command is unavailable: $required"
 done
 [[ $RESULT -eq 1 ]] && exit 1
@@ -159,6 +159,13 @@ source "$SCRIPT_DIR/r1-unitree-sdk-env"
 set -u
 export ROS_DOMAIN_ID=$DOMAIN_ID
 export ROS_LOCALHOST_ONLY=1
+
+# Desktop and systemd services intentionally start with a small, predictable
+# PATH. ``ros2`` is installed under /opt/ros and only becomes available after
+# setup.bash is sourced, so checking it before the bootstrap made a cold
+# background warmup fail even though ROS was installed correctly.
+command -v ros2 >/dev/null 2>&1 \
+  || { mark_fail 'required command is unavailable after ROS setup: ros2'; exit 1; }
 
 printf 'R1 SDK commissioning preflight (READ-ONLY)\n'
 printf 'Interface: %s | control endpoint: %s | ROS domain: %s\n' \

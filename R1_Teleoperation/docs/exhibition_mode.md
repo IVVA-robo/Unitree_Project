@@ -34,7 +34,6 @@ make exhibition-control
 make exhibition-full-live
 make exhibition-reconnect
 make exhibition-rearm
-make exhibition-calibrate
 make exhibition-calibrate-arms
 make exhibition-calibrate-head
 make exhibition-stop
@@ -47,17 +46,23 @@ runtime-каталоге `$XDG_RUNTIME_DIR/r1-exhibition/`, но commissioning t
 другие значения окружения туда не записываются.
 
 Перед созданием нового графа manager проверяет пользовательский
-`r1-offline-session.service`. Если этот совместимый video-only сервис был
-активен, manager проверяет его точный `ExecStart`, останавливает сервис и только
-после подтверждения освобождения его процессов продолжает preflight. Это
-устраняет конфликт bridge/video портов UDP `9090` и TCP `8080`; существующий
-offline bridge не переиспользуется, поэтому live-сеанс создаётся заново с
-обычной проверкой фиксированного `ROBOT_VR_SOURCE_IP`. Исходное состояние
-сервиса записывается в `exhibition-status`. При reconnect сервис остаётся
-выключенным. Он запускается обратно только после STOP, завершения всех
-дочерних процессов выставочного режима и освобождения портов. Произвольные
-процессы по совпадению имени manager не завершает: такой конфликт должен
-закрыть preflight/live port gate.
+`r1-offline-session.service` и его точный `ExecStart`. Для **control/RUN**
+совместимый video-only сервис по-прежнему останавливается только после
+подтверждения, что это нужный unit; затем освобождаются UDP `9090/9091` и TCP
+`8080`, а live-сеанс создаёт собственные VR bridge и POV. Исходное состояние
+сервиса записывается в `exhibition-status`, и после STOP он восстанавливается.
+
+Для **static/СТОЙКИ** здоровая служба и уже слушающий `:8080` Robot POV теперь
+переиспользуются. Static writer запускается с `start_bridge=false`, поэтому не
+занимает UDP `9090` и не создаёт второй видеосервер. Если unit несовместим,
+его состояние нельзя проверить или POV отсутствует, быстрый путь не
+принимается: manager использует прежний handoff/fallback. Выборочный reconnect
+может перезапустить только этот systemd-managed POV, оставив static writer
+тёплым. Произвольные процессы по совпадению имени manager не завершает.
+
+На физическом R1 этот static reuse проверен 01.10.2026: существующие PID
+offline-службы, POV и bridge не изменились, дубликатов не появилось, полный
+manager start → стабильный FSM 4 занял `10,460 s`.
 
 ## Статичный режим
 
@@ -76,9 +81,9 @@ control graph остаётся тёплым. Такой RUN → LOCK заним�
 подтверждённого ROS service call. Полный статический запуск используется лишь
 когда control graph ещё не запущен или восстанавливается после сбоя.
 
-Manager выполняет read-only `robot-preflight`, запускает физический
-video-only `pov-vr` и автоматически восстанавливает POV с ограниченным
-exponential backoff. Затем запускается отдельный
+Manager выполняет read-only `robot-preflight`, переиспользует уже работающий
+совместимый offline POV либо запускает собственный физический video-only
+`pov-vr`. Затем запускается отдельный
 `r1-live-session static`: bridge, HMD, руки, IK, стики и velocity pipeline в
 нём отсутствуют, а `robot-prepare` вызывает только официальный high-level
 `StandUp()` и подтверждает устойчивый FSM 4. FSM 811 и `SetVelocity` в этом
@@ -91,6 +96,20 @@ manager вызывают проверенный `robot-stop` и официаль
 самостоятельно не перезапускается. Признак
 `ROBOT_CONFIRM_STATIC_PREPARE=1` manager передаёт только static writer и его
 prepare; control-сеанс его не наследует.
+
+`r1-exhibition-wait-ready` одним DDS participant проверяет все typed
+services/topics, точные `transport=sdk`, `profile=slow-safe`, выключенные
+head/arms/locomotion и token текущего writer. Для следующего процесса prepare
+он создаёт одноразовую HMAC-аттестацию `0600` сроком 10 секунд, привязанную к
+boot, UUID manager-сессии, ROS domain и commissioning token; сам token в файл
+не записывается. После потребления prepare пропускает только повторные
+discovery/parameter dump и общий VR/debug observer, который к featureless
+static-графу неприменим. Финальный `2,25 s` ArmSdk idle/writer-count gate,
+KILL release, writer prepare и стабильный FSM 4 остаются обязательными.
+После traffic gate три service call и ожидание status выполняет один bounded
+ROS participant (`r1-robot-prepare-client`), сохраняя прежний порядок и паузу
+распространения KILL `0,3 s`. Это не объединяет safety gate с actuation и не
+меняет аварийный supervisor/writer relock при ошибке.
 
 ## Режим управления
 
@@ -233,9 +252,9 @@ R1_EXHIBITION_RECOVERY_BLEND_SEC=0.50
 Deadman press. Внутри writer `prepared_session()` выполняет обязательную
 anti-stale re-arm последовательность и проверяет нейтральные стики. Manager не
 отправляет внешний `disarm` после prepare: такое ребро означает реальный STOP
-и защёлкивает KILL. STOP и reconnect сначала вызывают
-`/vr/teleop/disarm_session`, а затем независимый `robot-stop`. Снятие KILL
-этими сервисами невозможно.
+и защёлкивает KILL. STOP сначала вызывает `/vr/teleop/disarm_session`, а затем
+независимый `robot-stop`. Выборочный reconnect не disarm'ит и не останавливает
+исправный writer. Снятие KILL этими сервисами невозможно.
 
 ## Калибровка
 
@@ -243,7 +262,10 @@ anti-stale re-arm последовательность и проверяет н�
 2. Manager переведёт session-arm в calibration pause: руки удерживаются,
    скорость ног становится нулевой, но writer latch не сбрасывается.
 3. Смотрите прямо и держите обе руки неподвижно перед нижней частью груди.
-4. Нажмите «Перекалибровать» или выполните `make exhibition-calibrate`.
+4. После отдельного решения вернуть калибровку выполните
+   `make exhibition-calibrate-arms`. Кнопки калибровки рук в панели сейчас
+   намеренно отсутствуют, чтобы выставочный профиль нельзя было перезаписать
+   случайно.
 
 Последовательность всегда `pause_session → arms-calibrate → resume_session`.
 `disarm_session` для калибровки не вызывается; resume принимается только при
@@ -274,11 +296,10 @@ workspace/joint limits остаются обязательными.
 - При KILL от обратной связи повторно нажмите RUN. Если manager и control graph
   живы, панель использует быстрый `exhibition-rearm`; новый холодный graph не
   создаётся.
-- `make exhibition-reconnect` — явное действие оператора. В static оно
-  сначала выполняет STOP, закрывает static writer, перезапускает POV и
-  повторяет preflight, typed readiness и prepare FSM 4. В control оно также
-  сначала выполняет STOP, закрывает старый writer и строит новый fail-closed
-  graph с полным повтором readiness, session-arm и prepare.
+- `make exhibition-reconnect` — выборочное действие оператора. Исправные
+  writer, VR/ROS graph и POV не перезапускаются. Завершившийся POV поднимается
+  отдельно, не меняя режим робота. Исчезнувший writer считается safety fault:
+  reconnect его не создаёт; после проверки условий требуется явный RUN.
 - `make exhibition-stop` доступна независимо от состояния manager; она
   вызывает проверенный `robot-stop`, при отсутствии подтверждения —
   `robot-kill`, затем завершает все дочерние группы процессов.
@@ -347,12 +368,14 @@ Head dry-run использует UDP `19130/19131`, а legs dry-run — `19132/
 калибровки головы сначала должен работать один из этих графов, затем выполните
 `make head-calibrate` и держите HMD неподвижно. После физического включения
 следующий порядок на панели: **Проверить всё → Robot POV → Статичный режим →
-Калибровать голову (смотреть прямо) → Калибровать руки → Режим управления**.
+Калибровать голову (смотреть прямо) → Режим управления**. Калибровка рук
+вынесена в отдельный будущий commissioning и с выставочного экрана удалена.
 Проверьте голову и руки по отдельности, затем стики/ноги и только после этого
-полный arms+legs сеанс. На главном экране остаются только LOCK и RUN.
-STOP, KILL, снятие аварийной остановки и Zero Torque находятся в
-**Расширенные настройки → Аварийное**; явная аварийная кнопка во время
-VR-сеанса — `B` на правом контроллере.
+полный arms+legs сеанс. На главном экране доступны подключение, LOCK, RUN,
+СТОЙКА, Zero Torque, выборочное переподключение и Robot POV. Кнопок
+калибровки рук там нет. STOP, KILL и снятие аварийной остановки находятся в
+**Расширенные настройки → Аварийное**; Zero Torque также повторена там.
+Явная аварийная кнопка во время VR-сеанса — `B` на правом контроллере.
 
 Физический `make head-live` остаётся отдельной commissioning-командой, но
 полный `exhibition-control` включает HMD→голова вместе с руками и ногами после

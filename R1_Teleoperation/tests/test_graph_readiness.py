@@ -23,6 +23,15 @@ def test_static_policy_requires_complete_typed_boolean_values(values):
     assert parameters_match([SimpleNamespace(type=1, bool_value=False)], {'enable_head': False})
 
 
+def test_static_policy_requires_exact_typed_string_values():
+    assert parameters_match(
+        [SimpleNamespace(type=4, string_value='sdk')], {'transport': 'sdk'})
+    assert not parameters_match(
+        [SimpleNamespace(type=4, string_value='mock')], {'transport': 'sdk'})
+    assert not parameters_match(
+        [SimpleNamespace(type=1, bool_value=True)], {'transport': 'sdk'})
+
+
 @pytest.mark.parametrize('head_enabled,domain', [(False, 94), (True, 95), ('false', 96)])
 def test_actual_ros_graph_queries_only_read_parameters(monkeypatch, head_enabled, domain):
     rclpy = pytest.importorskip('rclpy')

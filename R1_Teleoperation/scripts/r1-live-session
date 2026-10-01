@@ -296,7 +296,8 @@ read -r SHOULDER_HEIGHT_OFFSET_M SHOULDER_FORWARD_OFFSET_M \
 if pgrep -af 'r1_live_writer_node' >/dev/null 2>&1; then
   die 'an r1_live_writer_node process already exists; stop/review it first'
 fi
-if command -v ss >/dev/null 2>&1 \
+if [[ ${START_BRIDGE} == true ]] \
+  && command -v ss >/dev/null 2>&1 \
   && ss -H -lunp 2>/dev/null | grep -Eq "([.:]|\\])${UDP_PORT}[[:space:]]"; then
   die "UDP port ${UDP_PORT} is already in use; stop the old VR bridge first"
 fi

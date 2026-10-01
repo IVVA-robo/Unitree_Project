@@ -4,6 +4,8 @@ import argparse
 import os
 import time
 
+from .readiness_attestation import issue
+
 
 def missing_graph(services, topics, expected_services, expected_topics):
     """Require the exact type, including rejection of conflicting type lists."""
@@ -15,10 +17,20 @@ def missing_graph(services, topics, expected_services, expected_topics):
 
 
 def parameters_match(values, expected):
-    # ParameterType.PARAMETER_BOOL == 1. Strings and integers must not pass.
-    return len(values) == len(expected) and all(
-        value.type == 1 and value.bool_value is wanted
-        for value, wanted in zip(values, expected.values()))
+    """Match exact ROS parameter types without stringifying secret values."""
+    if len(values) != len(expected):
+        return False
+    for value, wanted in zip(values, expected.values()):
+        # rcl_interfaces/msg/ParameterType: BOOL=1, STRING=4.
+        if isinstance(wanted, bool):
+            if value.type != 1 or value.bool_value is not wanted:
+                return False
+        elif isinstance(wanted, str):
+            if value.type != 4 or value.string_value != wanted:
+                return False
+        else:
+            return False
+    return True
 
 
 def wait_ready(node, executor, services, topics, parameters, deadline):
@@ -48,7 +60,7 @@ def wait_ready(node, executor, services, topics, parameters, deadline):
                         return True, []
                 future = None
                 next_query = time.monotonic() + 0.25
-            missing = ['featureless static writer parameters not confirmed']
+            missing = ['live writer parameters not confirmed']
         executor.spin_once(timeout_sec=min(0.05, max(0.0, deadline - time.monotonic())))
     return False, missing
 
@@ -67,6 +79,13 @@ def parameter_entry(raw):
     return fields[0], fields[1] == 'true'
 
 
+def string_parameter_entry(raw):
+    fields = raw.split('|', 1)
+    if len(fields) != 2 or not fields[0] or not fields[1]:
+        raise argparse.ArgumentTypeError('expected parameter|nonempty-string')
+    return fields[0], fields[1]
+
+
 def main():
     import rclpy
     from rclpy.context import Context
@@ -79,11 +98,41 @@ def main():
     parser.add_argument('--service', action='append', type=graph_entry, default=[])
     parser.add_argument('--topic', action='append', type=graph_entry, default=[])
     parser.add_argument('--parameter', action='append', type=parameter_entry, default=[])
+    parser.add_argument(
+        '--string-parameter', action='append', type=string_parameter_entry,
+        default=[],
+    )
+    parser.add_argument('--token-parameter')
+    parser.add_argument('--attestation-path')
+    parser.add_argument('--session-id')
+    parser.add_argument('--domain-id', type=int)
     args = parser.parse_args()
     if not 0 < args.timeout_sec <= 120 or not args.service or not args.topic:
         parser.error('bounded timeout and nonempty typed graph are required')
     if args.mode == 'static' and not args.parameter:
         parser.error('static readiness requires featureless parameter checks')
+    attestation_fields = (
+        args.attestation_path, args.session_id, args.domain_id,
+        args.token_parameter,
+    )
+    if any(value is not None for value in attestation_fields) \
+            and not all(value is not None for value in attestation_fields):
+        parser.error('attestation path/session/domain/token parameter are atomic')
+    if args.token_parameter not in {None, 'commissioning_token'}:
+        parser.error('only commissioning_token may bind readiness')
+    parameters = dict(args.parameter)
+    for name, value in args.string_parameter:
+        if name in parameters:
+            parser.error(f'duplicate parameter expectation: {name}')
+        parameters[name] = value
+    token = ''
+    if args.token_parameter:
+        token = os.environ.get('ROBOT_COMMISSIONING_TOKEN', '')
+        if len(token) < 16:
+            parser.error('commissioning token is unavailable')
+        if args.token_parameter in parameters:
+            parser.error('commissioning token expectation must not be on argv')
+        parameters[args.token_parameter] = token
     deadline = time.monotonic() + args.timeout_sec
     context = Context()
     node = executor = None
@@ -93,10 +142,18 @@ def main():
         executor = SingleThreadedExecutor(context=context)
         executor.add_node(node)
         okay, missing = wait_ready(node, executor, args.service, args.topic,
-                                   dict(args.parameter), deadline)
+                                   parameters, deadline)
         if not okay:
             print('[BLOCKED] graph readiness timed out; missing: ' + ', '.join(missing), flush=True)
             return 2
+        if args.attestation_path:
+            issue(
+                args.attestation_path,
+                token=token,
+                session_id=args.session_id,
+                mode=args.mode,
+                domain_id=args.domain_id,
+            )
         print(f'[OK] exhibition {args.mode} graph ready; typed services={len(args.service)} '
               f'topics={len(args.topic)}; single discovery participant', flush=True)
         return 0

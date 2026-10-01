@@ -64,8 +64,8 @@ def test_zero_torque_waits_for_offline_handoff_before_starting_fsm(monkeypatch):
         def is_running(self, key):
             return key in self.running
 
-        def stop(self, key, **_kwargs):
-            calls.append(("stop", key))
+        def stop(self, key, **kwargs):
+            calls.append(("stop", key, kwargs))
             self.running.discard(key)
 
         def start(self, key, spec, **kwargs):
@@ -88,13 +88,18 @@ def test_zero_torque_waits_for_offline_handoff_before_starting_fsm(monkeypatch):
     panel.zero_torque_handoff_complete = False
     panel.background_services_started = True
     panel.status_timer = type("StatusTimer", (), {"stop": lambda self: None})()
-    panel.video_preview = type("Preview", (), {"stop": lambda self: None})()
+    panel.video_preview = type(
+        "Preview",
+        (),
+        {"stop": lambda self, **kwargs: calls.append(("preview_stop", kwargs))},
+    )()
     panel._append_log = lambda *_args: None
     panel._refresh_summary = lambda: None
 
     panel._continue_zero_torque_when_idle()
-    assert calls[:2] == [
-        ("stop", "connection_ensure"),
+    assert calls[:3] == [
+        ("preview_stop", {"wait_ms": 0}),
+        ("stop", "connection_ensure", {"graceful_timeout_ms": 1200, "wait": False}),
         (
             "start",
             app_module.ZERO_TORQUE_HANDOFF_KEY,

@@ -62,6 +62,32 @@ ZERO_TORQUE_HANDOFF_COMMAND = (
     "exec ./scripts/r1-exhibition-offline-handoff stop"
 )
 
+# These are operator-facing deadlines, not shortcuts around safety checks. A
+# deadline only changes the UI to a concrete retry message; it never kills a
+# physical owner or treats an unfinished transition as successful.
+MAIN_ACTION_TIMEOUTS_SEC = {
+    "connect": 12.0,
+    # Warm RUN -> LOCK normally confirms in a few seconds, but the same
+    # button is also allowed to create the first static/StandUp session.  That
+    # cold path keeps its complete SDK/FSM gates and can legitimately take
+    # well over 20 seconds, so it shares the bounded physical-mode deadline.
+    "exhibition_static": 300.0,
+    "exhibition_control": 300.0,
+    "exhibition_stand": 300.0,
+    "zero_torque": 90.0,
+    "exhibition_reconnect": 20.0,
+    "viewer": 20.0,
+}
+MAIN_ACTION_TITLES = {
+    "connect": "НАЙТИ И ПОДКЛЮЧИТЬ",
+    "exhibition_static": "LOCK / СТАТИЧНЫЙ РЕЖИМ",
+    "exhibition_control": "RUN / ПОЛНОЕ УПРАВЛЕНИЕ",
+    "exhibition_stand": "СТОЙКА",
+    "zero_torque": "ZERO TORQUE / РАССЛАБИТЬ",
+    "exhibition_reconnect": "Переподключить всё",
+    "viewer": "Открыть Robot POV",
+}
+
 
 def _is_headset_lan_address(value: str) -> bool:
     """Accept the exhibition Wi-Fi range as well as ordinary private LANs."""
@@ -319,6 +345,10 @@ class OperatorPanel(QMainWindow):
         self.connection_state = "offline"
         self.background_services_started = False
         self.last_capture_path = ""
+        self.action_started_at: Dict[str, float] = {}
+        self.action_generations: Dict[str, int] = {}
+        self.last_action_timings: Dict[str, Dict[str, object]] = {}
+        self.output_line_buffers: Dict[str, str] = {}
         # One ephemeral token is shared by every live child started during
         # this panel session. It is never written to config or exported logs.
         self.live_session_token = secrets.token_urlsafe(24)
@@ -511,16 +541,17 @@ class OperatorPanel(QMainWindow):
         status_grid.addWidget(self.exhibition_controllers_status, 1, 0)
         status_grid.addWidget(self.exhibition_video_status, 1, 1)
         status_grid.addWidget(self.exhibition_mode_status, 2, 0, 1, 2)
+        self.action_timing_status = QLabel("Последнее действие: —")
+        self.action_timing_status.setObjectName("simpleStatus")
+        self.action_timing_status.setMinimumHeight(38)
+        status_grid.addWidget(self.action_timing_status, 3, 0, 1, 2)
         controls.addWidget(status_group)
 
         tools = QGridLayout()
         reconnect = self._action_button("exhibition_reconnect", "↻  Переподключить всё")
         reconnect.setObjectName("reconnectButton")
         reconnect.setMinimumHeight(48)
-        tools.addWidget(reconnect, 0, 0)
-        calibrate = self._action_button("exhibition_calibrate", "Перекалибровать руки")
-        calibrate.setMinimumHeight(48)
-        tools.addWidget(calibrate, 0, 1)
+        tools.addWidget(reconnect, 0, 0, 1, 2)
         open_viewer = QPushButton("Открыть Robot POV")
         open_viewer.setMinimumHeight(48)
         open_viewer.clicked.connect(self.open_viewer)
@@ -555,7 +586,7 @@ class OperatorPanel(QMainWindow):
         self.controller.started.connect(self._on_started)
         self.controller.finished.connect(self._on_finished)
         self.controller.failed.connect(
-            lambda key, message: self._append_log(key, f"[FAIL] {message}\n")
+            self._on_failed
         )
 
     def _add_general_tab(self) -> None:
@@ -667,9 +698,7 @@ class OperatorPanel(QMainWindow):
         grid = QGridLayout(group)
         for index, (key, text) in enumerate(
             [
-                ("vr_calibrate", "Калибровать HMD и руки"),
                 ("head_calibrate", "Калибровать голову"),
-                ("hands_calibrate", "Калибровать руки"),
                 ("dry_run", "Запустить VR dry-run"),
                 ("vr_check", "Проверить VR-шлем"),
             ]
@@ -825,14 +854,9 @@ class OperatorPanel(QMainWindow):
             self._action_button("arms_live", "Повторять движения рук из VR"), 0, 0
         )
         arms_grid.addWidget(
-            self._action_button("hands_calibrate", "Калибровать руки (Deadman отпущен)"),
-            1,
-            0,
-        )
-        arms_grid.addWidget(
             self._action_button("head_calibrate", "Калибровать голову (смотреть прямо)"),
             1,
-            1,
+            0,
         )
         arms_grid.addWidget(
             self._action_button("prepare", "Подготовить руки (Deadman зажат)"),
@@ -949,6 +973,148 @@ class OperatorPanel(QMainWindow):
             f"background: {background}; color: {foreground}; font-weight: bold;"
         )
 
+    def _begin_action(self, key: str) -> bool:
+        """Start one debounced click-to-result measurement."""
+        started = self.__dict__.setdefault("action_started_at", {})
+        if key in started:
+            if "log_view" in self.__dict__:
+                self._append_log(
+                    key,
+                    "[INFO] Действие уже выполняется; повторный экземпляр не создан.\n",
+                )
+            return False
+        if key in {
+            "exhibition_static",
+            "exhibition_control",
+            "exhibition_stand",
+        }:
+            for previous in (
+                "exhibition_static",
+                "exhibition_control",
+                "exhibition_stand",
+            ):
+                if previous != key and previous in started:
+                    self._finish_action(
+                        previous, "отменено", "оператор выбрал другой режим"
+                    )
+        started[key] = time.monotonic()
+        generations = self.__dict__.setdefault("action_generations", {})
+        generation = int(generations.get(key, 0)) + 1
+        generations[key] = generation
+        title = MAIN_ACTION_TITLES.get(key, key)
+        timeout = MAIN_ACTION_TIMEOUTS_SEC.get(key, 30.0)
+        if "action_timing_status" in self.__dict__:
+            self.action_timing_status.setText(
+                f"Выполняется: {title} • тайм-аут {timeout:.0f} с"
+            )
+            self.action_timing_status.setStyleSheet(
+                "padding: 9px 12px; border-radius: 5px; "
+                "background: #5a481f; color: #ffd166; font-weight: bold;"
+            )
+        if "status_timer" in self.__dict__:
+            QTimer.singleShot(
+                int(timeout * 1000),
+                lambda k=key, g=generation: self._action_timed_out(k, g),
+            )
+        return True
+
+    def _finish_action(self, key: str, result: str, detail: str = "") -> Optional[float]:
+        """Finish an active measurement and expose a compact audit line."""
+        started = self.__dict__.setdefault("action_started_at", {})
+        started_at = started.pop(key, None)
+        if started_at is None:
+            return None
+        elapsed = max(0.0, time.monotonic() - started_at)
+        title = MAIN_ACTION_TITLES.get(key, key)
+        normalized = result.strip().lower()
+        ok = normalized in {"готово", "ok", "успешно", "уже готово"}
+        record = {
+            "elapsed_sec": round(elapsed, 3),
+            "result": result,
+            "detail": detail,
+        }
+        self.__dict__.setdefault("last_action_timings", {})[key] = record
+        suffix = f" • {detail}" if detail else ""
+        if "action_timing_status" in self.__dict__:
+            self.action_timing_status.setText(
+                f"{title}: {result} за {elapsed:.2f} с{suffix}"
+            )
+            colors = (
+                ("#214f3b", "#83e3ad")
+                if ok
+                else ("#5a2931", "#ffb4bd")
+            )
+            self.action_timing_status.setStyleSheet(
+                "padding: 9px 12px; border-radius: 5px; font-weight: bold; "
+                f"background: {colors[0]}; color: {colors[1]};"
+            )
+        if "log_view" in self.__dict__:
+            level = "OK" if ok else "BLOCKED"
+            self._append_log(
+                key,
+                f"[{level}] BUTTON_TIMING result={result} "
+                f"elapsed_sec={elapsed:.3f} detail={detail or '-'}\n",
+            )
+        return elapsed
+
+    def _action_timed_out(self, key: str, generation: int) -> None:
+        if self.__dict__.setdefault("action_generations", {}).get(key) != generation:
+            return
+        if key not in self.__dict__.setdefault("action_started_at", {}):
+            return
+        title = MAIN_ACTION_TITLES.get(key, key)
+        self._finish_action(
+            key,
+            "тайм-аут",
+            "операция не подтверждена; процесс не был принудительно остановлен",
+        )
+        if "operator_instruction" in self.__dict__:
+            self.operator_instruction.setText(
+                f"Нет подтверждения «{title}». Проверьте причину в логах и "
+                "нажмите эту же кнопку ещё раз."
+            )
+
+    def _request_status_refresh(self, *, fast: bool = False) -> bool:
+        spec = self.specs.get("panel_status")
+        process_key = "panel_status_fast" if fast else "panel_status"
+        if not spec or self.controller.is_running(process_key):
+            return False
+        return self.controller.start(
+            process_key,
+            spec,
+            env_overrides={"R1_PANEL_STATUS_FAST": "1"} if fast else None,
+        )
+
+    @staticmethod
+    def _action_for_process(key: str) -> Optional[str]:
+        mapping = {
+            "exhibition_lock": "exhibition_static",
+            "exhibition_rearm": "exhibition_control",
+            "exhibition_service:exhibition_reconnect": "exhibition_reconnect",
+            "zero_torque": "zero_torque",
+        }
+        return mapping.get(key)
+
+    def _show_retry_reason(self, action_key: Optional[str], reason: str) -> None:
+        if not action_key or not reason:
+            return
+        title = MAIN_ACTION_TITLES.get(action_key, action_key)
+        clean = reason.strip().replace("\n", " ")[:280]
+        if "operator_instruction" in self.__dict__:
+            self.operator_instruction.setText(
+                f"Ошибка «{title}»: {clean}. После устранения причины нажмите "
+                "эту же кнопку ещё раз."
+            )
+
+    def _on_failed(self, key: str, message: str) -> None:
+        self._append_log(key, f"[FAIL] {message}\n")
+        action = self._action_for_process(key)
+        if key == "exhibition":
+            action = self.__dict__.get("exhibition_requested_mode")
+        self._show_retry_reason(action, message)
+        if action:
+            self._finish_action(action, "ошибка", message)
+
     def start_video_preview(self) -> None:
         if "video_preview" in self.__dict__:
             self.video_preview.start()
@@ -983,11 +1149,19 @@ class OperatorPanel(QMainWindow):
                 "voice:voice_remote", self.specs["voice_remote"]
             )
 
-    def auto_connect(self) -> None:
+    def auto_connect(self, _checked: bool = False, *, track_action: bool = True) -> None:
+        if track_action and not self._begin_action("connect"):
+            self._request_status_refresh(fast=True)
+            return
         self.zero_torque_idle = False
         if "status_timer" in self.__dict__ and not self.status_timer.isActive():
             self.status_timer.start()
-        self.connection_state = "searching"
+        already_connected = (
+            self.connection_state == "connected"
+            and self.status_values.get("robot", "").upper()
+            in {"OK", "FOUND", "RUNNING", "READY"}
+        )
+        self.connection_state = "connected" if already_connected else "searching"
         headset_ip = _discover_headset_ip() if self.config.vr_transport == "lan" else None
         if headset_ip and headset_ip != self.config.vr_headset_ip:
             # DHCP changes at exhibitions are normal. Keep the discovered
@@ -1000,46 +1174,59 @@ class OperatorPanel(QMainWindow):
                 f"[OK] VR-шлем найден автоматически: {headset_ip}\n",
             )
         if "robot_name_label" in self.__dict__:
-            self.robot_name_label.setText(
-                f"◌  {self.config.robot_name}  — подключение…"
-            )
-            self.robot_name_label.setProperty("connectionState", "searching")
-            self.connect_button.setText("ПОИСК И ПОДКЛЮЧЕНИЕ…")
-            self.connect_button.setEnabled(False)
+            if not already_connected:
+                self.robot_name_label.setText(
+                    f"◌  {self.config.robot_name}  — подключение…"
+                )
+                self.robot_name_label.setProperty("connectionState", "searching")
+                self.connect_button.setText("ПОИСК И ПОДКЛЮЧЕНИЕ…")
+            # Keep the control clickable. Repeated clicks are debounced in
+            # _begin_action and request only a fresh read-only status snapshot.
+            self.connect_button.setEnabled(True)
         self.start_background_services()
-        if not self.controller.is_running("check_all"):
-            self._run_check_all()
-        self.last_status = "Жёлтый • автоматическое подключение выполняется"
+        self._request_status_refresh(fast=True)
+        if already_connected:
+            self.last_status = "Зелёный • существующее Ethernet-соединение используется"
+            self._finish_action(
+                "connect", "уже готово", "повторный полный поиск не запускался"
+            )
+        else:
+            self.last_status = "Жёлтый • локальное подключение проверяется"
         self._refresh_summary()
 
     def _run_main_reconnect(self) -> None:
         """Reconnect the complete operator path with one button.
 
-        The reconnect helper is useful while a manager is already running,
-        but it quite reasonably refuses to act when the panel was opened
-        before any exhibition session existed.  On the main screen that must
-        feel like one automatic action: start discovery/warmup, then create a
-        static session when there is no current owner.
+        A reconnect never changes the robot mode. With an active manager it
+        repairs only failed managed components. Without one it refreshes the
+        existing read-only Ethernet/USB/video services.
         """
-        self.auto_connect()
+        if not self._begin_action("exhibition_reconnect"):
+            return
+        self._ensure_main_services()
         existing = active_session_snapshot()
         if self.controller.is_running("exhibition") or existing.get("mode") in {
             "static", "control"
         }:
             process_key = "exhibition_service:exhibition_reconnect"
             if not self.controller.is_running(process_key):
-                self.controller.start(
+                started = self.controller.start(
                     process_key, self.specs["exhibition_reconnect"]
                 )
+                if not started:
+                    self._finish_action(
+                        "exhibition_reconnect", "ошибка", "не удалось запустить helper"
+                    )
             return
-        requested = self.exhibition_requested_mode
-        if requested not in {"exhibition_static", "exhibition_control"}:
-            requested = "exhibition_static"
-        self._run_exhibition_mode(requested)
+        self._append_log(
+            "exhibition_reconnect",
+            "[OK] Активного управляющего сеанса нет; режим робота не меняю. "
+            "Обновляю только локальные статусы Ethernet, USB и видео.\n",
+        )
+        self._request_status_refresh(fast=True)
 
     def _run_main_calibration(self) -> None:
-        """Calibrate through the live manager, starting it when necessary."""
-        self.auto_connect()
+        """Retained service path; intentionally absent from the main screen."""
         existing = active_session_snapshot()
         control_active = (
             self.controller.is_running("exhibition")
@@ -1049,10 +1236,11 @@ class OperatorPanel(QMainWindow):
             and existing.get("status") in {"ready", "locked", "degraded"}
         )
         if not control_active:
-            # The control manager performs its read-only neutral capture as
-            # part of startup, so a first calibration click does not require
-            # a separate manual preparation step.
-            self._run_exhibition_mode("exhibition_control")
+            self._append_log(
+                "exhibition_calibrate",
+                "[BLOCKED] Калибровка доступна только в уже запущенном control-сеансе; "
+                "автоматический RUN не выполнялся.\n",
+            )
             return
         process_key = "exhibition_service:exhibition_calibrate"
         if not self.controller.is_running(process_key):
@@ -1069,7 +1257,7 @@ class OperatorPanel(QMainWindow):
         if not self.status_timer.isActive():
             self.status_timer.start()
         if self.connection_state == "offline":
-            self.auto_connect()
+            self.auto_connect(track_action=False)
         elif not self.background_services_started:
             self.start_background_services()
 
@@ -1104,6 +1292,9 @@ class OperatorPanel(QMainWindow):
         self.video_state = state
         if state == "online":
             self.status_values["video"] = "OK"
+            self._finish_action(
+                "viewer", "готово", "локальный видеопоток подтверждён"
+            )
         elif state in {"searching", "offline"}:
             self.status_values["video"] = "RECONNECTING"
         self._refresh_exhibition_status()
@@ -1271,7 +1462,18 @@ class OperatorPanel(QMainWindow):
             mode_state = "off"
             if "operator_instruction" in self.__dict__:
                 self.operator_instruction.setText(mode)
-        elif reported_mode == "control" and kill == "LATCHED":
+        elif kill == "LATCHED" and (
+            reported_mode == "control"
+            or manager_status
+            in {
+                "ready",
+                "locked",
+                "degraded",
+                "reconnecting",
+                "resuming",
+                "rearming",
+            }
+        ):
             mode = "Управление остановлено (KILL)"
             mode_state = "off"
         if mode == "Остановлен":
@@ -1402,6 +1604,8 @@ class OperatorPanel(QMainWindow):
         dialog.exec_()
         if dialog.clickedButton() is not relax:
             return
+        if not self._begin_action("zero_torque"):
+            return
 
         self.pending_exhibition_key = None
         self.pending_exhibition_environment = None
@@ -1451,6 +1655,9 @@ class OperatorPanel(QMainWindow):
                     "Управляющие процессы не завершились вовремя. "
                     "Команда Zero Torque роботу не отправлялась.",
                 )
+                self._finish_action(
+                    "zero_torque", "тайм-аут", "управляющие процессы не завершились"
+                )
                 return
             QTimer.singleShot(250, self._continue_zero_torque_when_idle)
             return
@@ -1462,9 +1669,15 @@ class OperatorPanel(QMainWindow):
         if helpers:
             self.status_timer.stop()
             if "video_preview" in self.__dict__:
-                self.video_preview.stop()
+                # Request the HTTP reader to stop without waiting on its
+                # socket/thread from the Qt event loop.  The exact offline
+                # handoff below remains the authoritative bounded gate before
+                # any robot-facing Zero Torque helper may start.
+                self.video_preview.stop(wait_ms=0)
             for key in helpers:
-                self.controller.stop(key)
+                self.controller.stop(
+                    key, graceful_timeout_ms=1200, wait=False
+                )
             self.background_services_started = False
             QTimer.singleShot(0, self._continue_zero_torque_when_idle)
             return
@@ -1499,6 +1712,9 @@ class OperatorPanel(QMainWindow):
                         "Не удалось запустить handoff offline-сервиса. "
                         "Damping и Zero Torque роботу не отправлялись.",
                     )
+                    self._finish_action(
+                        "zero_torque", "ошибка", "offline handoff не запустился"
+                    )
                 return
             # The handoff process has either not emitted finished yet or its
             # finished callback is queued.  Do not start another copy and do
@@ -1515,6 +1731,9 @@ class OperatorPanel(QMainWindow):
                 "Offline bridge не подтвердил освобождение портов. "
                 "Damping и Zero Torque роботу не отправлялись.",
             )
+            self._finish_action(
+                "zero_torque", "ошибка", "offline bridge не освободил порты"
+            )
             return
 
         self.pending_zero_torque = False
@@ -1524,16 +1743,22 @@ class OperatorPanel(QMainWindow):
             "ROBOT_CONFIRM_ROBOT_SUPPORTED": "1",
             "ROBOT_ZERO_TORQUE_TOKEN": secrets.token_urlsafe(24),
         }
-        self.controller.start(
+        if not self.controller.start(
             "zero_torque",
             self.specs["zero_torque"],
             env_overrides=environment,
-        )
+        ):
+            self._finish_action(
+                "zero_torque", "ошибка", "Zero Torque helper не запустился"
+            )
 
     def _run_exhibition_mode(self, key: str) -> None:
         spec = self.specs[key]
+        if not self._begin_action(key):
+            return
         if self.__dict__.get("pending_zero_torque", False) or self.controller.is_running("zero_torque"):
             self._append_log(key, "[INFO] Дождитесь завершения Zero Torque; затем нажмите нужный режим.\n")
+            self._finish_action(key, "заблокировано", "выполняется Zero Torque")
             return
         # Never run a fast rearm against the owner already being stopped.
         # Only an existing operator-requested switch may have its destination
@@ -1541,12 +1766,14 @@ class OperatorPanel(QMainWindow):
         if self.controller.is_running("exhibition_stop") or self.__dict__.get("exhibition_switch_in_progress", False):
             if not self.__dict__.get("pending_exhibition_key"):
                 self._append_log(key, "[INFO] Выполняется STOP; после завершения нажмите нужный режим.\n")
+                self._finish_action(key, "заблокировано", "выполняется STOP")
                 return
             if not self._confirm_live(
                 spec, automatic_preflight=True, require_vr=key == "exhibition_control",
                 session_arm=key == "exhibition_control", require_run_mode=spec.requires_run_mode,
                 skip_checklist=True,
             ):
+                self._finish_action(key, "отменено", "подтверждение оператора не получено")
                 return
             self.pending_exhibition_key = key
             self.pending_exhibition_environment = self._live_environment(
@@ -1556,12 +1783,23 @@ class OperatorPanel(QMainWindow):
         self._ensure_main_services()
         existing = active_session_snapshot()
         if (
-            key == "exhibition_stand"
+            key in {"exhibition_static", "exhibition_stand"}
             and existing.get("mode") == "static"
             and existing.get("status") == "ready"
         ):
-            self.exhibition_mode = "Стойка"
+            self.exhibition_mode = (
+                "Стойка" if key == "exhibition_stand" else "Статичный"
+            )
             self._refresh_summary()
+            self._finish_action(
+                key,
+                "уже готово",
+                (
+                    "подтверждённая стойка уже активна"
+                    if key == "exhibition_stand"
+                    else "подтверждённый статичный режим уже активен"
+                ),
+            )
             return
         external_control = (
             existing.get("mode") == "control"
@@ -1589,7 +1827,8 @@ class OperatorPanel(QMainWindow):
                 else "Возврат управления…"
             )
             self._refresh_summary()
-            self.controller.start(action, self.specs[action])
+            if not self.controller.start(action, self.specs[action]):
+                self._finish_action(key, "ошибка", "helper уже занят или не запустился")
             return
         fast_lock = (
             key == "exhibition_static"
@@ -1609,9 +1848,10 @@ class OperatorPanel(QMainWindow):
                 return
             self.exhibition_mode = "Переход в LOCK…"
             self._refresh_summary()
-            self.controller.start(
+            if not self.controller.start(
                 "exhibition_lock", self.specs["exhibition_lock"]
-            )
+            ):
+                self._finish_action(key, "ошибка", "LOCK helper не запустился")
             return
         same_mode = (
             key != "exhibition_stand"
@@ -1628,14 +1868,16 @@ class OperatorPanel(QMainWindow):
             )
             self.exhibition_mode = "Повторный запуск…"
             self._refresh_summary()
-            self.controller.start(
+            if not self.controller.start(
                 "exhibition_rearm",
                 self.specs["exhibition_rearm"],
                 env_overrides=environment,
-            )
+            ):
+                self._finish_action(key, "ошибка", "RUN helper не запустился")
             return
         if self.controller.is_running("exhibition_stop"):
             self._append_log(key, "[INFO] Дождитесь завершения безопасной остановки.\n")
+            self._finish_action(key, "заблокировано", "безопасная остановка ещё выполняется")
             return
 
         require_vr = key == "exhibition_control"
@@ -1651,6 +1893,7 @@ class OperatorPanel(QMainWindow):
             # per-item acknowledgement dialog here.
             skip_checklist=True,
         ):
+            self._finish_action(key, "отменено", "подтверждение оператора не получено")
             return
         self.exhibition_session_confirmed = True
         environment = self._live_environment(
@@ -1707,6 +1950,7 @@ class OperatorPanel(QMainWindow):
         )
         if not started:
             self.exhibition_mode = "Остановлен"
+            self._finish_action(key, "ошибка", "процесс режима не запустился")
         self._refresh_summary()
 
     def _start_pending_exhibition_mode(self) -> None:
@@ -1758,9 +2002,7 @@ class OperatorPanel(QMainWindow):
             and not active_session_snapshot()
         ):
             self.controller.start("sdk_warmup", self.specs["sdk_warmup"])
-        spec = self.specs.get("panel_status")
-        if spec and not self.controller.is_running("panel_status"):
-            self.controller.start("panel_status", spec)
+        self._request_status_refresh()
 
     def _parse_status_output(self, text: str) -> None:
         updated = set()
@@ -1788,7 +2030,102 @@ class OperatorPanel(QMainWindow):
                 self.exhibition_mode = "Управление" if mode == "control" else "Стойка"
             elif status == "locked":
                 self.exhibition_mode = "LOCK — удержание позы"
+            self._apply_exhibition_result(
+                mode,
+                status,
+                self.status_values.get("exhibition_detail", ""),
+            )
+        if "robot" in updated:
+            robot = self.status_values.get("robot", "OFFLINE").upper()
+            healthy = robot in {"OK", "FOUND", "RUNNING", "READY"}
+            if "connect" in self.__dict__.setdefault("action_started_at", {}):
+                if healthy:
+                    self._finish_action(
+                        "connect", "готово", "последний рабочий Ethernet-адрес отвечает"
+                    )
+                else:
+                    self._finish_action(
+                        "connect", "не найден", "Ethernet-проверка завершена без ответа робота"
+                    )
+                    self._show_retry_reason(
+                        "connect", "робот не отвечает по существующему Ethernet"
+                    )
+            if (
+                "exhibition_reconnect"
+                in self.__dict__.setdefault("action_started_at", {})
+                and not active_session_snapshot()
+            ):
+                result = "готово" if healthy else "не найден"
+                detail = (
+                    "локальные службы сохранены; Ethernet отвечает"
+                    if healthy
+                    else "локальные службы запущены, робот пока не отвечает"
+                )
+                self._finish_action("exhibition_reconnect", result, detail)
         self._refresh_exhibition_status()
+
+    def _apply_exhibition_result(self, mode: str, status: str, detail: str) -> None:
+        """Map one manager acknowledgement to the pending main-screen action."""
+        mode = str(mode).strip().lower()
+        status = str(status).strip().lower()
+        if status == "ready" and mode == "control":
+            self.exhibition_mode = "Управление"
+            self._finish_action("exhibition_control", "готово", detail)
+        elif status == "ready" and mode == "static":
+            action = (
+                "exhibition_stand"
+                if "exhibition_stand"
+                in self.__dict__.setdefault("action_started_at", {})
+                else "exhibition_static"
+            )
+            self.exhibition_mode = "Стойка" if action == "exhibition_stand" else "Статичный"
+            self._finish_action(action, "готово", detail)
+        elif status == "locked":
+            self.exhibition_mode = "LOCK — удержание позы"
+            self._finish_action("exhibition_static", "готово", detail)
+        elif status in {"blocked", "degraded"} or (
+            status == "stopped"
+            and not self.controller.is_running("exhibition")
+            and not self.__dict__.get("pending_warmup_key")
+            and not self.__dict__.get("exhibition_switch_in_progress", False)
+        ):
+            pending = self.__dict__.setdefault("action_started_at", {})
+            for action in (
+                "exhibition_control",
+                "exhibition_stand",
+                "exhibition_static",
+            ):
+                if action in pending:
+                    reason = detail or f"manager status={status}"
+                    self._finish_action(action, "ошибка", reason)
+                    self._show_retry_reason(action, reason)
+                    break
+
+    def _consume_exhibition_events(self, key: str, text: str) -> None:
+        buffers = self.__dict__.setdefault("output_line_buffers", {})
+        combined = buffers.get(key, "") + text
+        lines = combined.splitlines(keepends=True)
+        buffers[key] = ""
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            buffers[key] = lines.pop()
+        for raw in lines:
+            line = raw.strip()
+            if not line.startswith("EXHIBITION_STATE "):
+                continue
+            try:
+                payload = json.loads(line.split(" ", 1)[1])
+            except (ValueError, TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            mode = str(payload.get("mode", ""))
+            status = str(payload.get("status", ""))
+            detail = str(payload.get("detail", ""))
+            self.status_values["mode"] = mode
+            self.status_values["exhibition"] = status
+            self.status_values["exhibition_detail"] = detail
+            self._apply_exhibition_result(mode, status, detail)
+            self._refresh_exhibition_status()
 
     def _run_check_all(self) -> None:
         # A fresh run must re-open the gate only after all read-only checks
@@ -1976,13 +2313,15 @@ class OperatorPanel(QMainWindow):
 
     def _on_output(self, key: str, text: str) -> None:
         self._append_log(key, text)
+        if key == "exhibition":
+            self._consume_exhibition_events(key, text)
         if key == "sdk_warmup":
             for line in text.splitlines():
                 if not line.startswith("SDK_WARMUP state="):
                     continue
                 phase = line.split("state=", 1)[1].split()[0]
                 self.status_values["sdk_warmup"] = phase
-        if key == "panel_status":
+        if key in {"panel_status", "panel_status_fast"}:
             self._parse_status_output(text)
         if key == "voice_check" and hasattr(self, "voice_status"):
             self.voice_status.setText(
@@ -2024,6 +2363,15 @@ class OperatorPanel(QMainWindow):
                     )
         if "[FAIL]" in text or "[BLOCKED]" in text:
             self.last_status = "Красный • обнаружена ошибка или блокировка"
+            reason = ""
+            for line in reversed(text.splitlines()):
+                if "[FAIL]" in line or "[BLOCKED]" in line:
+                    reason = re.sub(r"^.*?\[(?:FAIL|BLOCKED)\]\s*", "", line).strip()
+                    break
+            action = self._action_for_process(key)
+            if key == "exhibition":
+                action = self.__dict__.get("exhibition_requested_mode")
+            self._show_retry_reason(action, reason)
         elif "[WARN]" in text:
             self.last_status = "Жёлтый • есть предупреждения"
         elif "[OK]" in text or "[PASS]" in text:
@@ -2045,6 +2393,13 @@ class OperatorPanel(QMainWindow):
     def _on_finished(self, key: str, code: int, _status: int) -> None:
         level = "OK" if code == 0 else "WARN"
         self._append_log(key, f"[{level}] процесс завершён с кодом {code}\n")
+        action = self._action_for_process(key)
+        if action and key != "zero_torque":
+            self._finish_action(
+                action,
+                "готово" if code == 0 else "ошибка",
+                "команда подтверждена" if code == 0 else f"helper завершился с кодом {code}",
+            )
         if key == "sdk_warmup" and self.__dict__.get("pending_warmup_key"):
             if code == 0:
                 QTimer.singleShot(0, self._start_pending_warmup_mode)
@@ -2065,6 +2420,9 @@ class OperatorPanel(QMainWindow):
                 else:
                     self.pending_zero_torque = False
                     self.zero_torque_handoff_complete = False
+                    self._finish_action(
+                        "zero_torque", "ошибка", f"offline handoff завершился с кодом {code}"
+                    )
                     QMessageBox.critical(
                         self,
                         "Zero Torque отменён",
@@ -2102,8 +2460,8 @@ class OperatorPanel(QMainWindow):
             # close the owning launch group so SDK readers/writers cannot stay
             # connected on a charger or contaminate the next fresh session.
             exhibition_was_running = self.controller.is_running("exhibition")
-            self.controller.stop("motion")
-            self.controller.stop("robot:prepare")
+            self.controller.stop("motion", wait=False)
+            self.controller.stop("robot:prepare", wait=False)
             self.controller.stop(
                 "exhibition",
                 graceful_timeout_ms=EXHIBITION_GRACEFUL_STOP_MS,
@@ -2143,8 +2501,15 @@ class OperatorPanel(QMainWindow):
                 if self.exhibition_stop_complete:
                     QTimer.singleShot(0, self._start_pending_exhibition_mode)
             else:
+                failed_action = self.exhibition_requested_mode
                 self.exhibition_requested_mode = ""
                 self.exhibition_mode = "Остановлен"
+                if code != 0 and failed_action:
+                    self._finish_action(
+                        failed_action,
+                        "ошибка",
+                        f"manager завершился с кодом {code}; смотрите последнюю причину в логах",
+                    )
                 # A local startup failure does not change the conditions that
                 # the operator just confirmed.  Keep the bounded runtime
                 # acknowledgement for an immediate retry; robot loss,
@@ -2164,6 +2529,11 @@ class OperatorPanel(QMainWindow):
             self.exhibition_mode = "Zero Torque" if code == 0 else "Остановлен"
             self.preflight_ok = False
             self.background_services_started = False
+            self._finish_action(
+                "zero_torque",
+                "готово" if code == 0 else "ошибка",
+                "FSM 0 подтверждён" if code == 0 else f"helper завершился с кодом {code}",
+            )
             if code == 0:
                 QMessageBox.information(
                     self,
@@ -2197,13 +2567,26 @@ class OperatorPanel(QMainWindow):
             QApplication.instance().quit()
 
     def open_viewer(self) -> None:
-        # Opening POV from the main screen is also a one-click recovery path:
-        # rediscover the headset/robot and restart the read-only services before
-        # handing the browser a URL.  It never starts motors or a live writer.
-        self.auto_connect()
+        if not self._begin_action("viewer"):
+            return
+        # Reuse the existing local stream and watchdog. Opening a browser must
+        # not run the complete robot/VR preflight or start a second video server.
+        self._ensure_main_services()
         url = self.config.video_url.strip() or "http://127.0.0.1:8080/"
-        QDesktopServices.openUrl(QUrl(url))
-        self._append_log("viewer", f"[INFO] открываю {url}\n")
+        opened = QDesktopServices.openUrl(QUrl(url))
+        if not opened:
+            self._finish_action("viewer", "ошибка", "система не открыла локальный URL")
+            self._show_retry_reason("viewer", "не удалось открыть локальный URL")
+            return
+        if self.video_state == "online":
+            self._finish_action(
+                "viewer", "готово", "использован уже работающий локальный поток"
+            )
+        else:
+            self._append_log(
+                "viewer",
+                f"[INFO] открываю {url}; видеопоток ещё запускается, основное окно не блокируется\n",
+            )
 
     def open_logs(self) -> None:
         path = Path(self.config.project_dir) / self.config.logs_dir
@@ -2233,6 +2616,7 @@ class OperatorPanel(QMainWindow):
             "preflight_ok": self.preflight_ok,
             "active_processes": self.controller.active_keys(),
             "health": self.status_values,
+            "button_timings": self.last_action_timings,
         }
         destination.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",

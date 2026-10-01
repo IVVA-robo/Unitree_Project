@@ -19,9 +19,9 @@ die() {
 }
 
 [[ $# -eq 1 ]] \
-  || die 'usage: r1-exhibition-session-gate arm|disarm|pause|resume|resume_ready|clear_emergency'
+  || die 'usage: r1-exhibition-session-gate arm|disarm|pause|resume|resume_ready|health|clear_emergency'
 case "$1" in
-  arm|disarm|pause|resume|resume_ready|clear_emergency) ;;
+  arm|disarm|pause|resume|resume_ready|health|clear_emergency) ;;
   *) die 'unknown session action' ;;
 esac
 

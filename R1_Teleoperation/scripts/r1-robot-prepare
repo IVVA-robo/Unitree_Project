@@ -59,6 +59,31 @@ set -u
 export ROS_DOMAIN_ID="$((10#${DOMAIN_ID}))"
 export ROS_LOCALHOST_ONLY=1
 
+# Static readiness has just used one DDS participant to verify the complete
+# typed graph, exact featureless writer policy and this commissioning token.
+# Consume that proof before trusting it; it is HMAC-bound to this boot,
+# manager session and ROS domain and cannot be replayed. Control and direct
+# commissioning paths retain the full discovery below.
+STATIC_READINESS_ATTESTED=false
+if [[ ${R1_EXHIBITION_STATIC_READINESS-0} == 1 ]]; then
+  [[ ${R1_EXHIBITION_FAST_PREPARE-0} == 1 \
+      && ${ROBOT_CONFIRM_STATIC_PREPARE-0} == 1 ]] \
+    || die 'static readiness reuse requires the fast static prepare contract'
+  ATTESTATION_PATH=${R1_EXHIBITION_READINESS_ATTESTATION-}
+  EXHIBITION_SESSION_ID=${R1_EXHIBITION_SESSION_ID-}
+  [[ ${ATTESTATION_PATH} == /* ]] \
+    || die 'static fast prepare requires an absolute readiness attestation path'
+  [[ ${EXHIBITION_SESSION_ID} =~ ^[0-9a-f]{32}$ ]] \
+    || die 'static fast prepare requires the current exhibition session id'
+  python3 "${PROJECT_DIR}/exhibition/readiness_attestation.py" consume \
+    --path "${ATTESTATION_PATH}" \
+    --session-id "${EXHIBITION_SESSION_ID}" \
+    --mode static \
+    --domain-id "$((10#${DOMAIN_ID}))" \
+    || die 'static graph readiness attestation was not accepted'
+  STATIC_READINESS_ATTESTED=true
+fi
+
 # `ros2 service type` is daemon-backed on Humble and can fail with a stale
 # XML-RPC daemon (`rclpy.ok()` fault) even while the live services are healthy.
 # Discover the complete typed graph directly instead.  Require all four
@@ -76,14 +101,18 @@ required_service_graph_ready() {
 }
 
 service_graph=''
-for attempt in 1 2 3 4; do
-  if ! service_graph="$(timeout 6s ros2 service list --no-daemon \
-      --spin-time 1.0 --show-types 2>/dev/null)"; then
-    service_graph=''
-  fi
-  required_service_graph_ready && break
-  sleep 0.25
-done
+if [[ ${STATIC_READINESS_ATTESTED} == true ]]; then
+  service_graph=$'/r1/live_writer/prepare [std_srvs/srv/Trigger]\n/r1/live_writer/reset_kill [std_srvs/srv/Trigger]\n/r1/live_writer/kill [std_srvs/srv/Trigger]\n/r1/safety/set_kill [std_srvs/srv/SetBool]'
+else
+  for attempt in 1 2 3 4; do
+    if ! service_graph="$(timeout 6s ros2 service list --no-daemon \
+        --spin-time 1.0 --show-types 2>/dev/null)"; then
+      service_graph=''
+    fi
+    required_service_graph_ready && break
+    sleep 0.25
+  done
+fi
 for service in \
   /r1/live_writer/prepare \
   /r1/live_writer/reset_kill \
@@ -100,17 +129,23 @@ service_exists /r1/safety/set_kill std_srvs/srv/SetBool \
 # discovery snapshots.  This dump is read-only and is never printed because it
 # contains the commissioning token.
 parameter_dump=''
-for attempt in 1 2 3 4; do
-  parameter_dump="$(timeout 7s ros2 param dump /r1_live_writer \
-    --no-daemon --spin-time 1.5 2>/dev/null || true)"
-  if grep -Fq '/r1_live_writer:' <<<"${parameter_dump}" \
-      && grep -Eq '^[[:space:]]+commissioning_token:' \
-        <<<"${parameter_dump}"; then
-    break
-  fi
-  parameter_dump=''
-  sleep 0.25
-done
+if [[ ${STATIC_READINESS_ATTESTED} == true ]]; then
+  # These non-secret values are the exact policy covered by the consumed
+  # readiness HMAC.  The commissioning token itself is deliberately absent.
+  parameter_dump=$'/r1_live_writer:\n  ros__parameters:\n    transport: sdk\n    send_commands: true\n    enable_prepare: true\n    profile: slow-safe\n    static_prepare_mode: true\n    exhibition_session_mode: false\n    enable_head: false\n    enable_arms: false\n    enable_locomotion: false\n    prepare_enter_locomotion: false\n    arm_topic: /unused/static\n    head_recenter_enabled: false'
+else
+  for attempt in 1 2 3 4; do
+    parameter_dump="$(timeout 7s ros2 param dump /r1_live_writer \
+      --no-daemon --spin-time 1.5 2>/dev/null || true)"
+    if grep -Fq '/r1_live_writer:' <<<"${parameter_dump}" \
+        && grep -Eq '^[[:space:]]+commissioning_token:' \
+          <<<"${parameter_dump}"; then
+      break
+    fi
+    parameter_dump=''
+    sleep 0.25
+  done
+fi
 [[ -n ${parameter_dump} ]] \
   || die 'live writer parameter snapshot is unavailable'
 
@@ -188,10 +223,12 @@ case ${R1_EXHIBITION_FAST_PREPARE-0} in
       grep -Fqi 'boolean value is: true' <<<"${exhibition_session_mode}" \
         || die 'fast prepare requires exhibition_session_mode=true'
     fi
-    writer_token="$(dump_scalar commissioning_token 2>/dev/null || true)"
-    [[ -n ${writer_token} && ${writer_token} == "${TOKEN}" ]] \
-      || die 'fast prepare token does not match the running live writer'
-    unset writer_token
+    if [[ ${STATIC_READINESS_ATTESTED} != true ]]; then
+      writer_token="$(dump_scalar commissioning_token 2>/dev/null || true)"
+      [[ -n ${writer_token} && ${writer_token} == "${TOKEN}" ]] \
+        || die 'fast prepare token does not match the running live writer'
+      unset writer_token
+    fi
     FAST_PREPARE=true
     ;;
   *) die 'R1_EXHIBITION_FAST_PREPARE must be 0 or 1' ;;
@@ -253,26 +290,30 @@ else
     "${SCRIPT_DIR}/r1-sdk-preflight" --no-reader
 fi
 
-if grep -Fqi 'boolean value is: true' <<<"${static_prepare_mode}"; then
+if [[ ${STATIC_READINESS_ATTESTED} == true ]]; then
+  echo 'Using the fresh static graph observation; VR/debug observation is not applicable.'
+elif grep -Fqi 'boolean value is: true' <<<"${static_prepare_mode}"; then
   echo 'Observing the featureless static graph without releasing kill...'
   require_vr_args=()
 else
   echo 'Observing the live VR/control graph without releasing kill...'
   require_vr_args=(--require-vr)
 fi
-set +e
-vr_preflight_output="$(ros2 run r1_teleop_safety r1_teleop_preflight \
-  --interface "${INTERFACE}" \
-  --robot-ip "${CONTROL_IP}" \
-  --observe-seconds 2.0 \
-  "${require_vr_args[@]}" \
-  --locomotion-mode slow-safe 2>&1)"
-vr_preflight_status=$?
-set -e
-printf '%s\n' "${vr_preflight_output}"
-if ((vr_preflight_status != 0 && vr_preflight_status != 2)) \
-  || ! grep -Fq 'No Unitree SDK writer' <<<"${vr_preflight_output}"; then
-  die 'VR/control graph preflight failed'
+if [[ ${STATIC_READINESS_ATTESTED} != true ]]; then
+  set +e
+  vr_preflight_output="$(ros2 run r1_teleop_safety r1_teleop_preflight \
+    --interface "${INTERFACE}" \
+    --robot-ip "${CONTROL_IP}" \
+    --observe-seconds 2.0 \
+    "${require_vr_args[@]}" \
+    --locomotion-mode slow-safe 2>&1)"
+  vr_preflight_status=$?
+  set -e
+  printf '%s\n' "${vr_preflight_output}"
+  if ((vr_preflight_status != 0 && vr_preflight_status != 2)) \
+    || ! grep -Fq 'No Unitree SDK writer' <<<"${vr_preflight_output}"; then
+    die 'VR/control graph preflight failed'
+  fi
 fi
 
 if grep -Fqi 'boolean value is: true' <<<"${head_enabled}"; then
@@ -554,20 +595,35 @@ trap emergency_relock ERR
 trap 'emergency_relock; exit 130' INT TERM
 
 echo 'Releasing the software kill for this acknowledged commissioning step...'
-release="$(timeout 8s ros2 service call /r1/safety/set_kill \
-  std_srvs/srv/SetBool '{data: false}' 2>&1)" || {
-  printf '%s\n' "${release}" >&2
-  false
-}
-printf '%s\n' "${release}"
-grep -Eq 'success[[:space:]]*=[[:space:]]*True|success:[[:space:]]*true' <<<"${release}"
+if [[ ${STATIC_READINESS_ATTESTED} == true ]]; then
+  prepare_confirm_timeout_sec=${R1_EXHIBITION_PREPARE_CONFIRM_TIMEOUT_SEC:-60}
+  [[ ${prepare_confirm_timeout_sec} =~ ^[1-9][0-9]*$ ]] \
+    || die 'R1_EXHIBITION_PREPARE_CONFIRM_TIMEOUT_SEC must be a positive integer'
+  ((10#${prepare_confirm_timeout_sec} <= 120)) \
+    || die 'R1_EXHIBITION_PREPARE_CONFIRM_TIMEOUT_SEC must be at most 120'
+  # The helper repeats every acknowledgement locally, preserves the 0.3 s
+  # KILL propagation interval and waits for the same structured FSM status.
+  # It only removes repeated ROS process/DDS startup from the static path.
+  R1_PREPARE_CLIENT_AUTH=post-traffic-gate \
+    python3 "${SCRIPT_DIR}/r1-robot-prepare-client" \
+      --expected-rearm ready \
+      --timeout-sec "$((10#${prepare_confirm_timeout_sec}))"
+else
+  release="$(timeout 8s ros2 service call /r1/safety/set_kill \
+    std_srvs/srv/SetBool '{data: false}' 2>&1)" || {
+    printf '%s\n' "${release}" >&2
+    false
+  }
+  printf '%s\n' "${release}"
+  grep -Eq 'success[[:space:]]*=[[:space:]]*True|success:[[:space:]]*true' <<<"${release}"
 
-sleep 0.3
-call_trigger /r1/live_writer/reset_kill
-call_trigger /r1/live_writer/prepare
-wait_for_prepare_confirmation
-if [[ ${head_auto_center_required} == true ]]; then
-  wait_for_head_auto_center
+  sleep 0.3
+  call_trigger /r1/live_writer/reset_kill
+  call_trigger /r1/live_writer/prepare
+  wait_for_prepare_confirmation
+  if [[ ${head_auto_center_required} == true ]]; then
+    wait_for_head_auto_center
+  fi
 fi
 trap - ERR INT TERM
 

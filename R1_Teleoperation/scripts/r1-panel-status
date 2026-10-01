@@ -9,15 +9,28 @@ CONTROL_IP="${R1_CONTROL_IP:-192.168.123.161}"
 PC2_IP="${R1_PC2_IP:-${R1_ROBOT_IP:-192.168.123.164}}"
 DOMAIN="${ROS_DOMAIN_ID:-${R1_LIVE_ROS_DOMAIN_ID:-88}}"
 OFFLINE_DOMAIN="${R1_OFFLINE_ROS_DOMAIN_ID:-81}"
+FAST_STATUS="${R1_PANEL_STATUS_FAST:-0}"
 
 # shellcheck source=scripts/r1-network-autodetect
 source "${PROJECT_DIR}/scripts/r1-network-autodetect"
-ROBOT_IP="$(r1_resolve_control_ip "${INTERFACE}" "${CONTROL_IP}" "${PC2_IP}" || true)"
+
+# r1_resolve_control_ip already performs the bounded reachability check.  Keep
+# its exit status instead of pinging the selected address a second time below;
+# the old duplicate check added up to one unnecessary second to every failed
+# main-screen lookup.
+robot_online=false
+if ROBOT_IP="$(
+  r1_resolve_control_ip "${INTERFACE}" "${CONTROL_IP}" "${PC2_IP}"
+)"; then
+  robot_online=true
+else
+  ROBOT_IP="${ROBOT_IP:-${CONTROL_IP}}"
+fi
 
 # A desktop/systemd-launched panel does not inherit the interactive ROS
 # shell.  Source only the local ROS overlay and the matched Fast DDS policy;
 # this script still creates no Unitree SDK client or command publisher.
-if [[ -f /opt/ros/humble/setup.bash ]]; then
+if [[ "${FAST_STATUS}" != 1 && -f /opt/ros/humble/setup.bash ]]; then
   set +u
   # shellcheck disable=SC1091
   source /opt/ros/humble/setup.bash
@@ -81,14 +94,17 @@ try:
         mode = 'stopped'
     print(mode)
     print(str(status).replace('\n', ' ')[:80])
+    print(str(state.get('detail', '')).replace('\n', ' ')[:240])
 except (OSError, ValueError, TypeError, json.JSONDecodeError):
     pass
 PY
 )"
   mode_value="$(sed -n '1p' <<<"${state_fields}")"
   manager_value="$(sed -n '2p' <<<"${state_fields}")"
+  manager_detail="$(sed -n '3p' <<<"${state_fields}")"
   [[ -n "${mode_value}" ]] && emit mode "${mode_value}"
   [[ -n "${manager_value}" ]] && emit exhibition "${manager_value}"
+  [[ -n "${manager_detail}" ]] && emit exhibition_detail "${manager_detail}"
 else
   emit mode stopped
   emit exhibition stopped
@@ -101,14 +117,19 @@ else
 fi
 
 emit robot_ip "${ROBOT_IP}"
-if command -v ping >/dev/null 2>&1 && ping -I "${INTERFACE}" -c 1 -W 1 "${ROBOT_IP}" >/dev/null 2>&1; then
+if [[ "${robot_online}" == true ]]; then
   emit robot OK
 else
   emit robot OFFLINE
 fi
 
 emit pc2_ip "${PC2_IP}"
-if command -v ping >/dev/null 2>&1 && ping -I "${INTERFACE}" -c 1 -W 1 "${PC2_IP}" >/dev/null 2>&1; then
+if [[ "${FAST_STATUS}" == 1 && "${robot_online}" == true ]]; then
+  # PC2 is optional and currently unavailable on this installation. Once the
+  # control endpoint answered, waiting another second for PC2 cannot improve
+  # the main connection result.
+  emit pc2 SKIPPED
+elif command -v ping >/dev/null 2>&1 && ping -I "${INTERFACE}" -c 1 -W 1 "${PC2_IP}" >/dev/null 2>&1; then
   emit pc2 OK
 else
   emit pc2 OFFLINE
@@ -146,6 +167,56 @@ else
   emit video OFFLINE
 fi
 
+if [[ "${FAST_STATUS}" == 1 ]]; then
+  emit ros_domain "${DOMAIN}"
+  emit project "${PROJECT_DIR}"
+  exit 0
+fi
+
+# In USB mode the static/Stand graph deliberately has no VR bridge.  Query the
+# Pico's read-only controller service so the main screen can still distinguish
+# "both controllers are online" from "no controller was found" before RUN.
+# This is only a discovery indicator: the live RUN preflight still requires
+# fresh OpenXR tracking packets, neutral controls and every existing safety
+# interlock before it can enable robot output.
+usb_vr=UNKNOWN
+usb_controllers=UNKNOWN
+if [[ "${R1_VR_TRANSPORT:-lan}" == usb ]] && command -v adb >/dev/null 2>&1; then
+  usb_serial="$(
+    timeout 2s adb devices -l 2>/dev/null \
+      | awk '
+          NR > 1 && $2 == "device" {
+            for (field = 3; field <= NF; field++) {
+              if ($field ~ /^usb:/) {
+                print $1
+                exit
+              }
+            }
+          }
+        '
+  )"
+  if [[ -n "${usb_serial}" ]]; then
+    usb_vr=OK
+    if controller_dump="$(
+      timeout 2s adb -s "${usb_serial}" shell dumpsys pxrcontrollerservice \
+        2>/dev/null
+    )"; then
+      online_count="$(
+        grep -Ec '^[[:space:]]*state:[[:space:]]*online[[:space:]]*$' \
+          <<<"${controller_dump}" || true
+      )"
+      if grep -Fq 'left controller:' <<<"${controller_dump}" \
+          && grep -Fq 'right controller:' <<<"${controller_dump}" \
+          && ((online_count >= 2)); then
+        usb_controllers=OK
+      elif [[ -n "${controller_dump}" ]]; then
+        usb_controllers=OFFLINE
+      fi
+    fi
+  fi
+fi
+
+bridge_tracking_status=false
 if command -v ros2 >/dev/null 2>&1; then
   list_topics() {
     ROS_DOMAIN_ID="$1" timeout 2s ros2 topic list --no-daemon --spin-time 0.5 \
@@ -199,6 +270,7 @@ if command -v ros2 >/dev/null 2>&1; then
   if grep -Fxq '/vr/teleop/status' <<<"${topics}"; then
     vr_status="$(timeout 2s ros2 topic echo --once /vr/teleop/status \
       std_msgs/msg/String --field data --no-daemon 2>/dev/null || true)"
+    [[ -n "${vr_status}" ]] && bridge_tracking_status=true
     tracking_phase="$(sed -nE 's/.*tracking_phase=([^[:space:]]+).*/\1/p' \
       <<<"${vr_status}" | tail -n 1)"
     missing="$(sed -nE 's/.*missing=([^[:space:]]+).*/\1/p' \
@@ -234,7 +306,10 @@ if command -v ros2 >/dev/null 2>&1; then
     elif [[ ${last_action} == emergency_stop_cleared ]]; then
       emit emergency CLEAR
     fi
-  elif grep -Fxq '/vr/teleop/active' <<<"${topics}"; then
+  elif grep -Fxq '/vr/teleop/active' <<<"${topics}" \
+      && grep -Fxq '/vr/head/pose' <<<"${topics}" \
+      && grep -Fxq '/vr/left_controller/pose' <<<"${topics}" \
+      && grep -Fxq '/vr/right_controller/pose' <<<"${topics}"; then
     # Backward-compatible bridge: topic presence still identifies the HMD
     # path, but it cannot provide per-controller recovery information.
     emit vr OK
@@ -275,13 +350,25 @@ else
   emit sequential_phase unknown
 fi
 
+# A running bridge has the stronger packet-level truth and must never be
+# masked by Android's weaker paired/online signal.  The ADB fallback is used
+# only while the static graph intentionally has no /vr/teleop/status publisher.
+if [[ "${R1_VR_TRANSPORT:-lan}" == usb \
+    && "${bridge_tracking_status}" != true ]]; then
+  [[ "${usb_vr}" == OK ]] && emit vr OK
+  [[ "${usb_controllers}" != UNKNOWN ]] \
+    && emit controllers "${usb_controllers}"
+fi
+
 # The process manager can remain alive after the writer has deliberately
 # failed closed. Do not keep presenting its older "ready" state as an active
 # control session once the independent KILL topic says that output is blocked.
-if [[ ${mode_value:-stopped} == control \
-    && ${manager_value:-stopped} == ready \
-    && ${kill_latched} == true ]]; then
+if [[ ${kill_latched} == true \
+    && ( ( ${mode_value:-stopped} == control \
+           && ${manager_value:-stopped} == ready ) \
+         || ${manager_value:-stopped} == locked ) ]]; then
   emit exhibition degraded
+  emit exhibition_detail "writer safety latched; link recovered but explicit RUN is required"
 fi
 
 emit project "${PROJECT_DIR}"

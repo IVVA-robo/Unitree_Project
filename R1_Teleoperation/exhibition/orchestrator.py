@@ -242,12 +242,18 @@ class ExhibitionSettings:
             "prepare": [] if mock else [*make, "robot-prepare"],
             "stop": [] if mock else [*make, "robot-stop"],
             "kill": [] if mock else [*make, "robot-kill"],
-            "calibrate": [
+            # Startup may reuse the reviewed exhibition arm profile and only
+            # capture a fresh HMD reference. The explicit operator action is
+            # different: it must always recalibrate both arms and the head.
+            "startup_calibrate": [
                 str(project_dir / "scripts" / (
                     "r1-head-calibrate" if (
                         environment.get("R1_RESPONSE_PROFILE") == "exhibition"
                         and (project_dir / "config/operator_arm_range.exhibition.json").is_file()
                     ) else "r1-exhibition-calibrate"))
+            ],
+            "calibrate": [
+                str(project_dir / "scripts" / "r1-exhibition-calibrate")
             ],
             # The installed offline service owns the same bridge/video ports
             # (UDP 9090 and TCP 8080) as an exhibition graph.  Manage only
@@ -255,8 +261,14 @@ class ExhibitionSettings:
             "offline_status": (
                 [] if mock else [offline_handoff, "status"]
             ),
+            "offline_pov_status": (
+                [] if mock else [offline_handoff, "pov-status"]
+            ),
             "offline_stop": [] if mock else [offline_handoff, "stop"],
             "offline_start": [] if mock else [offline_handoff, "start"],
+            "offline_restart": (
+                [] if mock else [offline_handoff, "restart"]
+            ),
             "arm_session": (
                 []
                 if mock or session_mode != "session_arm"
@@ -281,6 +293,13 @@ class ExhibitionSettings:
                 [] if mock or session_mode != "session_arm"
                 else [session_gate, "resume_ready"]
             ),
+            # Read-only reconnect health: this subscribes to the existing
+            # session/writer safety topics and never calls a service.  In
+            # particular it cannot clear KILL or resume a paused session.
+            "health_session": (
+                [] if mock or session_mode != "session_arm"
+                else [session_gate, "health"]
+            ),
             "clear_emergency": (
                 []
                 if mock or session_mode != "session_arm"
@@ -290,6 +309,16 @@ class ExhibitionSettings:
         commands: Dict[str, Sequence[str]] = {}
         for key, default in defaults.items():
             variable = f"R1_EXHIBITION_{key.upper()}_COMMAND"
+            if (
+                key == "startup_calibrate"
+                and not environment.get(variable, "").strip()
+                and environment.get(
+                    "R1_EXHIBITION_CALIBRATE_COMMAND", ""
+                ).strip()
+            ):
+                # Preserve existing test/deployment overrides while giving
+                # new installations a distinct startup-vs-explicit action.
+                variable = "R1_EXHIBITION_CALIBRATE_COMMAND"
             if not default and not environment.get(variable, "").strip():
                 commands[key] = []
             else:
@@ -344,7 +373,7 @@ def build_plan(mode: str, settings: ExhibitionSettings) -> dict:
     else:
         steps.extend(["control", "ready_control"])
         if settings.calibrate_on_start:
-            steps.append("calibrate")
+            steps.append("startup_calibrate")
         steps.extend(["arm_session", "prepare"])
     return {
         "mode": mode,
@@ -369,8 +398,9 @@ def build_plan(mode: str, settings: ExhibitionSettings) -> dict:
         "tracking_grace_sec": settings.tracking_grace_sec,
         "recovery_blend_sec": settings.recovery_blend_sec,
         "live_writer_restart": False,
-        "offline_service_policy": "stop-restore",
-        "reuse_offline_bridge": False,
+        "offline_service_policy": "reuse-static-stop-restore-control",
+        "reuse_offline_bridge": mode == "static",
+        "reuse_offline_pov_when_healthy": mode == "static",
         "pov_restart_limit": settings.pov_restart_limit,
     }
 
@@ -392,6 +422,7 @@ class ExhibitionManager:
         self.lock_requested = False
         self.run_requested = False
         self.pov_restarts = 0
+        self.reconnect_count = 0
         self._lock_file = None
         self._log_file = None
         self._status = "starting"
@@ -400,6 +431,7 @@ class ExhibitionManager:
         self.offline_service_was_active = False
         self.offline_service_stopped = False
         self.offline_service_restored = False
+        self.offline_service_reused = False
         self._safe_stop_completed = False
         self._safe_stop_confirmed = False
 
@@ -407,6 +439,14 @@ class ExhibitionManager:
     def state_path(self) -> Path:
         """Return the private, non-secret runtime status path."""
         return self.settings.runtime_dir / "state.json"
+
+    @property
+    def readiness_attestation_path(self) -> Path:
+        """Return this session's one-shot static graph proof path."""
+        return (
+            self.settings.runtime_dir
+            / f"static-readiness-{self.session_id}.json"
+        )
 
     def _prepare_paths(self) -> None:
         self.settings.runtime_dir.mkdir(
@@ -456,6 +496,7 @@ class ExhibitionManager:
             "detail": detail,
             "log": str(self._log_path) if self._log_path else "",
             "pov_restarts": self.pov_restarts,
+            "reconnect_count": self.reconnect_count,
             # This becomes true only after the reviewed STOP path or its KILL
             # fallback returns success.  Process disappearance by itself is
             # never evidence that the robot accepted either request.
@@ -464,6 +505,17 @@ class ExhibitionManager:
                 "was_active": self.offline_service_was_active,
                 "stopped_for_exhibition": self.offline_service_stopped,
                 "restored": self.offline_service_restored,
+                "reused_for_static": self.offline_service_reused,
+                "pov_owner": (
+                    "offline_service"
+                    if self.offline_service_reused
+                    else (
+                        "manager"
+                        if "pov" in self.children
+                        and self.children["pov"].poll() is None
+                        else "none"
+                    )
+                ),
             },
             "children": {
                 name: process.pid
@@ -478,6 +530,20 @@ class ExhibitionManager:
             encoding="utf-8",
         )
         os.replace(temporary, self.state_path)
+        # QProcess receives this line immediately, so the panel does not have
+        # to wait for the next ROS health snapshot to show the mode. Keep the
+        # event deliberately small and free of environment values.
+        event = {
+            "mode": self.mode,
+            "status": status,
+            "detail": detail,
+            "reconnect_count": self.reconnect_count,
+        }
+        print(
+            "EXHIBITION_STATE "
+            + json.dumps(event, ensure_ascii=False, separators=(",", ":")),
+            flush=True,
+        )
 
     def _command_environment(self, name: str) -> Dict[str, str]:
         """Build mode-scoped child env without weakening another mode."""
@@ -490,6 +556,12 @@ class ExhibitionManager:
             # raced a healthy 45-60-second hardware preflight).
             environment["R1_EXHIBITION_READY_TIMEOUT_SEC"] = str(
                 self.settings.ready_timeout_sec
+            )
+        if self.mode == "static" and name in {"ready_static", "prepare"}:
+            environment["R1_EXHIBITION_STATIC_READINESS"] = "1"
+            environment["R1_EXHIBITION_SESSION_ID"] = self.session_id
+            environment["R1_EXHIBITION_READINESS_ATTESTATION"] = str(
+                self.readiness_attestation_path
             )
         if self.mode == "static" and name in {
             "static_writer",
@@ -512,6 +584,7 @@ class ExhibitionManager:
             "pause_session",
             "resume_session",
             "warm_resume",
+            "health_session",
             "disarm_session",
             "clear_emergency",
         }:
@@ -532,7 +605,14 @@ class ExhibitionManager:
 
     def _run_checked(self, name: str, timeout: float) -> bool:
         self.last_action_exit_code = 2
-        cleanup = name in {"stop", "kill", "disarm_session", "offline_start", "offline_stop"}
+        cleanup = name in {
+            "stop",
+            "kill",
+            "disarm_session",
+            "offline_start",
+            "offline_stop",
+            "offline_restart",
+        }
         if self.stop_requested and not cleanup:
             self._log(f"{name}: cancelled because session stop was requested")
             return False
@@ -596,12 +676,14 @@ class ExhibitionManager:
         self.children[name] = process
         return True
 
-    def _probe_offline_service(self) -> Optional[bool]:
+    def _probe_offline_service(
+        self, command_name: str = "offline_status"
+    ) -> Optional[bool]:
         """Return True/False for active/inactive, or None on probe failure."""
-        argv = list(self.settings.commands["offline_status"])
+        argv = list(self.settings.commands[command_name])
         if not argv:
             return False
-        self._log(f"offline_status: starting {shlex.join(argv)}")
+        self._log(f"{command_name}: starting {shlex.join(argv)}")
         try:
             completed = subprocess.run(
                 argv,
@@ -614,24 +696,26 @@ class ExhibitionManager:
                 env=os.environ.copy(),
             )
         except (OSError, subprocess.TimeoutExpired) as exception:
-            self._log(f"offline_status: could not complete: {exception}")
+            self._log(
+                f"{command_name}: could not complete: {exception}"
+            )
             return None
         if completed.stdout:
             output = completed.stdout.rstrip()
             if output:
-                self._log(f"offline_status: {output}")
+                self._log(f"{command_name}: {output}")
         if completed.returncode == 0:
             return True
         if completed.returncode == 3:
             return False
         self._log(
-            "offline_status: unexpected exit "
+            f"{command_name}: unexpected exit "
             f"{completed.returncode}; refusing to start a competing graph"
         )
         return None
 
     def _take_offline_service_handoff(self) -> bool:
-        """Stop an active compatible offline unit before binding its ports."""
+        """Reuse static POV or stop the exact unit before a competing graph."""
         active = self._probe_offline_service()
         if active is None:
             return False
@@ -639,6 +723,23 @@ class ExhibitionManager:
         if not active:
             self._log("offline handoff: service was not active")
             return True
+        if self.mode == "static":
+            pov_active = self._probe_offline_service(
+                "offline_pov_status"
+            )
+            if pov_active is None:
+                return False
+            if pov_active:
+                self.offline_service_reused = True
+                self._log(
+                    "offline handoff: reusing compatible service and POV; "
+                    "static writer has no VR bridge or video listener"
+                )
+                return True
+            self._log(
+                "offline handoff: service is active but POV endpoint is not; "
+                "falling back to the manager-owned POV"
+            )
         self._write_state(
             "handoff", "stopping the compatible offline LAN service"
         )
@@ -657,6 +758,8 @@ class ExhibitionManager:
 
     def _restore_offline_service(self) -> bool:
         """Restore the prior unit after every exhibition child has stopped."""
+        if self.offline_service_reused:
+            return True
         if not (
             self.offline_service_was_active
             and self.offline_service_stopped
@@ -773,7 +876,7 @@ class ExhibitionManager:
         # the current HMD/controller neutral and sends no command to the robot.
         # Only after that snapshot succeeds may session-arm make VR active.
         if self.settings.calibrate_on_start and not self._run_checked(
-            "calibrate", 20.0
+            "startup_calibrate", 20.0
         ):
             return False
         # Session arm replaces the initial physical Deadman press, but it does
@@ -801,7 +904,11 @@ class ExhibitionManager:
             self._write_state("blocked", "preflight failed")
             return False
 
-        if not self._start_child("pov"):
+        if self.offline_service_reused:
+            self._log(
+                "pov: keeping the healthy systemd-managed offline POV"
+            )
+        elif not self._start_child("pov"):
             self._write_state("blocked", "POV process could not start")
             return False
         if self.mode == "static":
@@ -812,7 +919,9 @@ class ExhibitionManager:
                 self._safe_stop()
                 return False
             detail = (
-                "static stand prepared; POV active"
+                "static stand prepared; existing offline POV reused"
+                if self.offline_service_reused
+                else "static stand prepared; POV active"
                 if self.settings.commands["static_writer"]
                 else "mock static: POV active; no physical writer"
             )
@@ -867,9 +976,8 @@ class ExhibitionManager:
             )
         return True
 
-    def _reconnect(self, *, restart_pov: bool = True) -> bool:
-        self.reconnect_requested = False
-        self._log("operator requested reconnect")
+    def _rebuild_writer(self, *, restart_pov: bool = True) -> bool:
+        """Retire and rebuild a writer after an explicit RUN recovery only."""
         writer_name = (
             "static_writer" if self.mode == "static" else "control"
         )
@@ -919,6 +1027,118 @@ class ExhibitionManager:
         self._write_state("ready", detail)
         return True
 
+    def _complete_reconnect(
+        self, status: str, detail: str, *, success: bool
+    ) -> bool:
+        """Publish one unambiguous acknowledgement for the reconnect caller."""
+        self.reconnect_count += 1
+        self._write_state(status, detail)
+        return success
+
+    def _reconnect(self) -> bool:
+        """Repair only failed auxiliaries; never cycle a healthy writer."""
+        self.reconnect_requested = False
+        self._log("operator requested selective reconnect")
+        previous_status = self._status
+        writer_name = (
+            "static_writer" if self.mode == "static" else "control"
+        )
+        writer = self.children.get(writer_name)
+        if self.settings.commands[writer_name] and (
+            writer is None or writer.poll() is not None
+        ):
+            # A disappeared physical writer is a safety fault. Reconnect is
+            # not an alternative spelling for RUN and must not recreate it.
+            return self._complete_reconnect(
+                "blocked",
+                f"{writer_name} is not running; use explicit RUN after checking safety",
+                success=False,
+            )
+
+        pov_detail = ""
+        if self.offline_service_reused:
+            pov_active = self._probe_offline_service(
+                "offline_pov_status"
+            )
+            if pov_active is None:
+                return self._complete_reconnect(
+                    "degraded",
+                    "offline POV health could not be verified; writer was not restarted",
+                    success=True,
+                )
+            if not pov_active:
+                self.pov_restarts += 1
+                self._write_state(
+                    "reconnecting",
+                    "restarting only the systemd-managed offline POV",
+                )
+                if not self._run_checked("offline_restart", 20.0):
+                    return self._complete_reconnect(
+                        "degraded",
+                        "offline POV restart failed; writer was not restarted",
+                        success=True,
+                    )
+                if self._probe_offline_service(
+                    "offline_pov_status"
+                ) is not True:
+                    return self._complete_reconnect(
+                        "degraded",
+                        "offline POV did not become ready; writer was not restarted",
+                        success=True,
+                    )
+                pov_detail = (
+                    "systemd-managed POV restored; static writer stayed warm"
+                )
+        else:
+            pov = self.children.get("pov")
+            if self.settings.commands["pov"] and (
+                pov is None or pov.poll() is not None
+            ):
+                if not self._restart_pov(mark_ready=True):
+                    return self._complete_reconnect(
+                        "degraded",
+                        "POV reconnect failed; writer was not restarted",
+                        # Keep a healthy physical writer/session alive. The
+                        # acknowledgement still reports degraded to the caller.
+                        success=True,
+                    )
+                pov_detail = (
+                    "POV restored; existing writer and VR/ROS graph stayed warm"
+                )
+
+        if self.settings.commands["health_session"] and not self._run_checked(
+            "health_session", 8.0
+        ):
+            if self.last_action_exit_code == 3:
+                detail = (
+                    "writer safety latched after link/feedback loss; "
+                    "reconnect kept services warm but explicit RUN is required"
+                )
+            else:
+                detail = (
+                    "fresh writer/session health unavailable; reconnect did not "
+                    "restart or resume control"
+                )
+            if pov_detail:
+                detail += "; POV restored"
+            # Keep the owner alive so a later explicit RUN can use the
+            # reviewed recovery path.  The degraded acknowledgement makes the
+            # reconnect helper return an error without silently resuming.
+            return self._complete_reconnect(
+                "degraded", detail, success=True
+            )
+
+        if pov_detail:
+            return self._complete_reconnect(
+                previous_status, pov_detail, success=True
+            )
+
+        return self._complete_reconnect(
+            previous_status,
+            "all managed components already healthy; nothing restarted",
+            success=True,
+        )
+
     def _resume_control(self) -> None:
         """Handle explicit RUN with the original owner's environment/token."""
         self._write_state("resuming", "checking the existing control graph")
@@ -938,7 +1158,7 @@ class ExhibitionManager:
         # reviewed STOP/KILL, then perform fresh preflight/readiness/arm/prepare.
         # Only this explicit RUN may rebuild; healthy RUN/LOCK stays warm.
         # The USB owner/relay and existing POV need not restart.
-        self._reconnect(restart_pov=False)
+        self._rebuild_writer(restart_pov=False)
 
     def run(self) -> int:
         """Run the selected exhibition mode until STOP or a critical fault."""
@@ -1053,6 +1273,9 @@ class ExhibitionManager:
                     exit_code = max(exit_code, 1)
             for name in list(self.children):
                 self._terminate_child(name)
+            # A valid proof is consumed by prepare.  Remove an unused one when
+            # readiness succeeded but startup was cancelled or failed.
+            self.readiness_attestation_path.unlink(missing_ok=True)
             restored = self._restore_offline_service()
             detail = "session processes stopped"
             if not stop_confirmed:
@@ -1343,10 +1566,38 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        os.kill(pid, signal.SIGHUP)
-        mode = state.get("mode", "unknown")
-        print(f"Reconnect requested for {mode} session.")
-        return 0
+        session_id = state.get("session_id")
+        previous_count = int(state.get("reconnect_count", 0) or 0)
+        previous_update = state.get("updated_at")
+        try:
+            os.kill(pid, signal.SIGHUP)
+        except (ProcessLookupError, PermissionError) as exception:
+            print(
+                f"[BLOCKED] reconnect signal failed: {exception}",
+                file=sys.stderr,
+            )
+            return 2
+        deadline = time.monotonic() + settings.restart_max_sec + 8.0
+        while time.monotonic() < deadline:
+            current = _read_state(settings)
+            if current.get("session_id") != session_id:
+                break
+            current_count = int(current.get("reconnect_count", 0) or 0)
+            if current_count > previous_count:
+                detail = str(current.get("detail", "reconnect completed"))
+                if current.get("status") in {"blocked", "degraded", "stopped"}:
+                    print(f"[BLOCKED] {detail}", file=sys.stderr)
+                    return 2
+                print(f"[OK] {detail}")
+                return 0
+            if (
+                current.get("updated_at") != previous_update
+                and current.get("status") == "stopped"
+            ):
+                break
+            time.sleep(0.05)
+        print("[BLOCKED] reconnect acknowledgement timed out", file=sys.stderr)
+        return 2
     if arguments.action == "rearm":
         if pid is None or state.get("mode") != "control":
             print(

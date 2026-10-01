@@ -60,6 +60,17 @@ wait_for_ports_free() {
   die "offline service stopped but its ports remain occupied:${busy}"
 }
 
+wait_for_video_port() {
+  local deadline=$((SECONDS + 10#${TIMEOUT_SEC}))
+  while ((SECONDS <= deadline)); do
+    if port_in_use tcp "${VIDEO_PORT}"; then
+      return 0
+    fi
+    sleep 0.10
+  done
+  die "${UNIT} is active but TCP ${VIDEO_PORT} did not become available"
+}
+
 service_state() {
   local state status
   set +e
@@ -121,10 +132,36 @@ wait_for_state() {
 
 ACTION=${1:-}
 [[ $# -eq 1 ]] \
-  || die 'usage: r1-exhibition-offline-handoff status|stop|start'
+  || die 'usage: r1-exhibition-offline-handoff status|pov-status|stop|start|restart'
 case ${ACTION} in
   status)
-    service_state
+    set +e
+    state=$(service_state)
+    status=$?
+    set -e
+    if ((status == 0)); then
+      verify_compatible_unit
+    fi
+    printf '%s\n' "${state}"
+    exit "${status}"
+    ;;
+  pov-status)
+    set +e
+    state=$(service_state)
+    status=$?
+    set -e
+    if ((status == 3)); then
+      printf 'inactive\n'
+      exit 3
+    fi
+    ((status == 0)) || die "could not verify ${UNIT} for POV reuse"
+    verify_compatible_unit
+    if port_in_use tcp "${VIDEO_PORT}"; then
+      printf 'active\n'
+      exit 0
+    fi
+    printf 'inactive\n'
+    exit 3
     ;;
   stop)
     set +e
@@ -152,9 +189,24 @@ case ${ACTION} in
     systemctl --user start "${UNIT}" \
       || die "could not restore ${UNIT}"
     wait_for_state active
+    wait_for_video_port
     printf '%s restored after exhibition STOP\n' "${UNIT}"
     ;;
+  restart)
+    set +e
+    service_state >/dev/null
+    status=$?
+    set -e
+    ((status == 0 || status == 3)) \
+      || die "could not verify ${UNIT} before restart"
+    verify_compatible_unit
+    systemctl --user restart "${UNIT}" \
+      || die "could not restart ${UNIT}"
+    wait_for_state active
+    wait_for_video_port
+    printf '%s restarted for static POV recovery\n' "${UNIT}"
+    ;;
   *)
-    die 'usage: r1-exhibition-offline-handoff status|stop|start'
+    die 'usage: r1-exhibition-offline-handoff status|pov-status|stop|start|restart'
     ;;
 esac

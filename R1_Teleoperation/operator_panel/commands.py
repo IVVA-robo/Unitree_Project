@@ -90,8 +90,12 @@ def command_catalog() -> List[CommandSpec]:
         CommandSpec(
             "exhibition_calibrate",
             "Перекалибровать руки",
-            "exhibition-calibrate",
+            "exhibition-calibrate-arms",
             "exhibition_service",
+            note=(
+                "Штатная последовательность manager: пауза, нейтраль головы и "
+                "рук, затем подтверждённое возобновление."
+            ),
         ),
         CommandSpec(
             "exhibition_stop",
