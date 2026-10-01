@@ -33,6 +33,7 @@ def _base_environment(tmp_path):
             "R1_EXHIBITION_STOP_WAIT_SEC": "3",
             "R1_EXHIBITION_RESTART_INITIAL_SEC": "0.05",
             "R1_EXHIBITION_RESTART_MAX_SEC": "0.10",
+            "R1_EXHIBITION_OFFLINE_POV_RECOVERY_GRACE_SEC": "0.01",
         }
     )
     return environment
@@ -295,6 +296,7 @@ def test_plans_use_static_writer_and_control_slow_safe(tmp_path):
     environment = _base_environment(tmp_path)
     environment["R1_EXHIBITION_MOCK"] = "0"
     environment["R1_EXHIBITION_SESSION_MODE"] = "session_arm"
+    environment.pop("R1_EXHIBITION_OFFLINE_POV_RECOVERY_GRACE_SEC")
     settings = ExhibitionSettings.from_environment(environment)
 
     static = build_plan("static", settings)
@@ -310,6 +312,7 @@ def test_plans_use_static_writer_and_control_slow_safe(tmp_path):
     assert static["physical_profile"] == "static-stand"
     assert static["reuse_offline_bridge"] is True
     assert static["reuse_offline_pov_when_healthy"] is True
+    assert static["offline_pov_recovery_grace_sec"] == 8.0
     assert static["offline_service_policy"] == (
         "reuse-static-stop-restore-control"
     )
@@ -400,6 +403,8 @@ def test_connection_helper_recovers_video_without_starting_robot_control():
         ("R1_EXHIBITION_RECOVERY_BLEND_SEC", "0.09"),
         ("R1_EXHIBITION_RECOVERY_BLEND_SEC", "2.1"),
         ("R1_EXHIBITION_POV_RESTART_LIMIT", "-1"),
+        ("R1_EXHIBITION_OFFLINE_POV_RECOVERY_GRACE_SEC", "0"),
+        ("R1_EXHIBITION_OFFLINE_POV_RECOVERY_GRACE_SEC", "15.1"),
     ],
 )
 def test_invalid_exhibition_settings_fail_closed(tmp_path, name, value):
@@ -596,6 +601,54 @@ def test_static_reuses_healthy_offline_pov_and_reconnect_repairs_only_it(
     assert offline_state.read_text(encoding="utf-8") == "active"
     sequence = events.read_text(encoding="utf-8").splitlines()
     assert "offline-start" not in sequence
+
+
+def test_static_reconnect_waits_for_process_local_offline_pov_respawn(
+    tmp_path, monkeypatch
+):
+    manager = ExhibitionManager(
+        ExhibitionSettings.from_environment(_base_environment(tmp_path)),
+        "static",
+    )
+    manager._status = "ready"
+    manager.offline_service_reused = True
+    manager.children["static_writer"] = type(
+        "AliveProcess", (), {"poll": lambda self: None}
+    )()
+    states = []
+    probes = []
+
+    def probe(name="offline_status"):
+        probes.append(name)
+        return False
+
+    monkeypatch.setattr(manager, "_probe_offline_service", probe)
+    monkeypatch.setattr(manager, "_wait_for_offline_pov_recovery", lambda: True)
+    monkeypatch.setattr(
+        manager,
+        "_run_checked",
+        lambda name, _timeout: pytest.fail(
+            f"healthy parent service must not restart: {name}"
+        ),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_write_state",
+        lambda status, detail: states.append((status, detail)),
+    )
+    monkeypatch.setattr(manager, "_log", lambda _message: None)
+
+    assert manager._reconnect() is True
+    assert probes == ["offline_pov_status"]
+    assert manager.pov_restarts == 1
+    assert manager.reconnect_count == 1
+    assert states == [
+        ("reconnecting", "waiting for process-local offline POV recovery"),
+        (
+            "ready",
+            "systemd-managed POV auto-recovered; writer and VR bridge stayed warm",
+        ),
+    ]
 
 
 def test_offline_handoff_probe_failure_blocks_before_children(tmp_path):

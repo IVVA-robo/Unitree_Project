@@ -23,7 +23,10 @@ HMAC-аттестацией, а финальная последовательн�
 `21 → 17 → 14 → 10,460 s`; последний сеанс подтвердил стабильный FSM 4.
 Healthy «Переподключить всё» занял `0,305 s` без смены PID управляющего
 manager, writer, offline-службы, POV и VR bridge. Полный программный прогон
-в отдельном loopback-only network namespace: `372 passed in 51.38s`.
+в отдельном loopback-only network namespace: `375 passed in 52.17s`.
+Дополнительно Robot POV получил process-local respawn: живой crash-test
+восстановил поток за `5,716 s`; изменился только PID POV, а offline-служба,
+ROS launch, VR bridge, manager и writer сохранились (`NRestarts=0`).
 Подробности и таблица замеров находятся в
 [R1_Teleoperation/docs/exhibition_panel_optimization_20261001.md](R1_Teleoperation/docs/exhibition_panel_optimization_20261001.md).
 
@@ -36,6 +39,12 @@ manager, writer, offline-службы, POV и VR bridge. Полный прогр
   `d94ab4c5c9a6dc02957fae729513efdae44bf8f9820eef031ccd2e2af1ed1426`.
 
 PC2 этим обновлением не охвачен: включить его по-прежнему не удаётся.
+
+Дополнительные резервные копии перед process-local POV recovery находятся вне
+рабочего дерева:
+
+- `/home/unitree/r1-pov-respawn-before-20261001-DLXXci/`;
+- `/home/unitree/r1-pov-manager-grace-before-20261001-2YpNUj/`.
 
 ## Охват
 

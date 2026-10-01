@@ -35,6 +35,12 @@ SHA256 b0297d18d52f3d4b6ca8c76e4c561e55585cfa5da47395bbee51d2482b78e5ff
 
 /home/unitree/r1-static-offline-reuse-before-20261001-kNzucI/source-before-offline-reuse.tar.gz
 SHA256 3112af2324ec024cf45d02f32cfcb1b12b98ec57097cc5ddc2ca0c5417c47055
+
+/home/unitree/r1-pov-respawn-before-20261001-DLXXci/source-before-pov-respawn.tar.gz
+SHA256 9ef0f6efe35f98e6050fe9aef564705123d4f38639ff3a82562a0145a41b8ffe
+
+/home/unitree/r1-pov-manager-grace-before-20261001-2YpNUj/source-before-manager-grace.tar.gz
+SHA256 87dc88f19f7c03848745faf25cea4f9b83546ffec047c19387a0e3d158b8bc80
 ```
 
 ## 1. Изменённые файлы
@@ -48,7 +54,8 @@ SHA256 3112af2324ec024cf45d02f32cfcb1b12b98ec57097cc5ddc2ca0c5417c47055
   калибровки без кнопки на панели;
 - `exhibition/orchestrator.py` — структурированные подтверждения состояния,
   выборочный reconnect, разделение startup/явной калибровки и одноразовая
-  session-bound аттестация static readiness;
+  session-bound аттестация static readiness; reconnect ждёт process-local POV
+  respawn перед полным service fallback;
 - `exhibition/readiness.py`, `exhibition/readiness_attestation.py` — единый
   typed graph/parameter snapshot и приватная HMAC-подписанная передача его
   результата в static prepare без сохранения commissioning token;
@@ -69,7 +76,10 @@ SHA256 3112af2324ec024cf45d02f32cfcb1b12b98ec57097cc5ddc2ca0c5417c47055
   read-only health-проверка существующего сеанса без service call, снятия KILL
   или возобновления движения;
 - `scripts/r1-sdk-preflight` — корректный поиск `ros2` после загрузки ROS
-  environment при запуске панели после перезагрузки ноутбука.
+  environment при запуске панели после перезагрузки ноутбука;
+- `ros2_ws/src/r1_robot_pov/launch/robot_pov.launch.py` — автоматический
+  перезапуск только завершившегося video-only процесса с задержкой 2 секунды;
+  исправные VR bridge и родительский launch сохраняются.
 
 Документация:
 
@@ -85,7 +95,8 @@ SHA256 3112af2324ec024cf45d02f32cfcb1b12b98ec57097cc5ddc2ca0c5417c47055
 - `tests/test_operator_panel_service.py`;
 - `tests/test_exhibition_orchestrator.py`;
 - `tests/test_sdk_preflight_attestation.py`;
-- `tests/test_zero_torque.py`.
+- `tests/test_zero_torque.py`;
+- `ros2_ws/src/r1_robot_pov/test/test_launch_recovery.py`.
 
 ## 2. Найденные и исправленные задержки
 
@@ -137,6 +148,9 @@ SHA256 3112af2324ec024cf45d02f32cfcb1b12b98ec57097cc5ddc2ca0c5417c47055
 - Команда больше не запускает СТОЙКУ и не меняет режим робота.
 - Исправный writer, VR/ROS graph и POV не перезапускаются.
 - При падении только POV перезапускается только POV.
+- ROS launch автоматически поднимает POV через 2 секунды. Если reconnect нажат
+  в этот момент, manager ждёт process-local восстановление до 8 секунд и лишь
+  затем перезапускает всю offline-службу как fallback.
 - Исчезнувший writer не создаётся автоматически: после проверки условий нужен
   явный RUN.
 - CLI ждёт новое подтверждение конкретного reconnect, а не принимает старый
@@ -189,7 +203,7 @@ make exhibition-calibrate-arms
 | RUN, холодный | недавние полные физические старты примерно `38–75 s` (отдельные старые журналы дольше) | `0,303 s` на полностью поддельных процессах | `39,27 s`; руки, голова и ноги подтверждены оператором |
 | СТОЙКА, холодная | недавние успешные физические старты `22–79 s`; сопоставимый цикл до ускорения — около `21 s`, prepare `14,779 s` | `0,253 s` mock; повторное нажатие в ready static — `0,0002 s`; reuse offline POV проверен без второго процесса | После HMAC: около `17 s`; после единого клиента: около `14 s`; после reuse offline POV: `10,460 s` до стабильного FSM 4 (`preflight=0,065 s`, `readiness=5,261 s`, `prepare=4,455 s`) |
 | ZERO TORQUE | единого click-to-result замера не было; preview мог блокировать UI до `1,5 s` | после подтверждения оператора dispatch: медиана `0,0104 ms`, p95 `0,0116 ms` | Нужна отдельная проверка на надёжно поддержанном роботе |
-| Переподключить всё | мог выполняться полный STOP/preflight/rebuild, то есть десятки секунд | исправный manager: `0,209 s` mock; без manager локальный status ack: медиана `0,0098 ms` | В новой static-сессии: `0,305 s`; manager, writer, offline-служба, POV и bridge сохранили PID, `pov_restarts=0` |
+| Переподключить всё | мог выполняться полный STOP/preflight/rebuild, то есть десятки секунд | исправный manager: `0,209 s` mock; без manager локальный status ack: медиана `0,0098 ms` | В новой static-сессии: `0,305 s`; после живого POV crash поток auto-recovered за `5,716 s`, последующий reconnect ничего не перезапустил |
 | Открыть Robot POV | запускал auto-connect и полный `Проверить всё` | существующий поток: медиана `0,0098 ms`, p95 `0,0115 ms` | окно открылось, свежий кадр и единственный сервер `:8080`; точный click timestamp не сохранился |
 | Перекалибровать руки | была отдельная кнопка | кнопки нет | Будущий commissioning вне выставочной панели |
 
@@ -215,6 +229,11 @@ Mock-время не включает движение механики, DDS dis
 - Финальный полный набор после этого изменения с загруженным ROS 2 и
   включёнными isolated integration-тестами в том же loopback-only namespace:
   `372 passed in 51.38s`.
+- После process-local POV recovery: Robot POV/launch `75 passed`; manager
+  `62 passed`; итоговый полный loopback-only набор в обязательном domain 231 —
+  `375 passed in 52.17s`.
+- Process-level mock подтвердил crash/respawn: PID POV изменился, PID
+  родительского ROS launch сохранился, новый `/readyz` стал доступен.
 - Быстрый status-path с поддельными `ping/curl/ros2`: control endpoint вызван
   ровно один раз, PC2 пропущен после успеха, `ros2` не вызван.
 - Process-level mock без сети:
@@ -261,6 +280,15 @@ Healthy «Переподключить всё» в этом же сеансе з
 `reconnect_count=1`, `pov_restarts=0`; PID manager, writer, offline-службы,
 POV и VR bridge не изменились.
 
+После перезапуска робота повторная СТОЙКА подтвердила FSM 4 примерно за
+`13,3 s`: preflight `0,077 s`, readiness `5,691 s`, prepare `7,442 s`.
+Затем offline-служба один раз перезапущена для загрузки нового launch-файла;
+static manager и writer при этом сохранились. Принудительно завершён только
+живой POV PID `1062105`; новый PID `1062956` стал ready за `5,716 s`.
+Offline service, родительский ROS launch, VR bridge, static manager и writer
+сохранили PID, `NRestarts=0`. Последующее нажатие **Переподключить всё**
+вернуло `all managed components already healthy; nothing restarted`.
+
 Ethernet был физически отключён на `10,397 s`. LowState стал недоступен, writer
 защёлкнул fail-closed через `1,977 s`: locomotion обнулена, ArmSdk отпущен,
 `KILL=true`. После подключения carrier и ping восстановились одновременно,
@@ -271,9 +299,7 @@ Ethernet был физически отключён на `10,397 s`. LowState с
 Остались отдельные проверки:
 
 1. **ZERO TORQUE** — только последним тестом на опоре/страховке.
-2. Физическое падение только POV-процесса — software-макет пройден, намеренно
-   завершать живой видеосервер во время текущего сеанса не стали.
-3. Полный cold-start после перезагрузки ноутбука с новой версией панели.
+2. Полный cold-start после перезагрузки ноутбука с новой версией панели.
 
 ## 6. Действия оператора для будущей физической проверки
 
@@ -309,8 +335,8 @@ Ethernet был физически отключён на `10,397 s`. LowState с
 
 ## 8. Оставшиеся ограничения
 
-- ZERO TORQUE, принудительный POV-only crash и полный cold-start после
-  перезагрузки ноутбука ещё не прошли физическую приёмку.
+- ZERO TORQUE и полный cold-start после перезагрузки ноутбука ещё не прошли
+  физическую приёмку. Принудительный POV-only crash уже успешно проверен.
 - Сокращённый путь СТОЙКИ физически проверен (`~21 → ~17 → ~14 → 10,460 s`).
   Обязательные preflight, KILL, writer-count,
   LowState/motor-health, traffic gate и FSM-подтверждения не удалялись.
@@ -319,9 +345,9 @@ Ethernet был физически отключён на `10,397 s`. LowState с
 - Полный USB/Ethernet-сеанс физически работал с выключенным Wi-Fi и без
   интернета. Это не доказывает поведение при повреждённом кабеле или отказе
   аппаратного Ethernet-адаптера.
-- Панель перезапущена после подтверждённого STOP и использует новый код
-  (PID `569475` на момент приёмки). Перезапуск не отправлял физическую команду;
-  следующий запуск СТОЙКИ выполнялся отдельным нажатием оператора.
+- Панель перезапускалась после подтверждённого STOP и использовала новый код.
+  Перезапуск не отправлял физическую команду; следующий запуск СТОЙКИ
+  выполнялся отдельным нажатием оператора.
 - Абсолютное отсутствие будущих аппаратных ошибок гарантировать нельзя;
   панель теперь выдаёт конкретную причину, ограниченный timeout и безопасный
   повтор вместо зависания или скрытого запуска движения.

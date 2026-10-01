@@ -56,13 +56,21 @@ runtime-каталоге `$XDG_RUNTIME_DIR/r1-exhibition/`, но commissioning t
 переиспользуются. Static writer запускается с `start_bridge=false`, поэтому не
 занимает UDP `9090` и не создаёт второй видеосервер. Если unit несовместим,
 его состояние нельзя проверить или POV отсутствует, быстрый путь не
-принимается: manager использует прежний handoff/fallback. Выборочный reconnect
-может перезапустить только этот systemd-managed POV, оставив static writer
-тёплым. Произвольные процессы по совпадению имени manager не завершает.
+принимается: manager использует прежний handoff/fallback. Robot POV настроен
+на process-local respawn через 2 секунды, поэтому падение видеопроцесса не
+перезапускает исправный VR bridge или всю offline-службу. Выборочный reconnect
+ждёт это восстановление до 8 секунд и только затем использует restart unit как
+fallback, оставляя static writer тёплым. Произвольные процессы по совпадению
+имени manager не завершает.
 
 На физическом R1 этот static reuse проверен 01.10.2026: существующие PID
 offline-службы, POV и bridge не изменились, дубликатов не появилось, полный
 manager start → стабильный FSM 4 занял `10,460 s`.
+
+Принудительное завершение живого POV также проверено 01.10.2026. Новый POV
+стал ready за `5,716 s`; PID offline-службы, родительского ROS launch, VR
+bridge, static manager и writer не изменились, `NRestarts=0`. Healthy reconnect
+после восстановления ничего не перезапустил.
 
 ## Статичный режим
 

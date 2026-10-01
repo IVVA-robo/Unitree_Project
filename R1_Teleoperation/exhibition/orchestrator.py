@@ -104,6 +104,7 @@ class ExhibitionSettings:
     pov_restart_limit: int
     restart_initial_sec: float
     restart_max_sec: float
+    offline_pov_recovery_grace_sec: float
     ready_timeout_sec: int
     stop_wait_sec: int
     preflight_timeout_sec: float
@@ -338,6 +339,12 @@ class ExhibitionSettings:
             restart_max_sec=_positive_float(
                 environment, "R1_EXHIBITION_RESTART_MAX_SEC", 8.0, 120.0
             ),
+            offline_pov_recovery_grace_sec=_positive_float(
+                environment,
+                "R1_EXHIBITION_OFFLINE_POV_RECOVERY_GRACE_SEC",
+                8.0,
+                15.0,
+            ),
             ready_timeout_sec=_positive_int(
                 environment, "R1_EXHIBITION_READY_TIMEOUT_SEC", 90, 120
             ),
@@ -396,6 +403,9 @@ def build_plan(mode: str, settings: ExhibitionSettings) -> dict:
             else settings.session_mode
         ),
         "tracking_grace_sec": settings.tracking_grace_sec,
+        "offline_pov_recovery_grace_sec": (
+            settings.offline_pov_recovery_grace_sec
+        ),
         "recovery_blend_sec": settings.recovery_blend_sec,
         "live_writer_restart": False,
         "offline_service_policy": "reuse-static-stop-restore-control",
@@ -713,6 +723,23 @@ class ExhibitionManager:
             f"{completed.returncode}; refusing to start a competing graph"
         )
         return None
+
+    def _wait_for_offline_pov_recovery(self) -> Optional[bool]:
+        """Give launch process-local respawn time before cycling its unit."""
+        grace = self.settings.offline_pov_recovery_grace_sec
+        deadline = time.monotonic() + grace
+        self._log(
+            "offline POV endpoint disappeared; waiting up to "
+            f"{grace:.3f}s for process-local respawn"
+        )
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.20, remaining))
+            active = self._probe_offline_service("offline_pov_status")
+            if active is not False:
+                return active
 
     def _take_offline_service_handoff(self) -> bool:
         """Reuse static POV or stop the exact unit before a competing graph."""
@@ -1070,25 +1097,43 @@ class ExhibitionManager:
                 self.pov_restarts += 1
                 self._write_state(
                     "reconnecting",
-                    "restarting only the systemd-managed offline POV",
+                    "waiting for process-local offline POV recovery",
                 )
-                if not self._run_checked("offline_restart", 20.0):
+                recovered = self._wait_for_offline_pov_recovery()
+                if recovered is None:
                     return self._complete_reconnect(
                         "degraded",
-                        "offline POV restart failed; writer was not restarted",
+                        "offline POV recovery could not be verified; writer was not restarted",
                         success=True,
                     )
-                if self._probe_offline_service(
-                    "offline_pov_status"
-                ) is not True:
-                    return self._complete_reconnect(
-                        "degraded",
-                        "offline POV did not become ready; writer was not restarted",
-                        success=True,
+                if recovered:
+                    pov_detail = (
+                        "systemd-managed POV auto-recovered; writer and VR bridge "
+                        "stayed warm"
                     )
-                pov_detail = (
-                    "systemd-managed POV restored; static writer stayed warm"
-                )
+                else:
+                    self._write_state(
+                        "reconnecting",
+                        "process-local POV recovery timed out; restarting its "
+                        "offline service as fallback",
+                    )
+                    if not self._run_checked("offline_restart", 20.0):
+                        return self._complete_reconnect(
+                            "degraded",
+                            "offline POV restart failed; writer was not restarted",
+                            success=True,
+                        )
+                    if self._probe_offline_service(
+                        "offline_pov_status"
+                    ) is not True:
+                        return self._complete_reconnect(
+                            "degraded",
+                            "offline POV did not become ready; writer was not restarted",
+                            success=True,
+                        )
+                    pov_detail = (
+                        "systemd-managed POV restored; static writer stayed warm"
+                    )
         else:
             pov = self.children.get("pov")
             if self.settings.commands["pov"] and (

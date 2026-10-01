@@ -47,6 +47,11 @@ def _video_only_node(context):
         name='r1_robot_pov_video_only',
         arguments=arguments,
         output='screen',
+        # Robot POV is read-only and independent from the healthy VR bridge.
+        # Let launch recover this child alone instead of cycling the complete
+        # offline service (and therefore UDP/VR) after a camera-process crash.
+        respawn=True,
+        respawn_delay=2.0,
     )]
 
 
