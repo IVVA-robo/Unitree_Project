@@ -12,6 +12,7 @@ import operator_panel.app as app_module  # noqa: E402
 from operator_panel.app import (  # noqa: E402
     EXHIBITION_GRACEFUL_STOP_MS,
     OperatorPanel,
+    QuickStartDialog,
     SettingsDialog,
 )
 from operator_panel.commands import (  # noqa: E402
@@ -212,6 +213,23 @@ def test_settings_dialog_scrolls_content_and_keeps_actions_visible():
     app.processEvents()
 
 
+def test_quick_start_dialog_uses_scrollable_step_cards():
+    app = app_module.build_app(OperatorConfig())
+    dialog = QuickStartDialog()
+    dialog.resize(540, 480)
+    dialog.show()
+    app.processEvents()
+
+    assert len(dialog.step_cards) == 6
+    assert dialog.close_button.text() == "Понятно"
+    assert dialog.guide_scroll.horizontalScrollBar().maximum() == 0
+    assert dialog.guide_scroll.verticalScrollBar().maximum() > 0
+    assert all(card.objectName() == "quickStepCard" for card in dialog.step_cards)
+
+    dialog.close()
+    app.processEvents()
+
+
 def test_live_actions_are_marked_and_reset_kill_uses_reviewed_rearm():
     specs = {spec.key: spec for spec in command_catalog()}
     assert specs["arms_live"].live
@@ -367,6 +385,41 @@ def test_exhibition_home_keeps_lock_run_and_adds_separate_stand_button():
         for index in range(panel.service_tabs.count())
     ]
     assert panel.service_tabs.count() >= 7
+
+    panel.close()
+    app.processEvents()
+
+
+def test_service_workspace_uses_compact_scrollable_pages():
+    app = app_module.build_app(OperatorConfig(status_poll_sec=60))
+    panel = OperatorPanel(OperatorConfig(status_poll_sec=60))
+    panel.status_timer.stop()
+    panel.show()
+    app.processEvents()
+
+    labels = [
+        panel.service_tabs.tabText(index)
+        for index in range(panel.service_tabs.count())
+    ]
+    assert labels == [
+        "Обзор",
+        "Сеть",
+        "Аварийное",
+        "VR",
+        "Голос",
+        "Запись кнопок",
+        "Robot POV",
+        "Движение",
+        "Логи",
+    ]
+    assert panel.service_tabs.tabBar().expanding() is False
+    assert panel.service_tabs.tabBar().usesScrollButtons() is True
+    for index in range(panel.service_tabs.count()):
+        page = panel.service_tabs.widget(index)
+        assert page.property("serviceTitle")
+        scroll = page.findChild(app_module.QScrollArea, "servicePageScroll")
+        assert scroll is not None
+        assert scroll.horizontalScrollBarPolicy() == app_module.Qt.ScrollBarAlwaysOff
 
     panel.close()
     app.processEvents()

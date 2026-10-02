@@ -149,6 +149,26 @@ def _tuning_spin(value, minimum, maximum, step, suffix):
     return spin
 
 
+_DARK_VERTICAL_SCROLLBAR_STYLE = """
+QScrollBar:vertical {
+    background: #1c1c1e;
+    border: none;
+    width: 10px;
+    margin: 0;
+}
+QScrollBar::handle:vertical {
+    background: #636366;
+    border-radius: 5px;
+    min-height: 32px;
+}
+QScrollBar::handle:vertical:hover { background: #8e8e93; }
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical { height: 0; width: 0; }
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical { background: transparent; }
+"""
+
+
 class BatteryRing(QWidget):
     """Compact circular battery gauge compatible with the old QLabel API."""
 
@@ -209,6 +229,142 @@ class BatteryRing(QWidget):
         painter.drawText(self.rect(), Qt.AlignCenter, self._text)
 
 
+class QuickStartDialog(QDialog):
+    """Compact, scrollable exhibition guide matching the main dashboard."""
+
+    STEPS = (
+        (
+            "Подготовьте пространство",
+            "Поставьте робота устойчиво и освободите место вокруг него.",
+        ),
+        (
+            "Включите систему",
+            "Включите робота, VR-шлем и оба контроллера.",
+        ),
+        (
+            "Дождитесь готовности",
+            "Проверьте зелёное «ПОДКЛЮЧЕНО», Robot POV и статусы VR.",
+        ),
+        (
+            "Для показа используйте LOCK",
+            "LOCK сохраняет видео и устойчивое статичное положение.",
+        ),
+        (
+            "Для управления используйте RUN",
+            "Закройте Unitree Explore и нажмите RUN. Панель подготовит голову, "
+            "руки и ноги по существующей безопасной последовательности.",
+        ),
+        (
+            "Контроллеры",
+            "X слева возвращает руки в нейтраль. B справа выполняет аварийную "
+            "остановку.",
+        ),
+    )
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("quickStartDialog")
+        self.setWindowTitle("Как запустить Unitree R1")
+        self.setModal(True)
+        self.setMinimumSize(540, 480)
+        self.resize(640, 680)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+
+        header = QWidget()
+        header.setObjectName("quickStartHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(14, 12, 14, 12)
+        header_layout.setSpacing(12)
+        badge = QLabel("R1")
+        badge.setObjectName("quickStartBadge")
+        badge.setAlignment(Qt.AlignCenter)
+        badge.setFixedSize(46, 46)
+        header_layout.addWidget(badge)
+        heading = QVBoxLayout()
+        heading.setSpacing(2)
+        title = QLabel("Быстрый запуск")
+        title.setObjectName("quickStartTitle")
+        subtitle = QLabel("Шесть шагов до готовности к работе")
+        subtitle.setObjectName("quickStartSubtitle")
+        heading.addWidget(title)
+        heading.addWidget(subtitle)
+        header_layout.addLayout(heading, 1)
+        root.addWidget(header)
+
+        self.guide_scroll = QScrollArea(self)
+        self.guide_scroll.setObjectName("quickStartScroll")
+        self.guide_scroll.setWidgetResizable(True)
+        self.guide_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.guide_scroll.viewport().setObjectName("quickStartViewport")
+        self.guide_scroll.verticalScrollBar().setStyleSheet(
+            _DARK_VERTICAL_SCROLLBAR_STYLE
+        )
+        content = QWidget()
+        content.setObjectName("quickStartContent")
+        guide = QVBoxLayout(content)
+        guide.setContentsMargins(2, 2, 8, 2)
+        guide.setSpacing(8)
+
+        self.step_cards = []
+        for number, (step_title, step_text) in enumerate(self.STEPS, start=1):
+            card = QWidget()
+            card.setObjectName("quickStepCard")
+            row = QHBoxLayout(card)
+            row.setContentsMargins(12, 10, 12, 10)
+            row.setSpacing(12)
+            number_label = QLabel(str(number))
+            number_label.setObjectName("quickStepNumber")
+            number_label.setAlignment(Qt.AlignCenter)
+            number_label.setFixedSize(32, 32)
+            row.addWidget(number_label, 0, Qt.AlignTop)
+            copy = QVBoxLayout()
+            copy.setSpacing(2)
+            title_label = QLabel(step_title)
+            title_label.setObjectName("quickStepTitle")
+            body_label = QLabel(step_text)
+            body_label.setObjectName("quickStepBody")
+            body_label.setWordWrap(True)
+            copy.addWidget(title_label)
+            copy.addWidget(body_label)
+            row.addLayout(copy, 1)
+            guide.addWidget(card)
+            self.step_cards.append(card)
+
+        safety = QWidget()
+        safety.setObjectName("quickSafetyCard")
+        safety_layout = QVBoxLayout(safety)
+        safety_layout.setContentsMargins(12, 10, 12, 10)
+        safety_layout.setSpacing(3)
+        safety_title = QLabel("Пауза и завершение")
+        safety_title.setObjectName("quickSafetyTitle")
+        safety_text = QLabel(
+            "Для обычной паузы используйте LOCK, затем RUN с отпущенными "
+            "стиками. STOP, KILL и Zero Torque находятся во вкладке "
+            "«Аварийное» сервисного экрана."
+        )
+        safety_text.setObjectName("quickSafetyBody")
+        safety_text.setWordWrap(True)
+        safety_layout.addWidget(safety_title)
+        safety_layout.addWidget(safety_text)
+        guide.addWidget(safety)
+        guide.addStretch(1)
+        self.guide_scroll.setWidget(content)
+        root.addWidget(self.guide_scroll, 1)
+
+        action_row = QHBoxLayout()
+        action_row.addStretch(1)
+        self.close_button = QPushButton("Понятно")
+        self.close_button.setObjectName("primaryDialogButton")
+        self.close_button.setMinimumSize(128, 42)
+        self.close_button.setDefault(True)
+        self.close_button.clicked.connect(self.accept)
+        action_row.addWidget(self.close_button)
+        root.addLayout(action_row)
+
+
 class SettingsDialog(QDialog):
     def __init__(self, config: OperatorConfig, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -230,26 +386,7 @@ class SettingsDialog(QDialog):
         self.settings_scroll.viewport().setObjectName("settingsViewport")
         settings_bar = self.settings_scroll.verticalScrollBar()
         settings_bar.setObjectName("settingsVerticalScroll")
-        settings_bar.setStyleSheet(
-            """
-            QScrollBar:vertical {
-                background: #1c1c1e;
-                border: none;
-                width: 10px;
-                margin: 0;
-            }
-            QScrollBar::handle:vertical {
-                background: #636366;
-                border-radius: 5px;
-                min-height: 32px;
-            }
-            QScrollBar::handle:vertical:hover { background: #8e8e93; }
-            QScrollBar::add-line:vertical,
-            QScrollBar::sub-line:vertical { height: 0; width: 0; }
-            QScrollBar::add-page:vertical,
-            QScrollBar::sub-page:vertical { background: transparent; }
-            """
-        )
+        settings_bar.setStyleSheet(_DARK_VERTICAL_SCROLLBAR_STYLE)
         self.settings_content = QWidget()
         self.settings_content.setObjectName("settingsContent")
         form = QFormLayout(self.settings_content)
@@ -610,6 +747,14 @@ class OperatorPanel(QMainWindow):
         layout.addWidget(self.tabs, 1)
         self._add_exhibition_tab()
         self.service_tabs = QTabWidget()
+        self.service_tabs.setObjectName("serviceTabs")
+        self.service_tabs.setDocumentMode(True)
+        service_navigation = self.service_tabs.tabBar()
+        service_navigation.setObjectName("serviceNavigation")
+        service_navigation.setDrawBase(False)
+        service_navigation.setExpanding(False)
+        service_navigation.setUsesScrollButtons(True)
+        service_navigation.setElideMode(Qt.ElideNone)
         self.tabs.addTab(self.service_tabs, "Расширенные настройки / Сервис")
         self._add_general_tab()
         self._add_diagnostics_tab()
@@ -824,10 +969,56 @@ class OperatorPanel(QMainWindow):
             self._on_failed
         )
 
-    def _add_general_tab(self) -> None:
+    def _service_page(self, title: str, subtitle: str):
+        """Create one responsive service page with consistent visual hierarchy."""
         tab = QWidget()
-        layout = QVBoxLayout(tab)
+        tab.setObjectName("servicePage")
+        tab.setProperty("serviceTitle", title)
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea(tab)
+        scroll.setObjectName("servicePageScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.viewport().setObjectName("servicePageViewport")
+        scroll.verticalScrollBar().setStyleSheet(
+            _DARK_VERTICAL_SCROLLBAR_STYLE
+        )
+
+        content = QWidget()
+        content.setObjectName("servicePageContent")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        header = QWidget()
+        header.setObjectName("servicePageHeader")
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(14, 10, 14, 10)
+        header_layout.setSpacing(2)
+        title_label = QLabel(title)
+        title_label.setObjectName("servicePageTitle")
+        subtitle_label = QLabel(subtitle)
+        subtitle_label.setObjectName("servicePageSubtitle")
+        subtitle_label.setWordWrap(True)
+        header_layout.addWidget(title_label)
+        header_layout.addWidget(subtitle_label)
+        layout.addWidget(header)
+
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        return tab, layout
+
+    def _add_general_tab(self) -> None:
+        tab, layout = self._service_page(
+            "Обзор системы",
+            "Текущее подключение, активные процессы и состояние локального контура.",
+        )
         cards = QGridLayout()
+        cards.setHorizontalSpacing(10)
+        cards.setVerticalSpacing(10)
         self.summary_project = self._card("Проект", self.config.project_dir)
         self.summary_network = self._card(
             "Сеть робота",
@@ -852,11 +1043,13 @@ class OperatorPanel(QMainWindow):
         explanation.setObjectName("hint")
         layout.addWidget(explanation)
         layout.addStretch(1)
-        self.service_tabs.addTab(tab, "Общий статус")
+        self.service_tabs.addTab(tab, "Обзор")
 
     def _add_diagnostics_tab(self) -> None:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
+        tab, layout = self._service_page(
+            "Сеть и подключения",
+            "Read-only проверки Ethernet, ROS2, VR, видео и локальных служб.",
+        )
         group = QGroupBox("Диагностика без управления приводами")
         grid = QGridLayout(group)
         buttons = [
@@ -884,11 +1077,13 @@ class OperatorPanel(QMainWindow):
         hint.setObjectName("hint")
         layout.addWidget(hint)
         layout.addStretch(1)
-        self.service_tabs.addTab(tab, "Сеть и подключения")
+        self.service_tabs.addTab(tab, "Сеть")
 
     def _add_robot_tab(self) -> None:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
+        tab, layout = self._service_page(
+            "Аварийное управление",
+            "Остановка, восстановление и завершение сеанса — отдельно от главного экрана.",
+        )
         group = QGroupBox("Сервис / аварийное управление")
         grid = QGridLayout(group)
         for index, (key, text) in enumerate(
@@ -927,8 +1122,10 @@ class OperatorPanel(QMainWindow):
         self.service_tabs.addTab(tab, "Аварийное")
 
     def _add_vr_tab(self) -> None:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
+        tab, layout = self._service_page(
+            "VR и очки",
+            "Проверка локального USB-C подключения и нейтральной позиции шлема.",
+        )
         group = QGroupBox("VR и очки")
         grid = QGridLayout(group)
         for index, (key, text) in enumerate(
@@ -948,11 +1145,13 @@ class OperatorPanel(QMainWindow):
         hint.setObjectName("hint")
         layout.addWidget(hint)
         layout.addStretch(1)
-        self.service_tabs.addTab(tab, "VR и очки")
+        self.service_tabs.addTab(tab, "VR")
 
     def _add_voice_tab(self) -> None:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
+        tab, layout = self._service_page(
+            "Голосовой ассистент",
+            "Полностью локальные ASR, LLM и TTS без облачных сервисов.",
+        )
         group = QGroupBox("Голосовой ассистент «Добрыня»")
         grid = QGridLayout(group)
         self.voice_status = QLabel(
@@ -978,8 +1177,10 @@ class OperatorPanel(QMainWindow):
         self.service_tabs.addTab(tab, "Голос")
 
     def _add_command_capture_tab(self) -> None:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
+        tab, layout = self._service_page(
+            "Запись кнопок",
+            "Read-only захват команды Unitree Explore для диагностики DDS.",
+        )
         group = QGroupBox("Запись кнопок Unitree Explore")
         form = QFormLayout(group)
         self.capture_action = QComboBox()
@@ -1050,8 +1251,10 @@ class OperatorPanel(QMainWindow):
         )
 
     def _add_video_tab(self) -> None:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
+        tab, layout = self._service_page(
+            "Robot POV",
+            "Локальный видеопоток, профиль качества и проверка видеопути.",
+        )
         group = QGroupBox("Видео «глазами робота»")
         grid = QGridLayout(group)
         buttons = [
@@ -1078,11 +1281,13 @@ class OperatorPanel(QMainWindow):
         hint.setObjectName("hint")
         layout.addWidget(hint)
         layout.addStretch(1)
-        self.service_tabs.addTab(tab, "Видео глазами робота")
+        self.service_tabs.addTab(tab, "Robot POV")
 
     def _add_motion_tab(self) -> None:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
+        tab, layout = self._service_page(
+            "Движение и teleop",
+            "Сервисные сценарии рук и ног с сохранением существующих safety gates.",
+        )
         arms = QGroupBox("Руки")
         arms_grid = QGridLayout(arms)
         arms_grid.addWidget(
@@ -1131,12 +1336,14 @@ class OperatorPanel(QMainWindow):
         warning.setObjectName("warning")
         layout.addWidget(warning)
         layout.addStretch(1)
-        self.service_tabs.addTab(tab, "Руки / ноги / teleop")
+        self.service_tabs.addTab(tab, "Движение")
 
     def _add_logs_tab(self) -> None:
-        tab = QWidget()
+        tab, layout = self._service_page(
+            "Логи и отчёты",
+            "Последние локальные события, диагностика и экспорт отчёта.",
+        )
         self.logs_tab = tab
-        layout = QVBoxLayout(tab)
         toolbar = QHBoxLayout()
         show_latest = QPushButton("Показать последние логи")
         show_latest.clicked.connect(self._show_logs)
@@ -1594,23 +1801,7 @@ class OperatorPanel(QMainWindow):
         self._refresh_header_controls()
 
     def show_quick_start(self) -> None:
-        QMessageBox.information(
-            self,
-            "Как запустить Unitree R1",
-            "1. Поставьте робота устойчиво и освободите место вокруг него.\n"
-            "2. Включите робота и VR-шлем с контроллерами.\n"
-            "3. Дождитесь зелёного «ПОДКЛЮЧЕНО», изображения с камеры и "
-            "зелёных статусов VR.\n"
-            "4. Для показа видео нажмите «LOCK / СТАТИЧНЫЙ РЕЖИМ».\n"
-            "5. Для головы, рук и ходьбы закройте экран управления Unitree "
-            "Explore и нажмите «RUN / ПОЛНОЕ УПРАВЛЕНИЕ». Панель сама "
-            "переведёт робота в Run.\n"
-            "6. X слева возвращает руки в нейтраль; B справа выполняет "
-            "аварийную остановку.\n\n"
-            "Первый RUN подготавливает управление. Для обычной паузы используйте "
-            "LOCK, затем RUN с отпущенными стиками: полный перезапуск не нужен. "
-            "STOP, KILL и Zero Torque находятся в разделе «Аварийное».",
-        )
+        QuickStartDialog(self).exec_()
 
     def _on_video_state(self, text: str, state: str) -> None:
         self.video_state = state
@@ -3366,6 +3557,61 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
         #settingsScroll, #settingsViewport, #settingsContent {
             background: #1c1c1e; border: none;
         }
+        QDialog#quickStartDialog { background: #0f1115; color: #f5f5f7; }
+        #quickStartHeader { background: #1c1c1e; border: 1px solid #343438;
+                            border-radius: 14px; }
+        #quickStartBadge { background: #0a84ff; color: white;
+                           border-radius: 23px; font-size: 13pt;
+                           font-weight: bold; }
+        #quickStartTitle { color: #f5f5f7; font-size: 18pt;
+                           font-weight: bold; }
+        #quickStartSubtitle { color: #8e8e93; }
+        #quickStartScroll, #quickStartViewport, #quickStartContent {
+            background: #0f1115; border: none;
+        }
+        #quickStepCard { background: #1c1c1e; border: 1px solid #343438;
+                         border-radius: 12px; }
+        #quickStepNumber { background: #2c2c2e; color: #64d2ff;
+                           border: 1px solid #48484a; border-radius: 16px;
+                           font-weight: bold; }
+        #quickStepTitle { background: transparent; color: #f5f5f7;
+                          font-weight: bold; }
+        #quickStepBody { background: transparent; color: #aeb0b8; }
+        #quickSafetyCard { background: #3a2d0e; border: 1px solid #654d16;
+                           border-radius: 12px; }
+        #quickSafetyTitle { background: transparent; color: #ff9f0a;
+                            font-weight: bold; }
+        #quickSafetyBody { background: transparent; color: #e5d8b5; }
+        #primaryDialogButton { background: #0a84ff; border-color: #64b5ff;
+                               color: white; font-weight: bold; }
+        #primaryDialogButton:hover { background: #409cff; }
+        QTabWidget#serviceTabs::pane { background: #0f1115;
+                                      border: 1px solid #343438;
+                                      border-radius: 14px; }
+        QTabBar#serviceNavigation { background: #0f1115; }
+        QTabBar#serviceNavigation::tab {
+            background: #1c1c1e; color: #aeb0b8;
+            border: 1px solid #343438; border-radius: 9px;
+            padding: 9px 14px; margin: 0 4px 7px 0;
+        }
+        QTabBar#serviceNavigation::tab:hover {
+            background: #2c2c2e; color: #f5f5f7; border-color: #48484a;
+        }
+        QTabBar#serviceNavigation::tab:selected {
+            background: #2c2c2e; color: #64d2ff; border-color: #0a84ff;
+        }
+        QTabBar#serviceNavigation QToolButton {
+            background: #2c2c2e; color: #f5f5f7;
+            border: 1px solid #48484a; border-radius: 8px;
+        }
+        #servicePage, #servicePageScroll, #servicePageViewport,
+        #servicePageContent { background: #0f1115; border: none; }
+        #servicePageHeader { background: #1c1c1e;
+                             border: 1px solid #343438;
+                             border-radius: 14px; }
+        #servicePageTitle { background: transparent; color: #f5f5f7;
+                            font-size: 16pt; font-weight: bold; }
+        #servicePageSubtitle { background: transparent; color: #8e8e93; }
         #headerCard { background: #1c1c1e; border: 1px solid #343438;
                       border-radius: 14px; }
         QGroupBox { background: #1c1c1e; border: 1px solid #343438;
@@ -3388,7 +3634,8 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
         QLineEdit:focus, QComboBox:focus, QSpinBox:focus,
         QDoubleSpinBox:focus { border-color: #0a84ff; }
         QTabWidget::pane { border: 1px solid #343438; border-radius: 12px; }
-        QTabBar::tab { background: #1c1c1e; border: 1px solid #343438;
+        QTabBar::tab { background: #1c1c1e; color: #aeb0b8;
+                       border: 1px solid #343438;
                        padding: 10px 14px; margin-right: 3px; }
         QTabBar::tab:selected { background: #2c2c2e; color: #f5f5f7;
                                 border-color: #0a84ff; }
