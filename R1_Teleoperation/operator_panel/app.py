@@ -57,6 +57,12 @@ from .video_preview import VideoPreview
 # process groups.  Keep this asynchronous so the UI and KILL button remain
 # responsive while giving the manager enough time to avoid orphaned children.
 EXHIBITION_GRACEFUL_STOP_MS = 60_000
+# A cold read-only SDK preflight normally completes in 30-40 seconds. If an
+# operator requests STAND/RUN while that exact check is already in flight,
+# preserve its progress briefly instead of cancelling it and starting the same
+# preflight again inside the exhibition manager. This timer never authorizes
+# motion: after it expires the normal manager still performs every gate.
+SDK_WARMUP_HANDOFF_WAIT_MS = 45_000
 ZERO_TORQUE_HANDOFF_KEY = "zero_torque_offline_handoff"
 ZERO_TORQUE_HANDOFF_COMMAND = (
     "exec ./scripts/r1-exhibition-offline-handoff stop"
@@ -328,6 +334,16 @@ class OperatorPanel(QMainWindow):
         self.pending_exhibition_environment: Optional[Dict[str, str]] = None
         self.pending_warmup_key: Optional[str] = None
         self.pending_warmup_environment: Optional[Dict[str, str]] = None
+        self.warmup_handoff_waiting = False
+        self.warmup_handoff_generation = 0
+        self.sdk_warmup_cache_available = False
+        # A recovered Ethernet link needs a fresh worker so interface/IP
+        # autodetection and the private SDK attestation cannot stay tied to
+        # the pre-disconnect process.  This is deliberately separate from
+        # pending_warmup_key, which belongs to an operator-requested physical
+        # mode and always has priority over background work.
+        self.warmup_restart_pending = False
+        self.warmup_robot_offline_observed = False
         self.exhibition_session_confirmed = acknowledgement_valid(self.config)
         self.exhibition_switch_in_progress = False
         self.exhibition_stop_complete = False
@@ -349,6 +365,7 @@ class OperatorPanel(QMainWindow):
         self.action_generations: Dict[str, int] = {}
         self.last_action_timings: Dict[str, Dict[str, object]] = {}
         self.output_line_buffers: Dict[str, str] = {}
+        self.last_process_errors: Dict[str, str] = {}
         # One ephemeral token is shared by every live child started during
         # this panel session. It is never written to config or exported logs.
         self.live_session_token = secrets.token_urlsafe(24)
@@ -1142,7 +1159,12 @@ class OperatorPanel(QMainWindow):
             self.controller.start(
                 "battery_monitor", self.specs["battery_monitor"]
             )
-        if not self.controller.is_running("sdk_warmup") and not self.__dict__.get("pending_warmup_key"):
+        if (
+            not self.controller.is_running("sdk_warmup")
+            and not self.__dict__.get("pending_warmup_key")
+            and not self.__dict__.get("warmup_restart_pending", False)
+        ):
+            self.sdk_warmup_cache_available = False
             self.controller.start("sdk_warmup", self.specs["sdk_warmup"])
         if not self.controller.is_running("voice:voice_remote"):
             self.controller.start(
@@ -1540,6 +1562,11 @@ class OperatorPanel(QMainWindow):
             self.pending_exhibition_environment = None
             self.pending_warmup_key = None
             self.pending_warmup_environment = None
+            self.warmup_handoff_waiting = False
+            self.warmup_handoff_generation = int(
+                self.__dict__.get("warmup_handoff_generation", 0)
+            ) + 1
+            self.warmup_restart_pending = False
             self.exhibition_switch_in_progress = False
             self.exhibition_stop_complete = False
             self.exhibition_manager_stopped = False
@@ -1615,6 +1642,7 @@ class OperatorPanel(QMainWindow):
         self.pending_zero_torque = True
         self.pending_warmup_key = None
         self.pending_warmup_environment = None
+        self.warmup_restart_pending = False
         self.zero_torque_deadline = time.monotonic() + 75.0
         self.zero_torque_handoff_started = False
         self.zero_torque_handoff_complete = False
@@ -1756,16 +1784,33 @@ class OperatorPanel(QMainWindow):
         spec = self.specs[key]
         if not self._begin_action(key):
             return
-        if self.__dict__.get("pending_zero_torque", False) or self.controller.is_running("zero_torque"):
-            self._append_log(key, "[INFO] Дождитесь завершения Zero Torque; затем нажмите нужный режим.\n")
+        # A click on RUN/LOCK/STAND is an explicit operator request.  If a
+        # recovered-link warmup is already stopping, its finished callback
+        # must continue with this physical request instead of silently
+        # starting another background worker first.
+        self.warmup_restart_pending = False
+        if self.__dict__.get(
+            "pending_zero_torque", False
+        ) or self.controller.is_running("zero_torque"):
+            self._append_log(
+                key,
+                "[INFO] Дождитесь завершения Zero Torque; затем нажмите "
+                "нужный режим.\n",
+            )
             self._finish_action(key, "заблокировано", "выполняется Zero Torque")
             return
         # Never run a fast rearm against the owner already being stopped.
         # Only an existing operator-requested switch may have its destination
         # replaced. An explicit STOP cannot queue or resurrect movement.
-        if self.controller.is_running("exhibition_stop") or self.__dict__.get("exhibition_switch_in_progress", False):
+        if self.controller.is_running("exhibition_stop") or self.__dict__.get(
+            "exhibition_switch_in_progress", False
+        ):
             if not self.__dict__.get("pending_exhibition_key"):
-                self._append_log(key, "[INFO] Выполняется STOP; после завершения нажмите нужный режим.\n")
+                self._append_log(
+                    key,
+                    "[INFO] Выполняется STOP; после завершения нажмите "
+                    "нужный режим.\n",
+                )
                 self._finish_action(key, "заблокировано", "выполняется STOP")
                 return
             if not self._confirm_live(
@@ -1778,7 +1823,11 @@ class OperatorPanel(QMainWindow):
             self.pending_exhibition_key = key
             self.pending_exhibition_environment = self._live_environment(
                 run_mode_confirmed=spec.requires_run_mode)
-            self._append_log(key, "[INFO] Следующий режим обновлён; жду безопасного завершения текущего.\n")
+            self._append_log(
+                key,
+                "[INFO] Следующий режим обновлён; жду безопасного завершения "
+                "текущего.\n",
+            )
             return
         self._ensure_main_services()
         existing = active_session_snapshot()
@@ -1907,13 +1956,44 @@ class OperatorPanel(QMainWindow):
             not self.controller.is_running("exhibition")
             and self.controller.is_running("sdk_warmup")
         ):
-            # The exhibition manager owns the authoritative preflight and can
-            # wait for the robot itself. Do not make the operator wait for a
-            # separate background warmup (which may be asleep between its
-            # periodic checks) before the one-click STAND action is accepted.
             was_pending = bool(self.__dict__.get("pending_warmup_key"))
             self.pending_warmup_key = key
             self.pending_warmup_environment = environment
+            warmup_phase = str(
+                self.status_values.get("sdk_warmup", "")
+            ).strip().upper()
+            cache_available = bool(
+                self.__dict__.get("sdk_warmup_cache_available", False)
+            )
+            if warmup_phase == "CHECKING" and not cache_available:
+                # The worker has already invalidated every old attestation and
+                # is obtaining fresh physical telemetry. Cancelling it here
+                # made the manager repeat the same 30-40 second read-only path
+                # from zero. Await only this already-running bounded check;
+                # READY still has to be followed by confirmed worker cleanup
+                # before any physical graph may start.
+                self.exhibition_mode = "Жду уже идущую SDK-проверку…"
+                self._refresh_summary()
+                if not self.__dict__.get("warmup_handoff_waiting", False):
+                    self.warmup_handoff_waiting = True
+                    generation = int(
+                        self.__dict__.get("warmup_handoff_generation", 0)
+                    ) + 1
+                    self.warmup_handoff_generation = generation
+                    self._append_log(
+                        key,
+                        "[INFO] Свежая read-only SDK-проверка уже выполняется; "
+                        "сохраняю её прогресс вместо повторного запуска.\n",
+                    )
+                    QTimer.singleShot(
+                        SDK_WARMUP_HANDOFF_WAIT_MS,
+                        lambda current=generation: self._expire_warmup_handoff(
+                            current
+                        ),
+                    )
+                return
+
+            self.warmup_handoff_waiting = False
             self.exhibition_mode = "Завершение фоновой проверки…"
             self._refresh_summary()
             if not was_pending:
@@ -1967,6 +2047,7 @@ class OperatorPanel(QMainWindow):
     def _start_pending_warmup_mode(self) -> None:
         if self.controller.is_running("sdk_warmup"):
             return
+        self.warmup_handoff_waiting = False
         key = self.pending_warmup_key
         environment = self.pending_warmup_environment
         self.pending_warmup_key = None
@@ -1981,9 +2062,106 @@ class OperatorPanel(QMainWindow):
                 "exhibition", "exhibition_stop", "stop", "kill", "zero_torque"))
             or active_session_snapshot()
         ):
-            self._append_log(key, "[BLOCKED] Состояние изменилось во время фоновой проверки; повторите выбор режима после завершения текущего действия.\n")
+            self._append_log(
+                key,
+                "[BLOCKED] Состояние изменилось во время фоновой проверки; "
+                "повторите выбор режима после завершения текущего действия.\n",
+            )
             return
         self._start_exhibition_mode(key, environment)
+
+    def _expire_warmup_handoff(self, generation: int) -> None:
+        """Bound a pending warmup without blocking or bypassing preflight."""
+        if generation != int(
+            self.__dict__.get("warmup_handoff_generation", 0)
+        ):
+            return
+        if not self.__dict__.get("warmup_handoff_waiting", False):
+            return
+        key = self.__dict__.get("pending_warmup_key")
+        if not key:
+            self.warmup_handoff_waiting = False
+            return
+        self.warmup_handoff_waiting = False
+        self._append_log(
+            key,
+            "[WARN] Фоновая SDK-проверка не завершилась за 45 секунд; "
+            "передаю запуск штатному manager preflight.\n",
+        )
+        if self.controller.is_running("sdk_warmup"):
+            self.controller.stop(
+                "sdk_warmup", graceful_timeout_ms=12000, wait=False
+            )
+        else:
+            QTimer.singleShot(0, self._start_pending_warmup_mode)
+
+    def _background_warmup_restart_blocked(self) -> bool:
+        """Return whether a recovered-link warmup must yield to physical work."""
+        if (
+            self.__dict__.get("close_after_stop", False)
+            or self.__dict__.get("pending_zero_torque", False)
+            or self.__dict__.get("zero_torque_idle", False)
+            or self.__dict__.get("pending_warmup_key")
+            or self.__dict__.get("pending_exhibition_key")
+            or self.__dict__.get("exhibition_switch_in_progress", False)
+        ):
+            return True
+        physical_processes = (
+            "exhibition",
+            "exhibition_stop",
+            "exhibition_lock",
+            "exhibition_rearm",
+            "motion",
+            "robot:prepare",
+            "stop",
+            "kill",
+            "zero_torque",
+            ZERO_TORQUE_HANDOFF_KEY,
+        )
+        if any(self.controller.is_running(key) for key in physical_processes):
+            return True
+        return bool(active_session_snapshot())
+
+    def _start_recovered_sdk_warmup(self) -> None:
+        """Start one fresh read-only worker after its predecessor has exited."""
+        if not self.__dict__.get("warmup_restart_pending", False):
+            return
+        if self._background_warmup_restart_blocked():
+            self.warmup_restart_pending = False
+            return
+        if self.controller.is_running("sdk_warmup"):
+            return
+        self.warmup_restart_pending = False
+        self.sdk_warmup_cache_available = False
+        if not self.controller.start("sdk_warmup", self.specs["sdk_warmup"]):
+            self.status_values["sdk_warmup"] = "RESTART_FAILED"
+            self._append_log(
+                "sdk_warmup",
+                "[WARN] Не удалось запустить свежий read-only SDK warmup; "
+                "панель повторит попытку при следующем опросе.\n",
+            )
+
+    def _request_recovered_sdk_warmup(self) -> None:
+        """Replace a stale warmup asynchronously after OFFLINE -> healthy."""
+        if self._background_warmup_restart_blocked():
+            self.warmup_restart_pending = False
+            return
+        if self.__dict__.get("warmup_restart_pending", False):
+            return
+        self.warmup_restart_pending = True
+        self.status_values["sdk_warmup"] = "RESTARTING"
+        self.sdk_warmup_cache_available = False
+        self._append_log(
+            "sdk_warmup",
+            "[INFO] Ethernet восстановлен; перезапускаю только read-only SDK "
+            "warmup для свежего адреса и кэша.\n",
+        )
+        if self.controller.is_running("sdk_warmup"):
+            self.controller.stop(
+                "sdk_warmup", graceful_timeout_ms=12000, wait=False
+            )
+            return
+        QTimer.singleShot(0, self._start_recovered_sdk_warmup)
 
     def _poll_panel_status(self) -> None:
         """Refresh the read-only health snapshot without blocking the UI."""
@@ -1999,13 +2177,16 @@ class OperatorPanel(QMainWindow):
             not self.controller.is_running("exhibition")
             and not self.controller.is_running("sdk_warmup")
             and not self.__dict__.get("pending_warmup_key")
+            and not self.__dict__.get("warmup_restart_pending", False)
             and not active_session_snapshot()
         ):
+            self.sdk_warmup_cache_available = False
             self.controller.start("sdk_warmup", self.specs["sdk_warmup"])
         self._request_status_refresh()
 
     def _parse_status_output(self, text: str) -> None:
         updated = set()
+        robot_recovered = False
         for line in text.splitlines():
             if not line.startswith("STATUS ") or "=" not in line:
                 continue
@@ -2018,12 +2199,27 @@ class OperatorPanel(QMainWindow):
                 self.preflight_ok = False
                 self.pending_warmup_key = None
                 self.pending_warmup_environment = None
+                self.warmup_handoff_waiting = False
+                self.sdk_warmup_cache_available = False
+                self.warmup_robot_offline_observed = True
                 self._clear_live_confirmation()
+            elif key.strip() == "robot" and value.strip().upper() in {
+                "OK",
+                "FOUND",
+                "RUNNING",
+                "READY",
+            }:
+                robot_recovered = robot_recovered or bool(
+                    self.__dict__.get("warmup_robot_offline_observed", False)
+                )
+                self.warmup_robot_offline_observed = False
             # A latched software KILL is the required startup state for a
             # physical writer. Keep it visible, but do not invalidate a fresh
             # read-only preflight merely because the fail-closed latch is set.
         # Both fields must come from this snapshot, not a previous session.
-        if {"exhibition", "mode"} <= updated and not self.__dict__.get("exhibition_switch_in_progress", False):
+        if {"exhibition", "mode"} <= updated and not self.__dict__.get(
+            "exhibition_switch_in_progress", False
+        ):
             status = self.status_values["exhibition"]
             mode = self.status_values["mode"]
             if status == "ready":
@@ -2062,6 +2258,8 @@ class OperatorPanel(QMainWindow):
                     else "локальные службы запущены, робот пока не отвечает"
                 )
                 self._finish_action("exhibition_reconnect", result, detail)
+            if robot_recovered:
+                self._request_recovered_sdk_warmup()
         self._refresh_exhibition_status()
 
     def _apply_exhibition_result(self, mode: str, status: str, detail: str) -> None:
@@ -2101,14 +2299,12 @@ class OperatorPanel(QMainWindow):
                     self._show_retry_reason(action, reason)
                     break
 
-    def _consume_exhibition_events(self, key: str, text: str) -> None:
-        buffers = self.__dict__.setdefault("output_line_buffers", {})
-        combined = buffers.get(key, "") + text
-        lines = combined.splitlines(keepends=True)
-        buffers[key] = ""
-        if lines and not lines[-1].endswith(("\n", "\r")):
-            buffers[key] = lines.pop()
-        for raw in lines:
+    def _consume_exhibition_events(
+        self, key: str, text: str, *, final: bool = False
+    ) -> None:
+        for raw in self._complete_output_lines(
+            f"exhibition:{key}", text, final=final
+        ):
             line = raw.strip()
             if not line.startswith("EXHIBITION_STATE "):
                 continue
@@ -2126,6 +2322,93 @@ class OperatorPanel(QMainWindow):
             self.status_values["exhibition_detail"] = detail
             self._apply_exhibition_result(mode, status, detail)
             self._refresh_exhibition_status()
+
+    def _complete_output_lines(
+        self, buffer_key: str, text: str, *, final: bool = False
+    ) -> list[str]:
+        """Return complete lines while retaining one fragmented QProcess line."""
+
+        buffers = self.__dict__.setdefault("output_line_buffers", {})
+        combined = buffers.get(buffer_key, "") + text
+        lines = combined.splitlines(keepends=True)
+        buffers[buffer_key] = ""
+        if (
+            not final
+            and lines
+            and not lines[-1].endswith(("\n", "\r"))
+        ):
+            buffers[buffer_key] = lines.pop()
+        if final and combined and not lines:
+            lines = [combined]
+        if final:
+            buffers.pop(buffer_key, None)
+        return lines
+
+    def _consume_sdk_warmup_events(
+        self, text: str, *, final: bool = False
+    ) -> None:
+        """Parse warmup state lines even when Qt splits one shell ``echo``."""
+
+        for raw in self._complete_output_lines(
+            "warmup:sdk_warmup", text, final=final
+        ):
+            line = raw.strip()
+            if not line.startswith("SDK_WARMUP state="):
+                continue
+            phase = line.split("state=", 1)[1].split()[0]
+            self.status_values["sdk_warmup"] = phase
+            if phase in {"READY", "REFRESHING"}:
+                self.sdk_warmup_cache_available = True
+            elif phase in {"WAITING_FOR_ROBOT", "RETRY"}:
+                self.sdk_warmup_cache_available = False
+            if (
+                self.__dict__.get("pending_warmup_key")
+                and self.__dict__.get("warmup_handoff_waiting", False)
+                and phase == "READY"
+            ):
+                self.warmup_handoff_waiting = False
+                self._append_log(
+                    self.pending_warmup_key,
+                    "[OK] Фоновая SDK-проверка готова; жду подтверждённой "
+                    "очистки reader и запускаю выбранный режим.\n",
+                )
+                self.controller.stop(
+                    "sdk_warmup", graceful_timeout_ms=12000, wait=False
+                )
+
+    def _consume_process_diagnostics(
+        self, key: str, text: str, *, final: bool = False
+    ) -> None:
+        """Remember the concrete failure line across fragmented process output."""
+
+        saw_warning = False
+        saw_success = False
+        for raw in self._complete_output_lines(
+            f"diagnostic:{key}", text, final=final
+        ):
+            line = raw.strip()
+            if "[FAIL]" in line or "[BLOCKED]" in line:
+                reason = re.sub(
+                    r"^.*?\[(?:FAIL|BLOCKED)\]\s*", "", line
+                ).strip()
+                if not reason:
+                    reason = line[:280]
+                self.__dict__.setdefault("last_process_errors", {})[key] = reason
+                self.last_status = "Красный • обнаружена ошибка или блокировка"
+                action = self._action_for_process(key)
+                if key == "exhibition":
+                    action = self.__dict__.get("exhibition_requested_mode")
+                self._show_retry_reason(action, reason)
+            elif "[WARN]" in line:
+                saw_warning = True
+            elif "[OK]" in line or "[PASS]" in line:
+                saw_success = True
+        if self.__dict__.setdefault("last_process_errors", {}).get(key):
+            return
+        if saw_warning:
+            self.last_status = "Жёлтый • есть предупреждения"
+        elif saw_success:
+            self.last_status = "Зелёный • последняя проверка прошла"
 
     def _run_check_all(self) -> None:
         # A fresh run must re-open the gate only after all read-only checks
@@ -2316,11 +2599,7 @@ class OperatorPanel(QMainWindow):
         if key == "exhibition":
             self._consume_exhibition_events(key, text)
         if key == "sdk_warmup":
-            for line in text.splitlines():
-                if not line.startswith("SDK_WARMUP state="):
-                    continue
-                phase = line.split("state=", 1)[1].split()[0]
-                self.status_values["sdk_warmup"] = phase
+            self._consume_sdk_warmup_events(text)
         if key in {"panel_status", "panel_status_fast"}:
             self._parse_status_output(text)
         if key == "voice_check" and hasattr(self, "voice_status"):
@@ -2361,21 +2640,7 @@ class OperatorPanel(QMainWindow):
                     self.capture_status.setText(
                         "Сохранено: " + self.last_capture_path
                     )
-        if "[FAIL]" in text or "[BLOCKED]" in text:
-            self.last_status = "Красный • обнаружена ошибка или блокировка"
-            reason = ""
-            for line in reversed(text.splitlines()):
-                if "[FAIL]" in line or "[BLOCKED]" in line:
-                    reason = re.sub(r"^.*?\[(?:FAIL|BLOCKED)\]\s*", "", line).strip()
-                    break
-            action = self._action_for_process(key)
-            if key == "exhibition":
-                action = self.__dict__.get("exhibition_requested_mode")
-            self._show_retry_reason(action, reason)
-        elif "[WARN]" in text:
-            self.last_status = "Жёлтый • есть предупреждения"
-        elif "[OK]" in text or "[PASS]" in text:
-            self.last_status = "Зелёный • последняя проверка прошла"
+        self._consume_process_diagnostics(key, text)
         self._refresh_summary()
 
     def _append_log(self, key: str, text: str) -> None:
@@ -2384,6 +2649,10 @@ class OperatorPanel(QMainWindow):
             self.log_view.appendPlainText(f"[{stamp}] [{key}] {line.rstrip()}")
 
     def _on_started(self, key: str) -> None:
+        self.__dict__.setdefault("last_process_errors", {}).pop(key, None)
+        buffers = self.__dict__.setdefault("output_line_buffers", {})
+        for prefix in ("diagnostic", "warmup", "exhibition"):
+            buffers.pop(f"{prefix}:{key}", None)
         self._append_log(key, "[INFO] процесс запущен\n")
         if key == "exhibition":
             # Starting the Python process does not confirm the robot's FSM.
@@ -2391,23 +2660,58 @@ class OperatorPanel(QMainWindow):
         self._refresh_summary()
 
     def _on_finished(self, key: str, code: int, _status: int) -> None:
+        if key == "exhibition":
+            self._consume_exhibition_events(key, "", final=True)
+        if key == "sdk_warmup":
+            self._consume_sdk_warmup_events("", final=True)
+        self._consume_process_diagnostics(key, "", final=True)
         level = "OK" if code == 0 else "WARN"
         self._append_log(key, f"[{level}] процесс завершён с кодом {code}\n")
         action = self._action_for_process(key)
         if action and key != "zero_torque":
+            error_detail = self.__dict__.setdefault(
+                "last_process_errors", {}
+            ).get(key)
             self._finish_action(
                 action,
                 "готово" if code == 0 else "ошибка",
-                "команда подтверждена" if code == 0 else f"helper завершился с кодом {code}",
+                (
+                    "команда подтверждена"
+                    if code == 0
+                    else error_detail or f"helper завершился с кодом {code}"
+                ),
             )
-        if key == "sdk_warmup" and self.__dict__.get("pending_warmup_key"):
-            if code == 0:
-                QTimer.singleShot(0, self._start_pending_warmup_mode)
-            else:
-                self.pending_warmup_key = None
-                self.pending_warmup_environment = None
-                self.exhibition_mode = "Фоновая проверка завершилась с ошибкой — повторите выбор режима"
-                self._append_log(key, "[BLOCKED] Штатное завершение фоновой проверки не подтверждено; отложенный запуск отменён.\n")
+        if key == "sdk_warmup":
+            self.warmup_handoff_waiting = False
+            if self.__dict__.get("pending_warmup_key"):
+                self.warmup_restart_pending = False
+                if code == 0:
+                    QTimer.singleShot(0, self._start_pending_warmup_mode)
+                else:
+                    self.pending_warmup_key = None
+                    self.pending_warmup_environment = None
+                    self.exhibition_mode = (
+                        "Фоновая проверка завершилась с ошибкой — повторите "
+                        "выбор режима"
+                    )
+                    self._append_log(
+                        key,
+                        "[BLOCKED] Штатное завершение фоновой проверки не "
+                        "подтверждено; отложенный запуск отменён.\n",
+                    )
+            elif self.__dict__.get("warmup_restart_pending", False):
+                if code == 0:
+                    QTimer.singleShot(0, self._start_recovered_sdk_warmup)
+                else:
+                    # Keep the pending guard latched.  A non-zero owner exit
+                    # does not prove that its temporary SDK reader was reaped,
+                    # so the normal status poll must not start a replacement.
+                    self.status_values["sdk_warmup"] = "RESTART_FAILED"
+                    self._append_log(
+                        key,
+                        "[BLOCKED] Очистка старого SDK warmup не подтверждена; "
+                        "автоматический перезапуск заблокирован.\n",
+                    )
         if key == ZERO_TORQUE_HANDOFF_KEY:
             if self.__dict__.get("pending_zero_torque", False):
                 if code == 0:
@@ -2505,10 +2809,20 @@ class OperatorPanel(QMainWindow):
                 self.exhibition_requested_mode = ""
                 self.exhibition_mode = "Остановлен"
                 if code != 0 and failed_action:
+                    failure_detail = self.__dict__.setdefault(
+                        "last_process_errors", {}
+                    ).get("exhibition")
+                    if not failure_detail and self.status_values.get(
+                        "exhibition"
+                    ) in {"blocked", "degraded"}:
+                        failure_detail = self.status_values.get(
+                            "exhibition_detail", ""
+                        )
                     self._finish_action(
                         failed_action,
                         "ошибка",
-                        f"manager завершился с кодом {code}; смотрите последнюю причину в логах",
+                        failure_detail
+                        or f"manager завершился с кодом {code}; причина не была выведена",
                     )
                 # A local startup failure does not change the conditions that
                 # the operator just confirmed.  Keep the bounded runtime
@@ -2585,7 +2899,8 @@ class OperatorPanel(QMainWindow):
         else:
             self._append_log(
                 "viewer",
-                f"[INFO] открываю {url}; видеопоток ещё запускается, основное окно не блокируется\n",
+                f"[INFO] открываю {url}; видеопоток ещё запускается, "
+                "основное окно не блокируется\n",
             )
 
     def open_logs(self) -> None:
@@ -2696,6 +3011,7 @@ class OperatorPanel(QMainWindow):
         self.pending_exhibition_environment = None
         self.pending_warmup_key = None
         self.pending_warmup_environment = None
+        self.warmup_restart_pending = False
         self.exhibition_switch_in_progress = False
         self.exhibition_stop_complete = False
         self.exhibition_manager_stopped = False

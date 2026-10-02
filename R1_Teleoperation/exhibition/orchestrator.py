@@ -280,6 +280,14 @@ class ExhibitionSettings:
                 if mock or session_mode != "session_arm"
                 else [session_gate, "disarm"]
             ),
+            # One participant preserves the reviewed order
+            # disarm -> central emergency_stop -> writer stop.  If it fails,
+            # the manager still runs the independent STOP/KILL fallback.
+            "safe_stop": (
+                []
+                if mock or session_mode != "session_arm"
+                else [session_gate, "safe_stop"]
+            ),
             "pause_session": (
                 []
                 if mock or session_mode != "session_arm"
@@ -477,7 +485,10 @@ class ExhibitionManager:
         if owner_alive(_read_state(self.settings).get("transport_owner")):
             self._lock_file.close()
             self._lock_file = None
-            raise RuntimeError("previous USB session is still cleaning up; retry after STOP completes")
+            raise RuntimeError(
+                "previous USB session is still cleaning up; "
+                "retry after STOP completes"
+            )
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         self._log_path = self.settings.log_dir / f"{self.mode}-{stamp}.log"
         self._log_file = self._log_path.open(
@@ -596,6 +607,7 @@ class ExhibitionManager:
             "warm_resume",
             "health_session",
             "disarm_session",
+            "safe_stop",
             "clear_emergency",
         }:
             environment["R1_EXHIBITION_SESSION_MODE"] = (
@@ -619,6 +631,7 @@ class ExhibitionManager:
             "stop",
             "kill",
             "disarm_session",
+            "safe_stop",
             "offline_start",
             "offline_stop",
             "offline_restart",
@@ -803,26 +816,56 @@ class ExhibitionManager:
         self._log("offline handoff: prior service restored after STOP")
         return True
 
-    def _terminate_child(self, name: str) -> None:
-        process = self.children.pop(name, None)
-        if not process or process.poll() is not None:
-            return
-        self._log(f"{name}: stopping process group {process.pid}")
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        try:
-            process.wait(timeout=3.0)
-        except subprocess.TimeoutExpired:
+    def _terminate_children(self, names: Iterable[str]) -> bool:
+        """Retire independent child groups in parallel after STOP is confirmed.
+
+        POV and the control/static launch group do not depend on one another
+        once ``_safe_stop`` has returned success.  Signalling both before the
+        bounded wait preserves the full three-second TERM grace for every
+        group without paying that grace serially during a mode handoff.
+        """
+        pending: Dict[str, subprocess.Popen] = {}
+        for name in dict.fromkeys(names):
+            process = self.children.pop(name, None)
+            if process is not None and process.poll() is None:
+                pending[name] = process
+
+        for name, process in pending.items():
+            self._log(f"{name}: stopping process group {process.pid}")
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+        term_deadline = time.monotonic() + 3.0
+        while pending and time.monotonic() < term_deadline:
+            for name, process in list(pending.items()):
+                if process.poll() is not None:
+                    pending.pop(name, None)
+            if pending:
+                time.sleep(min(0.02, max(0.0, term_deadline - time.monotonic())))
+
+        for name, process in pending.items():
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            try:
-                process.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                self._log(f"{name}: process group did not report exit")
+
+        kill_deadline = time.monotonic() + 2.0
+        while pending and time.monotonic() < kill_deadline:
+            for name, process in list(pending.items()):
+                if process.poll() is not None:
+                    pending.pop(name, None)
+            if pending:
+                time.sleep(min(0.02, max(0.0, kill_deadline - time.monotonic())))
+
+        for name in pending:
+            self._log(f"{name}: process group did not report exit")
+        return not pending
+
+    def _terminate_child(self, name: str) -> bool:
+        """Retire one child using the same bounded process-group cleanup."""
+        return self._terminate_children((name,))
 
     def _safe_stop(self) -> bool:
         """Request the reviewed STOP path; use KILL only as its fallback."""
@@ -830,11 +873,22 @@ class ExhibitionManager:
             return self._safe_stop_confirmed
         # This only closes the bridge's exhibition session latch.  The
         # independent writer/supervisor STOP remains mandatory below.
-        self._run_checked("disarm_session", 8.0)
         if self.settings.mock:
+            self._run_checked("disarm_session", 8.0)
             self._safe_stop_confirmed = True
             self._safe_stop_completed = True
             return True
+        if self.mode == "control" and self.settings.commands["safe_stop"]:
+            if self._run_checked("safe_stop", 26.0):
+                self._safe_stop_confirmed = True
+                self._safe_stop_completed = True
+                return True
+            self._log(
+                "combined safe STOP did not confirm; running the independent "
+                "STOP/KILL fallback"
+            )
+        else:
+            self._run_checked("disarm_session", 8.0)
         if self._run_checked("stop", 20.0):
             self._safe_stop_confirmed = True
             self._safe_stop_completed = True
@@ -1316,8 +1370,10 @@ class ExhibitionManager:
                 stop_confirmed = self._safe_stop()
                 if not stop_confirmed:
                     exit_code = max(exit_code, 1)
-            for name in list(self.children):
-                self._terminate_child(name)
+            # STOP/KILL is already confirmed above.  Independent POV and ROS
+            # launch groups can now consume their unchanged TERM grace at the
+            # same time instead of adding several seconds serially.
+            self._terminate_children(list(self.children))
             # A valid proof is consumed by prepare.  Remove an unused one when
             # readiness succeeded but startup was cancelled or failed.
             self.readiness_attestation_path.unlink(missing_ok=True)
@@ -1740,7 +1796,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         return 0 if _wait_for_transport_cleanup(settings, state) else 2
 
     if pid is None and _confirmed_cleanup_is_idle(settings, state):
-        print('[OK] Previous reviewed STOP cleanup is complete; no local control owner/writer remains.')
+        print(
+            '[OK] Previous reviewed STOP cleanup is complete; '
+            'no local control owner/writer remains.'
+        )
         return 0
 
     # STOP/KILL stays usable if manager state was lost, stale, or its bounded

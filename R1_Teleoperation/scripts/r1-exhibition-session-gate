@@ -19,9 +19,9 @@ die() {
 }
 
 [[ $# -eq 1 ]] \
-  || die 'usage: r1-exhibition-session-gate arm|disarm|pause|resume|resume_ready|health|clear_emergency'
+  || die 'usage: r1-exhibition-session-gate arm|disarm|pause|resume|resume_ready|health|clear_emergency|safe_stop'
 case "$1" in
-  arm|disarm|pause|resume|resume_ready|health|clear_emergency) ;;
+  arm|disarm|pause|resume|resume_ready|health|clear_emergency|safe_stop) ;;
   *) die 'unknown session action' ;;
 esac
 
@@ -40,4 +40,12 @@ set -u
 export ROS_DOMAIN_ID="$((10#${DOMAIN_ID}))"
 export ROS_LOCALHOST_ONLY=1
 
-exec "${SCRIPT_DIR}/r1-exhibition-ros-client" "$1" --timeout-sec 8
+TIMEOUT_SEC=8
+if [[ "$1" == safe_stop ]]; then
+  # The normal path shares one discovery participant and finishes much
+  # sooner.  These are only bounded failure budgets: disarm 8 s, central
+  # emergency_stop 4 s and writer stop 8 s, plus participant cleanup.
+  TIMEOUT_SEC=24
+fi
+exec "${SCRIPT_DIR}/r1-exhibition-ros-client" "$1" \
+  --timeout-sec "${TIMEOUT_SEC}"

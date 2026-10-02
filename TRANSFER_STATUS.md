@@ -1,4 +1,4 @@
-# Статус переноса — 01.10.2026
+# Статус переноса — 02.10.2026
 
 Материалы ноутбука опубликованы в IVVA-robo/Unitree_Project, ветка main.
 Проверены коммиты 1fd761dc и 6e1c726d; GitHub LFS подтвердил возможность
@@ -29,7 +29,82 @@ manager, writer, offline-службы, POV и VR bridge. Полный прогр
 ROS launch, VR bridge, manager и writer сохранились (`NRestarts=0`).
 ZERO TORQUE также физически проверен на поддержанном роботе: STOP подтверждён
 за `2,400 s`, writer и offline-служба завершены, пять независимых read-only
-выборок подтвердили финальный FSM 0. Остался полный cold-start ноутбука.
+выборок подтвердили финальный FSM 0.
+
+Полный cold-start ноутбука выполнен позже 01.10. СТОЙКА заняла около `46 s`,
+потому что после восстановления Ethernet отсутствовал приватный SDK warmup
+attestation (`ready_static=35,696 s`, `prepare=7,147 s`). Cold RUN тоже занял
+около `46 s`, но SDK preflight уже был быстрым (`0,086 s`); отдельный этап
+`prepare` занял `33,561 s`. Тёплые RUN/LOCK сохранили быстрый путь. В исходники
+панели добавлен асинхронный restart только read-only warmup после
+подтверждённого `OFFLINE → OK`, с приоритетом физической команды и блокировкой
+при manager/writer, Zero Torque и закрытии. Полный изолированный прогон нового
+кода: `450 passed, 5 skipped in 52.69s`. После подтверждённого STOP панель
+перезапущена с новым кодом; единственный read-only warmup создал свежий
+аттестат на реальном Ethernet без manager/writer. Остался физический повтор
+СТОЙКИ с этим кэшем.
+
+Этот повтор выполнен в 16:20:54 и подтвердил FSM 4, но занял `46,696 s`:
+`ready_static=35,130 s`, `prepare=7,502 s`; сам StandUp после reset KILL —
+`0,585 s`. Нажатие попало в периодическое окно, когда старая версия warmup уже
+удалила исправный кэш перед 30–35-секундным refresh. `r1-sdk-warmup` теперь
+начинает перекрывающийся refresh через 120 секунд и атомарно заменяет старую
+аттестацию. Потеря Ethernet и ошибка preflight по-прежнему инвалидируют её.
+Целевой набор после исправления: `78 passed`; на этом промежуточном этапе
+cached-путь ещё требовал физического замера после штатного STOP static-сеанса.
+
+STOP разрешён оператором и завершён за `2,303 s`, `safe_stop_confirmed=true`;
+manager/writer исчезли. Исправленный warmup прошёл реальный read-only refresh:
+в 16:39:57 прежний cache оставался валидным с неизменными inode/hash при age
+`124,6 s`, а в 16:40:27 был атомарно заменён новым. Остался один warmup без
+writer. Для следующей СТОЙКИ всё равно требуется отдельное новое разрешение.
+
+Разрешение получено, оператор нажал СТОЙКА. Cached-переход завершился за
+`11,652 s`: preflight `0,068 s`, `ready_static=6,195 s`, prepare `5,350 s`;
+cache принят с age `118,3/121,8 s`, FSM 4 подтверждён. Один writer и прежний
+POV PID `723600`, дубликатов нет. Это на `35,044 s` (~75%) быстрее дефектного
+цикла `46,696 s`. Этот static-сеанс позднее штатно завершён перед следующей
+отдельно подтверждённой проверкой.
+
+Отдельная задержка cold RUN также локализована: из `prepare=33,561 s`
+`28,846 s` прошли до KILL reset на последовательных ROS/DDS readers, а
+подтверждённый StandUp/Start после reset занял `2,013 s`. Эти пассивные
+VR/head/arm/locomotion/deadman/head-seed проверки объединены в один participant;
+traffic gate, KILL и FSM сохранены. ROS mock занял `2,80 s`; физический cold RUN
+после изменения выполнен: `logs/exhibition/control-20261001-174715.log` даёт около
+`36 s` от старта manager до prepare, `ready_control=5,725 s` и
+`prepare=22,917 s`. Один discovery participant, обязательный `2,25 s` ArmSdk
+traffic gate и стабильные FSM 4/811 подтверждены. Тёплый LOCK/RUN в соседнем
+сеансе занял `2,817/1,650 s`; финальный LOCK — `1,567 s`.
+
+В аппаратном тесте обнаружено и исправлено зеркальное боковое направление:
+стандартный ROS `+Y = влево` сохранён, а знак инвертируется только при переводе
+в физический Unitree pilot `lx`. Оператор подтвердил левое и правое движение.
+Целевые тесты writer дали `53 passed`, C++ safety — `68 passed`, изолированный
+writer+bridge прогон — `265 passed`. После проверки выполнен разрешённый STOP:
+`status=stopped`, `safe_stop_confirmed=true`, manager/writer отсутствуют,
+offline video-only служба восстановлена.
+
+Утром 02.10 после одновременного включения робота и ноутбука получены новые
+click-to-result замеры: СТОЙКА `50 s`, СТОЙКА → RUN `41 s`, RUN → СТОЙКА
+`24,15 s`. Первый переход не имел SDK-attestation:
+`preflight=3,658 s`, `ready_static=36,696 s`, `prepare=9,602 s`. Переход к RUN
+включал STOP static-сеанса `5,882 s` и control manager около `34 s`; обратный —
+около `10 s` cleanup плюс static manager `12,819 s`. В исходниках панели
+добавлен bounded handoff уже выполняющегося warmup `CHECKING → READY`, чтобы не
+отменять и не повторять тот же полный preflight. `105 passed`; новый путь ещё не
+загружен в физическую панель и не имеет аппаратного замера. Последний
+наблюдавшийся режим после этих замеров — ready/static СТОЙКА в 09:25:44;
+сохранённый state не является бессрочным подтверждением состояния робота.
+
+По замеру RUN → СТОЙКА cleanup дополнительно оптимизирован software-only:
+DISARM, central emergency STOP и writer STOP объединены в один локальный ROS
+participant, а после подтверждения STOP независимые POV/control groups
+завершаются параллельно с прежними `3 s` TERM grace и `2 s` KILL fallback.
+Независимый STOP/KILL fallback сохранён. Проверки: `89 passed`, расширенный
+набор `148 passed, 1 skipped`, полный loopback-only regression `385 passed,
+5 skipped in 51.87s`. Версия загружена в панель 02.10 в 11:13:12 без запуска
+физической команды; нового аппаратного замера ещё нет.
 Подробности и таблица замеров находятся в
 [R1_Teleoperation/docs/exhibition_panel_optimization_20261001.md](R1_Teleoperation/docs/exhibition_panel_optimization_20261001.md).
 
@@ -48,6 +123,74 @@ PC2 этим обновлением не охвачен: включить его
 
 - `/home/unitree/r1-pov-respawn-before-20261001-DLXXci/`;
 - `/home/unitree/r1-pov-manager-grace-before-20261001-2YpNUj/`.
+
+Бэкап перед исправлением cold warmup также находится вне рабочего дерева:
+`/home/unitree/r1-cold-warmup-before-20261001-1tQ6Yu/`; SHA256
+`history.bundle` —
+`68d1f078716e4c5a88195c4e48642a6a177b1dbca7d78b772c857c3831b37b5b`.
+
+Бэкап перед overlap-refresh:
+`/home/unitree/r1-sdk-refresh-race-before-20261001-dmD5Ek/`.
+
+Бэкап перед исправлением боковой оси:
+`/home/unitree/r1-lateral-axis-before-20261001-UAArIG/`.
+
+Финальный dirty-tree patch перед документацией и публикацией:
+`/home/unitree/r1-panel-finalization-before-20261001-km4LVl/working-tree.patch`,
+SHA256 `cabaad5617511dccf5e862372e9d2dcba80ad4927c559ee64b79d180fd932ac6`.
+
+Бэкап перед cold-warmup handoff 02.10:
+`/home/unitree/r1-cold-boot-handoff-before-20261002-W5jj6P/working-tree.patch`,
+SHA256 `d277c1ab99923493f3b70d77fbd16d864e9cadfd1ed3ac6bcc40b0aadbaec60e`.
+
+Бэкап перед оптимизацией RUN → СТОЙКА 02.10:
+`/home/unitree/r1-run-stand-handoff-before-20261002-uFSK9l/dirty-before.patch`,
+SHA256 `ed87040f7c9b6c6f080860abc93e303a5d2e2847f3eb3689ff99519290ca494d`.
+
+Бэкап перед исправлением фрагментированного warmup/ранней причины RUN 02.10:
+`/home/unitree/r1-panel-run-failure-before-20261002-mV5Ek5/dirty-before.patch`,
+SHA256 `e4c6059f1ba8f6d7f59b7b1ed4ea76557fb71b0bb75a4a84402c079cdc71afd3`.
+
+Последняя попытка RUN завершилась безопасной ошибкой за `28,12 s`; нового
+control log, manager и writer не осталось. Панель теперь собирает
+фрагментированные QProcess-строки warmup/manager и сохраняет конкретную
+`[BLOCKED]/[FAIL]` причину вместо общего `код 2`. Полный software-only прогон:
+`387 passed, 5 skipped in 51.56s`. Панель загружена с новым кодом, а fresh
+read-only attestation создана в 10:16:07; физический повтор RUN ещё не выполнен.
+
+Физический повтор RUN затем успешно включил управление; оператор походил и
+перешёл в LOCK. В отдельном Wi-Fi-off тесте RUN → СТОЙКА занял `20,20 s`, но
+загруженная USB-оболочка закрыла APK и удалила `adb reverse 8080`, поэтому
+ручное открытие приложения не вернуло видео. Камера, offline POV и Ethernet
+оставались исправны. В dirty tree добавлен постоянный read-only USB-video owner:
+панель поддерживает APK и `8080 → 8080`, а RUN владеет и удаляет только
+`19092 → 19092`. Целевые mock-тесты: `45 passed`; compile/lint/diff-check
+успешны. Отдельный разрешённый STOP завершился штатно, manager/writer исчезли;
+оператор затем выключил робота и поставил его на зарядку. Новая панель загружена
+02.10 в 11:13:12, offline-служба поднялась в 11:13:16. Подтверждены один POV,
+USB-mode APK PID `10049`, только reverse `8080 → 8080`, отсутствие `19092`,
+manager и writer. Искусственно удалённый mapping восстановился за `4,258 s`
+без смены PID APK. После этого оператор физически выполнил СТОЙКА → RUN →
+LOCK с новой панелью; FSM 4/811 подтвердились, а видео в очках сохранилось
+после LOCK. Замеры: `ready_static=5,303 s`, static prepare `6,694 s`,
+`ready_control=5,778 s`, control prepare `16,559 s`.
+
+Финальная автономная проверка 02.10 завершена: при выключенном Wi-Fi оператор
+несколько раз повторил СТОЙКА → RUN → LOCK, видео в очках сохранялось, ошибок
+панели не было. Выявленная перед повтором гонка завершающегося static writer
+устранена bounded-ожиданием до 12 секунд в USB RUN wrapper. Оно не снимает
+KILL, не запускает новый manager до очистки и не пропускает реально активный
+writer. Целевые USB/handoff тесты: `50 passed`; финальный loopback-only прогон:
+`405 passed in 55.08s`. Пять новых физических журналов не содержат
+`[BLOCKED]`/`[FAIL]`, FSM 4/811 подтверждены, дубликатов процессов не найдено.
+
+Бэкап перед USB-video handoff:
+`/home/unitree/r1-usb-video-handoff-before-20261002-KfB3s7/`;
+SHA256 `dirty-before.patch` —
+`c5e1264546c3132c079bdfdbf3ccfc153b09c0e76701a71fab88d82ce80384c7`.
+
+Бэкап перед финальной фиксацией автономной проверки:
+`/home/unitree/r1-usb-offline-final-before-20261002-16UYp8/`.
 
 ## Охват
 

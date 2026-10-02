@@ -145,6 +145,23 @@ def test_active_exhibition_keeps_watchdog_away_from_camera(recovery_environment)
     assert not any(call[0] == "systemctl" and call[2] in {"start", "restart"} for call in calls)
 
 
+def test_active_static_session_still_repairs_usb_video(recovery_environment):
+    _, environment = recovery_environment
+    helper = Path(environment["PATH"].split(":", 1)[0]) / "usb-video-ensure"
+    helper.symlink_to(helper.parent / "mock-command")
+    lock_path = Path(environment["R1_EXHIBITION_RUNTIME_DIR"]) / "session.lock"
+    with lock_path.open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result, calls = run_recovery(
+            recovery_environment,
+            R1_VR_TRANSPORT="usb",
+            R1_USB_VIDEO_ENSURE=str(helper),
+        )
+    assert result.returncode == 37
+    assert any(call[0] == "usb-video-ensure" for call in calls)
+    assert not any(call[0] == "ServiceList" for call in calls)
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

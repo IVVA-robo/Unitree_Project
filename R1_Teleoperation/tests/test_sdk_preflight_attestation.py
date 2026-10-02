@@ -81,7 +81,12 @@ def test_warmup_and_cached_live_path_remain_read_only_contracts():
     assert warmup.index('"${SCRIPT_DIR}/r1-sdk-preflight-attestation" invalidate') \
         < warmup.index("echo 'SDK_WARMUP state=WAITING_FOR_ROBOT'")
     assert "cache_invalidated_after_link_loss" in warmup
-    assert "SDK_WARMUP state=REFRESHING detail=read_only" in warmup
+    assert "SDK_WARMUP state=REFRESHING detail=read_only_overlap" in warmup
+    refresh_block = warmup.split(
+        "SDK_WARMUP state=REFRESHING detail=read_only_overlap", 1
+    )[0].rsplit("if [[ ${cache_link_ok} == true ]]", 1)[1]
+    assert "invalidate_attestation" not in refresh_block
+    assert "REFRESH_SEC=${R1_SDK_WARMUP_REFRESH_SEC:-120}" in warmup
     assert "r1_resolve_control_ip" in warmup
     assert "[r]1_live_writer_node" in warmup
     assert "r1-sdk-preflight-attestation\" check" in live

@@ -13,9 +13,17 @@ import subprocess
 import sys
 import time
 
-from .session import ACTIVITY, PACKAGE, ROOT, assert_no_live_session, run, usb_device
+from .session import ROOT, assert_no_live_session, run, usb_device
 from exhibition.orchestrator import ExhibitionSettings
 from .recovery import RelayRecovery, pause_for_recovery
+from .video import (
+    CONTROL_DEVICE_ENDPOINT,
+    CONTROL_HOST_ENDPOINT,
+    VIDEO_DEVICE_ENDPOINT,
+    VIDEO_HOST_ENDPOINT,
+    ensure_usb_app,
+    reverse_mappings,
+)
 
 
 def live_environment(environment, serial):
@@ -42,20 +50,70 @@ def live_environment(environment, serial):
 
 
 def ensure_mappings(adb, owned, *, initial=False):
-    existing = {}
-    for row in run(*adb, 'reverse', '--list').splitlines():
-        fields = row.split()
-        if len(fields) == 3:
-            existing[fields[1]] = fields[2]
-    desired = [('tcp:19092', 'tcp:19092'), ('tcp:8080', 'tcp:8080')]
-    for device, host in desired:
-        if device in existing:
-            if initial or existing[device] != host:
-                raise RuntimeError(f'USB port {device} belongs to another session')
-    for device, host in desired:
+    existing = reverse_mappings(adb, runner=run)
+    desired = [
+        (CONTROL_DEVICE_ENDPOINT, CONTROL_HOST_ENDPOINT, True),
+        (VIDEO_DEVICE_ENDPOINT, VIDEO_HOST_ENDPOINT, False),
+    ]
+    for device, host, exclusive in desired:
+        if device not in existing:
+            continue
+        if existing[device] != host or (initial and exclusive):
+            raise RuntimeError(f'USB port {device} belongs to another session')
+    for device, host, exclusive in desired:
         if device not in existing:
             run(*adb, 'reverse', '--no-rebind', device, host)
-            owned.add(device)
+            if exclusive:
+                owned.add(device)
+
+
+def wait_for_previous_control_cleanup(
+    environment=None,
+    *,
+    checker=None,
+    clock=time.monotonic,
+    sleeper=time.sleep,
+):
+    """Wait briefly for the previous mode's writer process to disappear.
+
+    The panel starts a requested mode only after the previous manager and its
+    reviewed STOP path have completed.  Linux can still expose a terminating
+    writer in ``/proc`` for a short time after that handoff.  Treat that as a
+    bounded cleanup phase, while keeping a genuinely active writer blocking.
+    """
+
+    environment = os.environ if environment is None else environment
+    checker = assert_no_live_session if checker is None else checker
+    try:
+        wait_sec = float(environment.get('R1_USB_LIVE_CLEANUP_WAIT_SEC', '12'))
+    except ValueError as error:
+        raise RuntimeError('R1_USB_LIVE_CLEANUP_WAIT_SEC must be numeric') from error
+    if not 0 <= wait_sec <= 30:
+        raise RuntimeError('R1_USB_LIVE_CLEANUP_WAIT_SEC must be in [0, 30]')
+
+    deadline = clock() + wait_sec
+    waiting = False
+    while True:
+        try:
+            checker()
+        except RuntimeError as error:
+            if clock() >= deadline:
+                raise RuntimeError(
+                    'Previous robot control cleanup did not finish within '
+                    f'{wait_sec:g}s; wait for STOP cleanup before RUN'
+                ) from error
+            if not waiting:
+                print(
+                    '[INFO] Waiting for the previous robot control process '
+                    'to finish cleanup before USB RUN.',
+                    flush=True,
+                )
+                waiting = True
+            sleeper(0.05)
+            continue
+        if waiting:
+            print('[OK] Previous robot control cleanup completed.', flush=True)
+        return
 
 
 def main(argv=None):
@@ -69,30 +127,39 @@ def main(argv=None):
     # Cover acquisition AND final ADB cleanup, not just the child manager.
     with (runtime / 'usb-transport.lock').open('a+') as transport_lock:
         try:
-            fcntl.flock(transport_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise RuntimeError('Previous USB session is still active or cleaning up') from error
+            wait_sec = float(os.environ.get('R1_USB_TRANSPORT_LOCK_WAIT_SEC', '5'))
+        except ValueError as error:
+            raise RuntimeError('R1_USB_TRANSPORT_LOCK_WAIT_SEC must be numeric') from error
+        if not 0 <= wait_sec <= 10:
+            raise RuntimeError('R1_USB_TRANSPORT_LOCK_WAIT_SEC must be in [0, 10]')
+        deadline = time.monotonic() + wait_sec
+        while True:
+            try:
+                fcntl.flock(transport_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as error:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        'Previous USB session is still active or cleaning up'
+                    ) from error
+                time.sleep(0.05)
         return run_control()
 
 
 def run_control():
-    assert_no_live_session()
+    wait_for_previous_control_cleanup()
+    runtime = ExhibitionSettings.from_environment().runtime_dir
     serial = usb_device(os.environ.get('R1_VR_ADB_SERIAL'))
     env = live_environment(os.environ, serial)
     adb = ['adb', '-s', serial]
     with socket.socket() as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         probe.bind(('127.0.0.1', 19092))
-    # Reject conflicts before acquiring any mapping, then own these two only.
-    current = run(*adb, 'reverse', '--list').split()
-    if 'tcp:19092' in current or 'tcp:8080' in current:
-        raise RuntimeError('Close the USB diagnostic session before starting RUN')
     wifi_on = run(*adb, 'shell', 'settings', 'get', 'global', 'wifi_on') == '1'
     manager = relay = None
     stopping = False
     owned = set()
     wifi_changed = False
-    app_started = False
 
     def request_stop(signum, frame):
         nonlocal stopping
@@ -110,15 +177,16 @@ def run_control():
         if wifi_on:
             wifi_changed = True
             run(*adb, 'shell', 'svc', 'wifi', 'disable')
-        run(*adb, 'shell', 'am', 'force-stop', PACKAGE)
-        app_started = True
-        run(*adb, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP')
-        run(*adb, 'shell', 'am', 'start', '-n', ACTIVITY, '--ez', 'r1_usb', 'true')
+        app_state = ensure_usb_app(adb, runtime, serial)
         if stopping:
             return 0
         manager = subprocess.Popen([sys.executable, '-m', 'exhibition.orchestrator', 'control'],
                                    cwd=ROOT, env=env, start_new_session=True)
-        print(f'[OK] USB RUN: Pico {serial}; source=127.0.0.1; Wi-Fi disabled', flush=True)
+        print(
+            f'[OK] USB RUN: Pico {serial}; source=127.0.0.1; '
+            f'Wi-Fi disabled; app={app_state}; video=persistent',
+            flush=True,
+        )
         print('[INFO] Cable/pose loss pauses control; '
               'explicit RUN is required after recovery.', flush=True)
         was_connected = True
@@ -171,8 +239,10 @@ def run_control():
             except subprocess.TimeoutExpired:
                 relay.kill()  # pose-only local relay; manager is already stopped
                 relay.wait()
-        cleanup = [['shell', 'am', 'force-stop', PACKAGE]] if app_started else []
-        cleanup += [['reverse', '--remove', port] for port in sorted(owned)]
+        # Keep the USB-mode APK and the read-only 8080 tunnel alive across
+        # RUN -> LOCK -> STAND. Only the exclusive pose tunnel belongs to this
+        # control session and is removed here.
+        cleanup = [['reverse', '--remove', port] for port in sorted(owned)]
         if wifi_changed:
             cleanup.append(['shell', 'svc', 'wifi', 'enable'])
         for action in cleanup:

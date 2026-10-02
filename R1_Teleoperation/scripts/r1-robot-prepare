@@ -266,6 +266,8 @@ else
     || die 'static prepare writer must not enable head, arms, or locomotion'
 fi
 head_auto_center_required=false
+head_auto_center_mode=false
+head_seed_mode=normal
 if grep -Fqi 'boolean value is: true' <<<"${head_enabled}"; then
   require_param head_absolute_envelope_confirmed boolean \
     'boolean value is: true'
@@ -275,9 +277,33 @@ if grep -Fqi 'boolean value is: true' <<<"${head_enabled}"; then
     require_param head_ownership_probe_only boolean 'boolean value is: true'
     require_param head_ownership_probe_confirmed boolean 'boolean value is: true'
     head_probe_mode=true
+    head_seed_mode=probe
   else
     head_probe_mode=false
+    if grep -Fqi 'boolean value is: true' <<<"${exhibition_session_mode}"; then
+      head_auto_center_mode=true
+      head_seed_mode=auto-center
+    fi
   fi
+fi
+
+# The exhibition control graph enables all three command paths on the reviewed
+# fixed topics. Observe them, Deadman and the physical head seed concurrently
+# with the existing passive preflight participant. Other commissioning layouts
+# retain the conservative per-topic fallback below.
+arm_topic="${arm_topic_param#*: }"
+combined_prepare_observation=false
+prepare_observation_args=()
+if grep -Fqi 'boolean value is: true' <<<"${head_enabled}" \
+    && grep -Fqi 'boolean value is: true' <<<"${arms_enabled}" \
+    && grep -Fqi 'boolean value is: true' <<<"${locomotion_enabled}" \
+    && [[ ${arm_topic} == /r1_kinematics_control/debug/arm_trajectory ]] \
+    && ! grep -Fqi 'boolean value is: true' <<<"${static_prepare_mode}"; then
+  combined_prepare_observation=true
+  prepare_observation_args=(
+    --require-prepare-signals
+    --head-seed-mode "${head_seed_mode}"
+  )
 fi
 
 if [[ ${FAST_PREPARE} == true ]]; then
@@ -306,6 +332,7 @@ if [[ ${STATIC_READINESS_ATTESTED} != true ]]; then
     --robot-ip "${CONTROL_IP}" \
     --observe-seconds 2.0 \
     "${require_vr_args[@]}" \
+    "${prepare_observation_args[@]}" \
     --locomotion-mode slow-safe 2>&1)"
   vr_preflight_status=$?
   set -e
@@ -316,7 +343,12 @@ if [[ ${STATIC_READINESS_ATTESTED} != true ]]; then
   fi
 fi
 
-if grep -Fqi 'boolean value is: true' <<<"${head_enabled}"; then
+if [[ ${combined_prepare_observation} == true ]]; then
+  if grep -Fq '[AUTO_CENTER]' <<<"${vr_preflight_output}"; then
+    head_auto_center_required=true
+  fi
+  echo '[OK] reused the single passive control observation; duplicate topic readers skipped.'
+elif grep -Fqi 'boolean value is: true' <<<"${head_enabled}"; then
   head_status="$(timeout 4s ros2 topic echo --once \
     /r1_hardware_adapter/debug/head/status std_msgs/msg/String \
     --field data --no-daemon 2>/dev/null || true)"
@@ -331,11 +363,6 @@ if grep -Fqi 'boolean value is: true' <<<"${head_enabled}"; then
   # named q/dq samples prevent an off-centre or still-moving head from reaching
   # StandUp only to fail later at the ArmSdk seed boundary.
   set +e
-  head_auto_center_mode=false
-  if grep -Fqi 'boolean value is: true' <<<"${exhibition_session_mode}" \
-      && [[ ${head_probe_mode} == false ]]; then
-    head_auto_center_mode=true
-  fi
   head_seed_check="$(timeout 6s python3 - \
     "${head_probe_mode}" "${head_auto_center_mode}" <<'PY'
 import math
@@ -466,14 +493,15 @@ PY
     head_auto_center_required=true
   fi
 fi
-if grep -Fqi 'boolean value is: true' <<<"${locomotion_enabled}"; then
+if [[ ${combined_prepare_observation} != true ]] \
+    && grep -Fqi 'boolean value is: true' <<<"${locomotion_enabled}"; then
   locomotion_command="$(timeout 4s ros2 topic echo --once --full-length \
     /r1/locomotion_dry_run/debug/cmd_vel \
     geometry_msgs/msg/TwistStamped --no-daemon 2>/dev/null || true)"
   [[ -n ${locomotion_command} ]] || die 'fresh bounded locomotion command was not observed'
 fi
-if grep -Fqi 'boolean value is: true' <<<"${arms_enabled}"; then
-  arm_topic="${arm_topic_param#*: }"
+if [[ ${combined_prepare_observation} != true ]] \
+    && grep -Fqi 'boolean value is: true' <<<"${arms_enabled}"; then
   arm_command="$(timeout 5s ros2 topic echo --once --full-length \
     "${arm_topic}" trajectory_msgs/msg/JointTrajectory \
     --no-daemon 2>/dev/null || true)"
@@ -482,7 +510,8 @@ if grep -Fqi 'boolean value is: true' <<<"${arms_enabled}"; then
     || die "arm IK command on ${arm_topic} does not contain the R1 arm joint set"
 fi
 
-if ! grep -Fqi 'boolean value is: true' <<<"${static_prepare_mode}"; then
+if [[ ${combined_prepare_observation} != true ]] \
+    && ! grep -Fqi 'boolean value is: true' <<<"${static_prepare_mode}"; then
   deadman="$(timeout 4s ros2 topic echo --once --full-length \
     /vr/teleop/active std_msgs/msg/Bool --no-daemon 2>/dev/null || true)"
   grep -Eq 'data:[[:space:]]*true' <<<"${deadman}" \

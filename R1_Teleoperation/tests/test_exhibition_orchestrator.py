@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import signal
 import shlex
 import subprocess
 import sys
@@ -760,9 +761,11 @@ def test_video_restart_preserves_locked_control(tmp_path, monkeypatch, previous_
     monkeypatch.setattr(manager, '_start_child', lambda name: name == 'pov')
     monkeypatch.setattr(manager, '_log', lambda message: None)
     states = []
+
     def write_state(status, detail):
         manager._status = status
         states.append(status)
+
     monkeypatch.setattr(manager, '_write_state', write_state)
     assert manager._restart_pov()
     assert states == ['reconnecting', previous_status]
@@ -884,8 +887,10 @@ def test_stop_during_startup_cancels_later_activation(tmp_path, monkeypatch, act
     )
     manager.stop_requested = True
     monkeypatch.setattr(manager, '_log', lambda message: None)
+
     def unexpected_run(*args, **kwargs):
         pytest.fail('activation must not run after a stop request')
+
     monkeypatch.setattr(subprocess, 'run', unexpected_run)
     assert not manager._run_checked(action, 1)
     assert manager.last_action_exit_code == 2
@@ -982,22 +987,84 @@ def test_safe_stop_retries_after_unconfirmed_stop_and_kill(tmp_path):
     environment = _base_environment(tmp_path)
     environment["R1_EXHIBITION_MOCK"] = "0"
     manager = ExhibitionManager(
-        ExhibitionSettings.from_environment(environment), "static"
+        ExhibitionSettings.from_environment(environment), "control"
     )
     calls = []
 
     def first_attempt(name, _timeout):
         calls.append(name)
-        return name == "disarm_session"
+        return False
 
     manager._run_checked = first_attempt
     assert manager._safe_stop() is False
-    assert calls == ["disarm_session", "stop", "kill"]
+    assert calls == ["safe_stop", "stop", "kill"]
     assert manager._safe_stop_completed is False
 
     manager._run_checked = lambda name, _timeout: name == "stop"
     assert manager._safe_stop() is True
     assert manager._safe_stop_confirmed is True
+
+
+def test_combined_safe_stop_avoids_duplicate_stop_helpers(tmp_path):
+    environment = _base_environment(tmp_path)
+    environment["R1_EXHIBITION_MOCK"] = "0"
+    manager = ExhibitionManager(
+        ExhibitionSettings.from_environment(environment), "control"
+    )
+    calls = []
+    manager._run_checked = lambda name, timeout: (
+        calls.append((name, timeout)) or name == "safe_stop"
+    )
+
+    assert manager._safe_stop() is True
+    assert calls == [("safe_stop", 26.0)]
+    assert manager._safe_stop_confirmed is True
+
+
+def test_confirmed_stop_retires_independent_children_in_parallel(
+    tmp_path, monkeypatch
+):
+    manager = ExhibitionManager(
+        ExhibitionSettings.from_environment(_base_environment(tmp_path)),
+        "control",
+    )
+    events = []
+
+    class Child:
+        def __init__(self, pid):
+            self.pid = pid
+            self.signalled = False
+
+        def poll(self):
+            events.append(("poll", self.pid, self.signalled))
+            return 0 if self.signalled else None
+
+    pov = Child(101)
+    control = Child(202)
+    manager.children = {"pov": pov, "control": control}
+
+    def kill_group(pid, sent_signal):
+        events.append(("signal", pid, sent_signal))
+        {101: pov, 202: control}[pid].signalled = True
+
+    monkeypatch.setattr(os, "killpg", kill_group)
+    monkeypatch.setattr(manager, "_log", lambda _message: None)
+
+    assert manager._terminate_children(("pov", "control")) is True
+    term_events = [
+        event for event in events
+        if event[0] == "signal" and event[2] == signal.SIGTERM
+    ]
+    assert term_events == [
+        ("signal", 101, signal.SIGTERM),
+        ("signal", 202, signal.SIGTERM),
+    ]
+    first_completion_poll = next(
+        index for index, event in enumerate(events)
+        if event[0] == "poll" and event[2]
+    )
+    assert events.index(term_events[-1]) < first_completion_poll
+    assert manager.children == {}
 
 
 def test_saved_calibrated_arm_profile_preserves_body_and_sets_head_start_reference(tmp_path):
@@ -1256,13 +1323,18 @@ def test_latched_stop_run_cannot_rebuild_without_confirmed_stop(tmp_path, monkey
         ExhibitionSettings.from_environment(_base_environment(tmp_path)), 'control'
     )
     states = []
+
     def needs_rearm(name, timeout):
         assert name == 'warm_resume'
         manager.last_action_exit_code = 3
         return False
+
     monkeypatch.setattr(manager, '_run_checked', needs_rearm)
     monkeypatch.setattr(manager, '_safe_stop', lambda: False)
-    monkeypatch.setattr(manager, '_write_state', lambda status, detail: states.append((status, detail)))
+    monkeypatch.setattr(
+        manager, '_write_state',
+        lambda status, detail: states.append((status, detail))
+    )
     monkeypatch.setattr(manager, '_log', lambda message: None)
     monkeypatch.setattr(manager, '_terminate_child', lambda name: pytest.fail('unconfirmed STOP'))
     monkeypatch.setattr(manager, '_start_child', lambda name: pytest.fail('unconfirmed STOP'))
@@ -1435,7 +1507,7 @@ def test_session_gate_never_clears_robot_kill_or_constructs_sdk():
     assert "/vr/teleop/clear_emergency_stop" in script
     assert "health" in wrapper
     health_body = client.split("def run_health", 1)[1].split(
-        "def run_calibration", 1
+        "def run_safe_stop", 1
     )[0]
     assert ".trigger(" not in health_body
     assert "/r1/live_writer/reset_kill" not in script

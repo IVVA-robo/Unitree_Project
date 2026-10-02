@@ -12,7 +12,8 @@ def text(name: str) -> str:
 
 
 def assert_exact_zero_gate(
-        script: str, *, before: str, expected_writers: int) -> None:
+        script: str, *, before: str, expected_writers: int,
+        duration: str = '6.0') -> None:
     """Require an observer result check before the named physical boundary."""
     gate = script.rindex('"${SCRIPT_DIR}/r1-arm-sdk-traffic-check"', 0,
                          script.index(before))
@@ -23,7 +24,7 @@ def assert_exact_zero_gate(
     boundary = script.index(before)
     assert gate < capture < exact_zero < failure < boundary
     invocation = script[gate:capture]
-    assert '--duration-sec 6.0' in invocation
+    assert f'--duration-sec {duration}' in invocation
     assert '--fresh-sec 0.5' in invocation
     assert '--action-fresh-sec 3.5' in invocation
     assert '--min-samples 3' in invocation
@@ -43,11 +44,20 @@ def test_prepare_rechecks_traffic_immediately_before_kill_release():
     final_gate = script.index('"${SCRIPT_DIR}/r1-arm-sdk-traffic-check"')
     deadman = script.rindex("grep -Eq 'data:[[:space:]]*true'", 0, final_gate)
     release = script.index('release="$(timeout 8s ros2 service call')
-    assert initial_preflight < deadman < final_gate < release
+    default_duration = script.index('arm_sdk_gate_duration=6.0', deadman)
+    fast_duration = script.index(
+        '[[ ${FAST_PREPARE} == true ]] && arm_sdk_gate_duration=2.25',
+        default_duration,
+    )
+    assert (
+        initial_preflight < deadman < default_duration < fast_duration
+        < final_gate < release
+    )
     assert_exact_zero_gate(
         script,
         before='release="$(timeout 8s ros2 service call',
         expected_writers=1,
+        duration='"${arm_sdk_gate_duration}"',
     )
 
 

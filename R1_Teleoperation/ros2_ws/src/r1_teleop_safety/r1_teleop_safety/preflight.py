@@ -1,6 +1,7 @@
 """Read-only network, VR, and environment checks for R1 teleoperation."""
 
 import argparse
+import math
 import statistics
 import subprocess
 import time
@@ -14,7 +15,9 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 import rclpy
+from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, String
+from trajectory_msgs.msg import JointTrajectory
 
 from .environment import ActuationPolicy
 
@@ -27,7 +30,7 @@ def vr_pose_qos():
 class Observation(Node):
     """Collect bounded, passive samples from the local ROS graph."""
 
-    def __init__(self):
+    def __init__(self, require_prepare_signals=False):
         super().__init__('r1_teleop_preflight')
         command_qos = QoSProfile(
             depth=10,
@@ -51,6 +54,11 @@ class Observation(Node):
         self.last_head_debug_status_arrival = None
         self.last_locomotion_debug_status = None
         self.last_locomotion_debug_status_arrival = None
+        self.last_head_command = None
+        self.last_arm_command = None
+        self.last_locomotion_debug_command = None
+        self.head_seed_samples = []
+        self.head_seed_failure = ''
         # The bridge publishes tracking poses as best-effort sensor data.  A
         # reliable subscription is QoS-incompatible with that publisher and
         # silently receives no HMD samples, which would make preflight report
@@ -91,6 +99,35 @@ class Observation(Node):
             self._locomotion_debug_status,
             command_qos,
         )
+        if require_prepare_signals:
+            # These are the same passive observations which r1-robot-prepare
+            # previously collected through six separate ROS CLI processes.
+            # One participant removes duplicate DDS discovery without calling
+            # a service, clearing KILL or constructing a Unitree SDK writer.
+            self.create_subscription(
+                JointTrajectory,
+                '/r1_hardware_adapter/debug/head/joint_trajectory',
+                self._head_command,
+                command_qos,
+            )
+            self.create_subscription(
+                JointTrajectory,
+                '/r1_kinematics_control/debug/arm_trajectory',
+                self._arm_command,
+                command_qos,
+            )
+            self.create_subscription(
+                TwistStamped,
+                '/r1/locomotion_dry_run/debug/cmd_vel',
+                self._locomotion_debug_command,
+                command_qos,
+            )
+            self.create_subscription(
+                JointState,
+                '/r1/sdk/joint_states',
+                self._joint_state,
+                command_qos,
+            )
 
     def _head(self, message):
         self.head_times.append(time.monotonic())
@@ -121,6 +158,44 @@ class Observation(Node):
     def _locomotion_debug_status(self, message):
         self.last_locomotion_debug_status = str(message.data)
         self.last_locomotion_debug_status_arrival = time.monotonic()
+
+    def _head_command(self, message):
+        self.last_head_command = message
+
+    def _arm_command(self, message):
+        self.last_arm_command = message
+
+    def _locomotion_debug_command(self, message):
+        self.last_locomotion_debug_command = message
+
+    def _joint_state(self, message):
+        if self.head_seed_failure or len(self.head_seed_samples) >= 5:
+            return
+        if (
+            len(message.name) != len(message.position)
+            or len(message.name) != len(message.velocity)
+            or len(set(message.name)) != len(message.name)
+        ):
+            self.head_seed_failure = (
+                'malformed name/position/velocity arrays'
+            )
+            return
+        position = dict(zip(message.name, message.position))
+        velocity = dict(zip(message.name, message.velocity))
+        required = ('head_yaw_joint', 'head_pitch_joint')
+        if any(name not in position or name not in velocity for name in required):
+            self.head_seed_failure = 'head joints are missing from JointState'
+            return
+        values = (
+            position['head_yaw_joint'],
+            position['head_pitch_joint'],
+            velocity['head_yaw_joint'],
+            velocity['head_pitch_joint'],
+        )
+        if not all(math.isfinite(value) for value in values):
+            self.head_seed_failure = 'head q/dq contains NaN or Inf'
+            return
+        self.head_seed_samples.append(values)
 
     def _append_local_transport_latency(self, message, values):
         """Append bridge-to-observer age when both nodes share a ROS clock."""
@@ -196,6 +271,62 @@ def _age_text(arrival, now):
     return '%.3f s ago' % max(0.0, float(now) - float(arrival))
 
 
+def _evaluate_head_seed(samples, mode):
+    """Apply the existing five-sample physical head seed policy."""
+    if len(samples) < 5:
+        return False, '[FAIL] fewer than five fresh physical head samples arrived'
+    yaw, pitch, yaw_velocity, pitch_velocity = samples[-1]
+    feedback_margin = 0.01
+    if mode == 'probe':
+        yaw_limit = 2.0071
+        pitch_limit = 0.6283
+    elif mode == 'auto-center':
+        yaw_limit = 2.0071 + feedback_margin
+        pitch_limit = 0.6283 + feedback_margin
+    else:
+        yaw_limit = 0.35
+        pitch_limit = 0.25
+    if any(
+        abs(sample[0]) > yaw_limit or abs(sample[1]) > pitch_limit
+        for sample in samples
+    ):
+        return False, (
+            '[FAIL] physical head is outside the accepted seed envelope: '
+            f'yaw={yaw:.6f} pitch={pitch:.6f}; '
+            f'limits yaw={yaw_limit:.4f} pitch={pitch_limit:.4f} rad'
+        )
+    if any(
+        abs(sample[2]) > 0.05 or abs(sample[3]) > 0.05
+        for sample in samples
+    ):
+        return False, (
+            '[FAIL] physical head is not stationary enough to seed: '
+            f'yaw_dq={yaw_velocity:.6f} pitch_dq={pitch_velocity:.6f}; '
+            'limit=0.05 rad/s'
+        )
+    if (
+        max(sample[0] for sample in samples)
+        - min(sample[0] for sample in samples) > 0.01
+        or max(sample[1] for sample in samples)
+        - min(sample[1] for sample in samples) > 0.01
+    ):
+        return False, '[FAIL] physical head position changed across the seed samples'
+    outside_tracking_window = abs(yaw) > 0.35 or abs(pitch) > 0.25
+    if mode == 'auto-center' and outside_tracking_window:
+        return True, (
+            '[AUTO_CENTER] stable physical head will be centered automatically '
+            'before arms and locomotion are enabled: '
+            f'yaw={yaw:.6f} pitch={pitch:.6f} '
+            f'yaw_dq={yaw_velocity:.6f} pitch_dq={pitch_velocity:.6f}'
+        )
+    label = 'ownership micro-probe' if mode == 'probe' else 'normal tracking'
+    return True, (
+        '[OK] physical head seed is stable and accepted for '
+        f'{label}: yaw={yaw:.6f} pitch={pitch:.6f} '
+        f'yaw_dq={yaw_velocity:.6f} pitch_dq={pitch_velocity:.6f}'
+    )
+
+
 def main(argv=None):
     """Run read-only preflight and return a warning-aware process status."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -225,6 +356,19 @@ def main(argv=None):
         ),
     )
     parser.add_argument(
+        '--require-prepare-signals',
+        action='store_true',
+        help=(
+            'require the fresh head, arm, locomotion, deadman and physical '
+            'head-seed observations needed immediately before prepare'
+        ),
+    )
+    parser.add_argument(
+        '--head-seed-mode',
+        choices=('normal', 'probe', 'auto-center'),
+        default='normal',
+    )
+    parser.add_argument(
         '--locomotion-mode',
         choices=('slow-safe', 'normal', 'exhibition'),
         default='slow-safe',
@@ -250,7 +394,7 @@ def main(argv=None):
         warnings = warnings or level == 'WARN'
 
     rclpy.init(args=None)
-    observer = Observation()
+    observer = Observation(arguments.require_prepare_signals)
     deadline = time.monotonic() + arguments.observe_seconds
     try:
         while time.monotonic() < deadline:
@@ -348,6 +492,49 @@ def main(argv=None):
             'diagnostic controller status messages were missing'
         )
         return 1
+    if arguments.require_prepare_signals:
+        prepare_failures = []
+        if observer.last_active is not True:
+            prepare_failures.append(
+                'control session is not active; no fresh true deadman sample'
+            )
+        head_status = (observer.last_head_debug_status or '').lower()
+        if 'calibrated=true' not in head_status:
+            prepare_failures.append('head neutral is not calibrated')
+        if observer.last_head_command is None:
+            prepare_failures.append('fresh bounded head command was not observed')
+        if observer.last_locomotion_debug_command is None:
+            prepare_failures.append(
+                'fresh bounded locomotion command was not observed'
+            )
+        if observer.last_arm_command is None:
+            prepare_failures.append('fresh arm IK command was not observed')
+        elif 'left_shoulder_pitch_joint' not in observer.last_arm_command.joint_names:
+            prepare_failures.append(
+                'arm IK command does not contain the R1 arm joint set'
+            )
+        if observer.head_seed_failure:
+            prepare_failures.append(
+                f'physical head feedback rejected: {observer.head_seed_failure}'
+            )
+            seed_ok = False
+            seed_message = ''
+        else:
+            seed_ok, seed_message = _evaluate_head_seed(
+                observer.head_seed_samples,
+                arguments.head_seed_mode,
+            )
+            if not seed_ok:
+                prepare_failures.append(seed_message.removeprefix('[FAIL] '))
+        if prepare_failures:
+            for failure in prepare_failures:
+                print(f'[FAIL] prepare observation: {failure}')
+            return 1
+        print(seed_message)
+        print(
+            '[OK] control prepare signals observed concurrently with one '
+            'read-only DDS participant'
+        )
     print(
         'No Unitree SDK writer, stand command, stiffness command, or '
         'locomotion request was created.'

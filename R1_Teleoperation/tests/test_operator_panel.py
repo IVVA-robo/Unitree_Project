@@ -436,6 +436,67 @@ def test_structured_manager_state_updates_mode_without_poll_delay():
     assert finished == [("exhibition_control", "готово", "warm graph")]
 
 
+def test_fragmented_sdk_warmup_ready_triggers_clean_handoff():
+    stops = []
+
+    class Controller:
+        def stop(self, key, **kwargs):
+            stops.append((key, kwargs))
+
+    panel = OperatorPanel.__new__(OperatorPanel)
+    panel.controller = Controller()
+    panel.output_line_buffers = {}
+    panel.status_values = {"sdk_warmup": "CHECKING"}
+    panel.sdk_warmup_cache_available = False
+    panel.pending_warmup_key = "exhibition_control"
+    panel.warmup_handoff_waiting = True
+    panel._append_log = lambda *_args: None
+
+    panel._consume_sdk_warmup_events("SDK_WARMUP state=REA")
+    assert panel.status_values["sdk_warmup"] == "CHECKING"
+    assert stops == []
+
+    panel._consume_sdk_warmup_events("DY\n")
+    assert panel.status_values["sdk_warmup"] == "READY"
+    assert panel.sdk_warmup_cache_available is True
+    assert panel.warmup_handoff_waiting is False
+    assert stops == [
+        ("sdk_warmup", {"graceful_timeout_ms": 12000, "wait": False})
+    ]
+
+
+def test_fragmented_early_manager_error_is_kept_for_button_result():
+    finished = []
+    retry_reasons = []
+    panel = OperatorPanel.__new__(OperatorPanel)
+    panel.output_line_buffers = {}
+    panel.last_process_errors = {}
+    panel.status_values = {}
+    panel.last_status = "Зелёный"
+    panel.exhibition_requested_mode = "exhibition_control"
+    panel.exhibition_switch_in_progress = False
+    panel.pending_exhibition_key = None
+    panel.exhibition_mode = "Подготовка"
+    panel.close_after_stop = False
+    panel._append_log = lambda *_args: None
+    panel._refresh_summary = lambda: None
+    panel._show_retry_reason = (
+        lambda action, reason: retry_reasons.append((action, reason))
+    )
+    panel._finish_action = lambda *args: finished.append(args)
+
+    panel._consume_process_diagnostics("exhibition", "[BLOC")
+    panel._consume_process_diagnostics(
+        "exhibition", "KED] USB RUN: Pico command timed out\n"
+    )
+    panel._on_finished("exhibition", 2, 0)
+
+    reason = "USB RUN: Pico command timed out"
+    assert panel.last_process_errors["exhibition"] == reason
+    assert retry_reasons == [("exhibition_control", reason)]
+    assert finished == [("exhibition_control", "ошибка", reason)]
+
+
 def test_button_timing_records_monotonic_elapsed(monkeypatch):
     ticks = iter((10.0, 10.125))
     monkeypatch.setattr(app_module.time, "monotonic", lambda: next(ticks))
@@ -748,13 +809,19 @@ def test_fresh_exhibition_run_skips_legacy_checkbox_confirmation():
     ]
 
 
-@pytest.mark.parametrize('completion', ['clean', 'failed', 'stop', 'new_destination', 'owner_changed'])
-def test_fresh_run_handoff_is_async_and_waits_for_sdk_warmup_cleanup(monkeypatch, completion):
+@pytest.mark.parametrize(
+    'completion', ['clean', 'failed', 'stop', 'new_destination', 'owner_changed']
+)
+def test_fresh_run_handoff_is_async_and_waits_for_sdk_warmup_cleanup(
+    monkeypatch, completion
+):
     starts = []
     stops = []
+    timers = []
 
     class Controller:
         running = {'sdk_warmup'}
+
         def is_running(self, key):
             return key in self.running
 
@@ -774,6 +841,9 @@ def test_fresh_run_handoff_is_async_and_waits_for_sdk_warmup_cleanup(monkeypatch
     panel.status_values = {"sdk_warmup": "CHECKING"}
     panel.pending_warmup_key = None
     panel.pending_warmup_environment = None
+    panel.warmup_handoff_waiting = False
+    panel.warmup_handoff_generation = 0
+    panel.sdk_warmup_cache_available = False
     panel._confirm_live = lambda *_args, **_kwargs: True
     panel._live_environment = lambda **_kwargs: {"TOKEN": "warm-cache"}
     panel._start_exhibition_mode = (
@@ -781,16 +851,27 @@ def test_fresh_run_handoff_is_async_and_waits_for_sdk_warmup_cleanup(monkeypatch
     )
     panel._refresh_summary = lambda: None
     panel._append_log = lambda *args: None
+    from types import SimpleNamespace
+    monkeypatch.setattr(
+        app_module,
+        'QTimer',
+        SimpleNamespace(singleShot=lambda _ms, fn: timers.append(fn)),
+    )
 
     panel._run_exhibition_mode("exhibition_control")
 
-    assert stops == [("sdk_warmup", {"graceful_timeout_ms": 12000, "wait": False})]
+    assert stops == []
+    assert len(timers) == 1
     assert starts == []
     assert panel.pending_warmup_key == 'exhibition_control'
     panel._start_pending_warmup_mode()
     assert starts == []
-    # A READY line is not proof the worker and its owned reader have exited.
+    # READY preserves the completed cache but still requests confirmed worker
+    # cleanup before the physical manager can start.
     panel._on_output('sdk_warmup', 'SDK_WARMUP state=READY\n')
+    assert stops == [
+        ("sdk_warmup", {"graceful_timeout_ms": 12000, "wait": False})
+    ]
     assert starts == []
     destination = 'exhibition_control'
     if completion == 'new_destination':
@@ -802,7 +883,6 @@ def test_fresh_run_handoff_is_async_and_waits_for_sdk_warmup_cleanup(monkeypatch
     panel.controller.running.clear()
     if completion == 'owner_changed':
         monkeypatch.setattr(app_module, 'active_session_snapshot', lambda: {'mode': 'static'})
-    from types import SimpleNamespace
     monkeypatch.setattr(app_module, 'QTimer', SimpleNamespace(singleShot=lambda _ms, fn: fn()))
     panel._append_log = lambda *args: None
     panel.close_after_stop = False
@@ -813,14 +893,106 @@ def test_fresh_run_handoff_is_async_and_waits_for_sdk_warmup_cleanup(monkeypatch
     assert panel.pending_warmup_environment is None
 
 
+def test_inflight_warmup_handoff_timeout_falls_back_asynchronously(monkeypatch):
+    stops = []
+    timers = []
+
+    class Controller:
+        def is_running(self, key):
+            return key == 'sdk_warmup'
+
+        def stop(self, key, **kwargs):
+            stops.append((key, kwargs))
+
+    from types import SimpleNamespace
+    monkeypatch.setattr(
+        app_module,
+        'QTimer',
+        SimpleNamespace(singleShot=lambda _ms, fn: timers.append(fn)),
+    )
+    panel = OperatorPanel.__new__(OperatorPanel)
+    panel.controller = Controller()
+    panel.specs = {spec.key: spec for spec in command_catalog()}
+    panel.exhibition_session_confirmed = False
+    panel.exhibition_requested_mode = ''
+    panel.exhibition_mode = 'Остановлен'
+    panel.status_values = {'sdk_warmup': 'CHECKING'}
+    panel.pending_warmup_key = None
+    panel.pending_warmup_environment = None
+    panel.warmup_handoff_waiting = False
+    panel.warmup_handoff_generation = 0
+    panel.sdk_warmup_cache_available = False
+    panel._confirm_live = lambda *_args, **_kwargs: True
+    panel._live_environment = lambda **_kwargs: {'TOKEN': 'bounded'}
+    panel._refresh_summary = lambda: None
+    panel._append_log = lambda *_args: None
+
+    panel._run_exhibition_mode('exhibition_stand')
+    assert stops == []
+    assert len(timers) == 1
+    timers[0]()
+    assert stops == [
+        ('sdk_warmup', {'graceful_timeout_ms': 12000, 'wait': False})
+    ]
+
+
+def test_refreshing_warmup_with_valid_cache_stops_without_waiting(monkeypatch):
+    stops = []
+    timers = []
+
+    class Controller:
+        def is_running(self, key):
+            return key == 'sdk_warmup'
+
+        def stop(self, key, **kwargs):
+            stops.append((key, kwargs))
+
+    from types import SimpleNamespace
+    monkeypatch.setattr(
+        app_module,
+        'QTimer',
+        SimpleNamespace(singleShot=lambda _ms, fn: timers.append(fn)),
+    )
+    panel = OperatorPanel.__new__(OperatorPanel)
+    panel.controller = Controller()
+    panel.specs = {spec.key: spec for spec in command_catalog()}
+    panel.exhibition_session_confirmed = False
+    panel.exhibition_requested_mode = ''
+    panel.exhibition_mode = 'Остановлен'
+    panel.status_values = {'sdk_warmup': 'CHECKING'}
+    panel.pending_warmup_key = None
+    panel.pending_warmup_environment = None
+    panel.warmup_handoff_waiting = False
+    panel.warmup_handoff_generation = 0
+    panel.sdk_warmup_cache_available = True
+    panel._confirm_live = lambda *_args, **_kwargs: True
+    panel._live_environment = lambda **_kwargs: {'TOKEN': 'cached'}
+    panel._refresh_summary = lambda: None
+    panel._append_log = lambda *_args: None
+
+    panel._run_exhibition_mode('exhibition_control')
+    assert timers == []
+    assert stops == [
+        ('sdk_warmup', {'graceful_timeout_ms': 12000, 'wait': False})
+    ]
+
+
 def test_usb_button_never_waits_for_adb_on_the_ui_thread(monkeypatch):
     import usb_link.session
-    monkeypatch.setattr(usb_link.session, 'usb_device', lambda *args: pytest.fail('blocking ADB in Qt thread'))
+    monkeypatch.setattr(
+        usb_link.session,
+        'usb_device',
+        lambda *args: pytest.fail('blocking ADB in Qt thread'),
+    )
     panel = OperatorPanel.__new__(OperatorPanel)
-    panel.config = OperatorConfig(vr_transport='usb', dry_run=False, allow_live=True)
+    panel.config = OperatorConfig(
+        vr_transport='usb', dry_run=False, allow_live=True
+    )
     panel.preflight_ok = False
     spec = {spec.key: spec for spec in command_catalog()}['exhibition_control']
-    assert panel._confirm_live(spec, automatic_preflight=True, require_vr=True, skip_checklist=True)
+    assert panel._confirm_live(
+        spec, automatic_preflight=True, require_vr=True, skip_checklist=True
+    )
 
 
 def test_run_to_lock_pauses_existing_control_graph_without_stopping_it():
@@ -858,7 +1030,10 @@ def test_stand_switch_waits_for_owner_cleanup(monkeypatch, owned, source_mode, k
     calls = []
     confirmations = []
     monkeypatch.setattr(app_module, 'active_session_snapshot', lambda: {
-        'mode': source_mode, 'session_mode': 'session_arm' if source_mode == 'control' else 'deadman',
+        'mode': source_mode,
+        'session_mode': (
+            'session_arm' if source_mode == 'control' else 'deadman'
+        ),
         'status': 'ready',
     })
 
@@ -873,7 +1048,11 @@ def test_stand_switch_waits_for_owner_cleanup(monkeypatch, owned, source_mode, k
     panel = OperatorPanel.__new__(OperatorPanel)
     panel.controller = Controller()
     panel.specs = {spec.key: spec for spec in command_catalog()}
-    panel.exhibition_requested_mode = 'exhibition_control' if source_mode == 'control' else 'exhibition_stand'
+    panel.exhibition_requested_mode = (
+        'exhibition_control'
+        if source_mode == 'control'
+        else 'exhibition_stand'
+    )
     panel.status_values = {'mode': source_mode}
     panel._refresh_summary = lambda: None
     panel._append_log = lambda *args: None
@@ -928,7 +1107,9 @@ def test_repeated_static_action_does_not_rearm_run(
 def test_switch_destination_can_change_but_explicit_stop_cannot_queue_run():
     from types import SimpleNamespace
     panel = OperatorPanel.__new__(OperatorPanel)
-    panel.controller = SimpleNamespace(is_running=lambda key: key in {'exhibition', 'exhibition_stop'})
+    panel.controller = SimpleNamespace(
+        is_running=lambda key: key in {'exhibition', 'exhibition_stop'}
+    )
     panel.specs = {spec.key: spec for spec in command_catalog()}
     panel._append_log = lambda *args: None
     confirmations = []
@@ -1133,7 +1314,11 @@ def test_close_routes_physical_session_through_exhibition_stop(monkeypatch, owne
     assert panel.status_timer.stopped is True
     assert panel.pending_warmup_key is None
     assert panel.pending_warmup_environment is None
-    assert starts == ([("exhibition_stop", "exhibition_stop", {})] if owner == 'exhibition' else [])
+    assert starts == (
+        [("exhibition_stop", "exhibition_stop", {})]
+        if owner == 'exhibition'
+        else []
+    )
     assert stops == ([] if owner == 'exhibition' else [
         ('sdk_warmup', {'graceful_timeout_ms': 12000, 'wait': False})])
 
@@ -1192,6 +1377,161 @@ def test_panel_status_parser_accepts_line_protocol():
         "noise\nSTATUS ethernet=OK\nSTATUS deadman=RELEASED\n"
     )
     assert panel.status_values == {"ethernet": "OK", "deadman": "RELEASED"}
+
+
+def test_first_healthy_robot_status_does_not_restart_fresh_sdk_warmup():
+    stops = []
+
+    class Controller:
+        def is_running(self, key):
+            return key == "sdk_warmup"
+
+        def stop(self, key, **kwargs):
+            stops.append((key, kwargs))
+
+    panel = OperatorPanel.__new__(OperatorPanel)
+    panel.controller = Controller()
+    panel.status_values = {}
+    panel.warmup_restart_pending = False
+    panel.warmup_robot_offline_observed = False
+    panel._refresh_exhibition_status = lambda: None
+
+    panel._parse_status_output("STATUS robot=OK\n")
+
+    assert stops == []
+    assert panel.warmup_restart_pending is False
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_robot_offline_to_ok_restarts_sdk_warmup_only_after_clean_exit(
+    monkeypatch, exit_code
+):
+    starts = []
+    stops = []
+
+    class Controller:
+        running = {"sdk_warmup"}
+
+        def is_running(self, key):
+            return key in self.running
+
+        def stop(self, key, **kwargs):
+            stops.append((key, kwargs))
+
+        def start(self, key, spec, **kwargs):
+            starts.append((key, spec.key, kwargs))
+            self.running.add(key)
+            return True
+
+    class ImmediateTimer:
+        @staticmethod
+        def singleShot(_delay, callback):
+            callback()
+
+    monkeypatch.setattr(app_module, "QTimer", ImmediateTimer)
+    panel = OperatorPanel.__new__(OperatorPanel)
+    panel.controller = Controller()
+    panel.specs = {spec.key: spec for spec in command_catalog()}
+    panel.status_values = {}
+    panel.preflight_ok = True
+    panel.pending_warmup_key = None
+    panel.pending_warmup_environment = None
+    panel.pending_exhibition_key = None
+    panel.warmup_restart_pending = False
+    panel.warmup_robot_offline_observed = False
+    panel.close_after_stop = False
+    panel._clear_live_confirmation = lambda: None
+    panel._refresh_exhibition_status = lambda: None
+    panel._refresh_summary = lambda: None
+    panel._append_log = lambda *_args: None
+
+    panel._parse_status_output("STATUS robot=OFFLINE\n")
+    assert stops == []
+    panel._parse_status_output("STATUS robot=OK\n")
+
+    assert stops == [
+        ("sdk_warmup", {"graceful_timeout_ms": 12000, "wait": False})
+    ]
+    assert panel.warmup_restart_pending is True
+    assert starts == []
+
+    panel.controller.running.remove("sdk_warmup")
+    panel._on_finished("sdk_warmup", exit_code, 0)
+
+    if exit_code == 0:
+        assert starts == [("sdk_warmup", "sdk_warmup", {})]
+        assert panel.warmup_restart_pending is False
+    else:
+        assert starts == []
+        assert panel.warmup_restart_pending is True
+        assert panel.status_values["sdk_warmup"] == "RESTART_FAILED"
+
+
+def test_active_physical_session_blocks_recovered_link_warmup_restart():
+    calls = []
+
+    class Controller:
+        def is_running(self, key):
+            return key == "exhibition"
+
+        def stop(self, *args, **kwargs):
+            calls.append(("stop", args, kwargs))
+
+        def start(self, *args, **kwargs):
+            calls.append(("start", args, kwargs))
+            return True
+
+    panel = OperatorPanel.__new__(OperatorPanel)
+    panel.controller = Controller()
+    panel.status_values = {}
+    panel.preflight_ok = True
+    panel.pending_warmup_key = None
+    panel.pending_warmup_environment = None
+    panel.pending_exhibition_key = None
+    panel.warmup_restart_pending = False
+    panel.warmup_robot_offline_observed = False
+    panel._clear_live_confirmation = lambda: None
+    panel._refresh_exhibition_status = lambda: None
+
+    panel._parse_status_output("STATUS robot=OFFLINE\n")
+    panel._parse_status_output("STATUS robot=READY\n")
+
+    assert calls == []
+    assert panel.warmup_restart_pending is False
+
+
+@pytest.mark.parametrize("key", ["exhibition_control", "exhibition_stand"])
+def test_physical_request_cancels_background_warmup_restart(key):
+    stops = []
+
+    class Controller:
+        def is_running(self, process_key):
+            return process_key == "sdk_warmup"
+
+        def stop(self, process_key, **kwargs):
+            stops.append((process_key, kwargs))
+
+    panel = OperatorPanel.__new__(OperatorPanel)
+    panel.controller = Controller()
+    panel.specs = {spec.key: spec for spec in command_catalog()}
+    panel.status_values = {}
+    panel.exhibition_session_confirmed = False
+    panel.exhibition_requested_mode = ""
+    panel.exhibition_mode = "Остановлен"
+    panel.pending_warmup_key = None
+    panel.pending_warmup_environment = None
+    panel.warmup_restart_pending = True
+    panel._confirm_live = lambda *_args, **_kwargs: True
+    panel._live_environment = lambda **_kwargs: {"TOKEN": "physical-priority"}
+    panel._refresh_summary = lambda: None
+
+    panel._run_exhibition_mode(key)
+
+    assert panel.warmup_restart_pending is False
+    assert panel.pending_warmup_key == key
+    assert stops == [
+        ("sdk_warmup", {"graceful_timeout_ms": 12000, "wait": False})
+    ]
 
 
 def test_live_ack_survives_transient_robot_warning_but_not_offline():

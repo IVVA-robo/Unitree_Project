@@ -610,7 +610,7 @@ def test_wireless_controller_mode_matches_captured_vendor_channel():
     mapping = function_body(
         TRANSPORT, 'detail::velocity_to_wireless_controller('
     )
-    assert 'lateral / kLateralCeilingMps' in mapping
+    assert '-lateral / kLateralCeilingMps' in mapping
     assert 'forward / kForwardCeilingMps' in mapping
     assert '-yaw / kYawCeilingRps' in mapping
     assert 'std::clamp' in mapping

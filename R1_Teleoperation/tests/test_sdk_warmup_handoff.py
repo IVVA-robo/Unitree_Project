@@ -99,3 +99,87 @@ def test_warmup_stop_waits_for_its_preflight_owned_cleanup(tmp_path, launcher, m
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
             process.communicate(timeout=4)
+
+
+def test_warmup_refresh_keeps_recent_cache_until_replacement_is_ready(tmp_path):
+    """A click during healthy refresh must not recreate the cold-cache gap."""
+    root = Path(__file__).resolve().parents[1]
+    scripts = tmp_path / 'scripts'
+    scripts.mkdir()
+    warmup = scripts / 'r1-sdk-warmup'
+    warmup.write_text((root / 'scripts/r1-sdk-warmup').read_text())
+    warmup.chmod(0o755)
+    (scripts / 'r1-network-autodetect').write_text(
+        'r1_resolve_control_ip() { echo 127.0.0.1; }\n'
+    )
+    for name in ('ping', 'pgrep'):
+        path = scripts / name
+        path.write_text('#!/bin/sh\nexit ' + ('0' if name == 'ping' else '1') + '\n')
+        path.chmod(0o755)
+
+    cache = tmp_path / 'attestation'
+    attestation = scripts / 'r1-sdk-preflight-attestation'
+    attestation.write_text(
+        '#!/bin/sh\n'
+        f'cache={str(cache)!r}\n'
+        'case "$1" in\n'
+        '  check) [ -f "$cache" ] ;;\n'
+        '  record) : > "$cache" ;;\n'
+        '  invalidate) rm -f -- "$cache" ;;\n'
+        'esac\n'
+    )
+    attestation.chmod(0o755)
+
+    count = tmp_path / 'preflight-count'
+    refreshing = tmp_path / 'refreshing'
+    cleaned = tmp_path / 'cleaned'
+    child = scripts / 'r1-sdk-preflight'
+    child.write_text(
+        f'#!{sys.executable}\n'
+        'import signal, time\n'
+        'from pathlib import Path\n'
+        f'count = Path({str(count)!r})\n'
+        'attempt = int(count.read_text()) + 1 if count.exists() else 1\n'
+        'count.write_text(str(attempt))\n'
+        'if attempt == 1:\n'
+        '    raise SystemExit(0)\n'
+        f'refreshing = Path({str(refreshing)!r})\n'
+        f'cleaned = Path({str(cleaned)!r})\n'
+        'def stop(*_args):\n'
+        '    cleaned.touch()\n'
+        '    raise SystemExit(0)\n'
+        'signal.signal(signal.SIGTERM, stop)\n'
+        'refreshing.touch()\n'
+        'while True:\n'
+        '    time.sleep(0.05)\n'
+    )
+    child.chmod(0o755)
+
+    environment = dict(
+        os.environ,
+        PATH=str(scripts) + ':' + os.environ['PATH'],
+        R1_LIVE_NETWORK_INTERFACE='lo',
+        R1_SDK_WARMUP_RETRY_SEC='1',
+        R1_SDK_WARMUP_REFRESH_SEC='1',
+    )
+    process = subprocess.Popen(
+        [str(warmup)], cwd=tmp_path, env=environment,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not refreshing.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert refreshing.exists()
+        assert cache.exists(), 'healthy cache disappeared during refresh'
+
+        os.killpg(process.pid, signal.SIGTERM)
+        output, _ = process.communicate(timeout=4)
+        assert process.returncode == 0, output
+        assert cleaned.exists()
+        assert cache.exists(), 'handoff lost the preceding healthy attestation'
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.communicate(timeout=4)

@@ -34,6 +34,11 @@ GATES = {
     ),
 }
 
+SAFE_STOP_SERVICES = (
+    "/r1/safety/emergency_stop",
+    "/r1/live_writer/stop",
+)
+
 
 class ExhibitionClient:
     def __init__(self, context: Context) -> None:
@@ -244,6 +249,60 @@ def run_health(client: ExhibitionClient, deadline: float) -> int:
     return 0
 
 
+def run_safe_stop(client: ExhibitionClient, deadline: float) -> int:
+    """Disarm VR, assert central KILL, then request writer STOP in one graph."""
+    disarm_deadline = min(deadline, time.monotonic() + 8.0)
+    disarmed, reason = client.trigger(GATES["disarm"][0], disarm_deadline)
+    if disarmed:
+        client.active = None
+        client.armed = None
+        client.phase = "fresh_confirmation:safe_stop_disarm"
+        print("[WAIT] " + client.phase, flush=True)
+        disarmed = client.spin_until(
+            lambda: client.active is False and client.armed is False,
+            disarm_deadline,
+        )
+        if not disarmed:
+            reason = (
+                "fresh disarm state unavailable: "
+                f"active={client.active} armed={client.armed}"
+            )
+    if not disarmed:
+        # This matches the previous manager path: failure to close the VR
+        # latch must never prevent the stronger central/writer STOP below.
+        print(
+            "[WARN] session disarm was not confirmed before STOP: " + reason,
+            file=sys.stderr,
+            flush=True,
+        )
+
+    results = []
+    for service, budget in zip(SAFE_STOP_SERVICES, (4.0, 8.0)):
+        step_deadline = min(deadline, time.monotonic() + budget)
+        success, detail = client.trigger(service, step_deadline)
+        results.append((service, success, detail))
+
+    failed = [
+        f"{service}: {detail}"
+        for service, success, detail in results
+        if not success
+    ]
+    if failed:
+        print(
+            "[BLOCKED] combined safe STOP was not confirmed: "
+            + "; ".join(failed),
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
+    print(
+        "[OK] session disarmed where available; central kill and writer "
+        "stop are confirmed.",
+        flush=True,
+    )
+    return 0
+
+
 def run_calibration(client: ExhibitionClient, deadline: float) -> int:
     client.active = None
     if not client.spin_until(lambda: client.active is not None, deadline):
@@ -267,7 +326,9 @@ def main() -> int:
     # last completed phase/response even when stdout is a pipe.
     sys.stdout.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=(*GATES, "health", "calibrate"))
+    parser.add_argument(
+        "action", choices=(*GATES, "health", "safe_stop", "calibrate")
+    )
     parser.add_argument("--timeout-sec", type=float, default=8.0)
     arguments = parser.parse_args()
     if not 1.0 <= arguments.timeout_sec <= 30.0:
@@ -296,6 +357,8 @@ def main() -> int:
             return run_calibration(client, deadline)
         if arguments.action == "health":
             return run_health(client, deadline)
+        if arguments.action == "safe_stop":
+            return run_safe_stop(client, deadline)
         return run_gate(client, arguments.action, deadline)
     except (KeyboardInterrupt, SystemExit):
         return 130

@@ -1,6 +1,7 @@
 """Gate decisions without ROS participants or a connected robot."""
 from pathlib import Path
 import runpy
+import time
 
 import pytest
 
@@ -9,6 +10,7 @@ client_module = runpy.run_path(str(
     Path(__file__).resolve().parents[1] / 'scripts/r1-exhibition-ros-client'
 ))
 run_gate = client_module['run_gate']
+run_safe_stop = client_module['run_safe_stop']
 
 
 class Client:
@@ -82,11 +84,14 @@ def test_pause_needs_fresh_state_after_reply():
     assert client.calls == ['/vr/teleop/pause_session']
 
 
-@pytest.mark.parametrize('sample', [{'active': False, 'armed': True},
-                                   {'active': True, 'armed': True},
-                                   {'active': False, 'armed': False}])
+@pytest.mark.parametrize('sample', [
+    {'active': False, 'armed': True},
+    {'active': True, 'armed': True},
+    {'active': False, 'armed': False},
+])
 def test_pause_confirmation_requires_both_flags(sample):
-    assert run_gate(Client([sample]), 'pause', 1) == (0 if sample == {'active': False, 'armed': True} else 2)
+    expected = 0 if sample == {'active': False, 'armed': True} else 2
+    assert run_gate(Client([sample]), 'pause', 1) == expected
 
 
 def make_trigger_client(responses):
@@ -116,7 +121,11 @@ def make_trigger_client(responses):
         def call_async(self, _request):
             value = responses[self.requests]
             self.requests += 1
-            return Future(None if value is None else SimpleNamespace(success=value, message='reply'))
+            response = (
+                None if value is None
+                else SimpleNamespace(success=value, message='reply')
+            )
+            return Future(response)
 
     service = Service()
     destroyed = []
@@ -162,3 +171,44 @@ def test_cancelled_pause_cannot_retry():
     client.cancelled = True
     assert not client.trigger('/vr/teleop/pause_session', deadline)[0]
     assert service.requests == 0
+
+
+def test_safe_stop_preserves_disarm_kill_writer_order_in_one_client():
+    client = Client([{'active': False, 'armed': False}])
+
+    assert run_safe_stop(client, time.monotonic() + 1.0) == 0
+    assert client.calls == [
+        '/vr/teleop/disarm_session',
+        '/r1/safety/emergency_stop',
+        '/r1/live_writer/stop',
+    ]
+
+
+def test_safe_stop_still_asserts_both_stop_layers_when_disarm_fails():
+    client = Client([])
+
+    def trigger(service, _deadline):
+        client.calls.append(service)
+        return service != '/vr/teleop/disarm_session', 'test response'
+
+    client.trigger = trigger
+
+    assert run_safe_stop(client, time.monotonic() + 1.0) == 0
+    assert client.calls == [
+        '/vr/teleop/disarm_session',
+        '/r1/safety/emergency_stop',
+        '/r1/live_writer/stop',
+    ]
+
+
+def test_safe_stop_failure_cannot_hide_a_missing_stop_acknowledgement():
+    client = Client([{'active': False, 'armed': False}])
+
+    def trigger(service, _deadline):
+        client.calls.append(service)
+        return service != '/r1/safety/emergency_stop', 'test response'
+
+    client.trigger = trigger
+
+    assert run_safe_stop(client, time.monotonic() + 1.0) == 2
+    assert client.calls[-1] == '/r1/live_writer/stop'

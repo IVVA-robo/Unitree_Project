@@ -5,7 +5,11 @@ import subprocess
 import pytest
 
 from operator_panel.config import OperatorConfig
-from usb_link.control import ensure_mappings, live_environment
+from usb_link.control import (
+    ensure_mappings,
+    live_environment,
+    wait_for_previous_control_cleanup,
+)
 
 
 def acknowledged():
@@ -59,6 +63,22 @@ def test_usb_checks_all_tunnel_conflicts_before_any_write(monkeypatch):
     assert len(calls) == 1
 
 
+def test_usb_reuses_persistent_video_but_still_rejects_control_owner(
+    monkeypatch,
+):
+    calls = []
+
+    def run(*args):
+        calls.append(args)
+        return 'UsbFfs tcp:8080 tcp:8080'
+
+    monkeypatch.setattr('usb_link.control.run', run)
+    owned = set()
+    ensure_mappings(['adb', '-s', 'pico'], owned, initial=True)
+    assert owned == {'tcp:19092'}
+    assert calls[-1][-2:] == ('tcp:19092', 'tcp:19092')
+
+
 def test_usb_partial_acquisition_only_owns_successful_mapping(monkeypatch):
     def run(*args):
         if args[-1] == '--list':
@@ -82,10 +102,57 @@ def test_usb_restores_only_missing_tunnel_after_reconnect(monkeypatch):
         return 'UsbFfs tcp:8080 tcp:8080' if args[-1] == '--list' else ''
 
     monkeypatch.setattr('usb_link.control.run', run)
-    owned = {'tcp:8080'}
+    owned = set()
     ensure_mappings(['adb'], owned)
-    assert owned == {'tcp:8080', 'tcp:19092'}
+    assert owned == {'tcp:19092'}
     assert calls[-1][-2:] == ('tcp:19092', 'tcp:19092')
+
+
+def test_usb_waits_for_previous_writer_cleanup():
+    attempts = []
+    sleeps = []
+
+    def checker():
+        attempts.append('check')
+        if len(attempts) < 3:
+            raise RuntimeError('writer is terminating')
+
+    wait_for_previous_control_cleanup(
+        {'R1_USB_LIVE_CLEANUP_WAIT_SEC': '2'},
+        checker=checker,
+        clock=lambda: 0.0,
+        sleeper=sleeps.append,
+    )
+
+    assert len(attempts) == 3
+    assert sleeps == [0.05, 0.05]
+
+
+def test_usb_cleanup_wait_keeps_active_writer_blocking():
+    now = [0.0]
+
+    def checker():
+        raise RuntimeError('writer remains active')
+
+    def sleep(duration):
+        now[0] += duration
+
+    with pytest.raises(RuntimeError, match='did not finish within 0.1s'):
+        wait_for_previous_control_cleanup(
+            {'R1_USB_LIVE_CLEANUP_WAIT_SEC': '0.1'},
+            checker=checker,
+            clock=lambda: now[0],
+            sleeper=sleep,
+        )
+
+
+@pytest.mark.parametrize('value', ['invalid', '-1', '31'])
+def test_usb_cleanup_wait_rejects_invalid_timeout(value):
+    with pytest.raises(RuntimeError, match='R1_USB_LIVE_CLEANUP_WAIT_SEC'):
+        wait_for_previous_control_cleanup(
+            {'R1_USB_LIVE_CLEANUP_WAIT_SEC': value},
+            checker=lambda: None,
+        )
 
 
 def test_service_has_no_late_global_stop_and_preserves_limits():
@@ -121,6 +188,7 @@ def test_transport_lock_covers_cleanup_and_blocks_second_wrapper(tmp_path, monke
     for key, value in acknowledged().items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv('R1_EXHIBITION_RUNTIME_DIR', str(tmp_path))
+    monkeypatch.setenv('R1_USB_TRANSPORT_LOCK_WAIT_SEC', '0')
     calls = []
 
     def fake_run():
@@ -147,9 +215,15 @@ def test_missing_usb_cannot_start_manager_even_without_ui_probe(tmp_path, monkey
         monkeypatch.setenv(key, value)
     monkeypatch.setenv('R1_EXHIBITION_RUNTIME_DIR', str(tmp_path))
     monkeypatch.setattr(control, 'assert_no_live_session', lambda: None)
+
     def absent(*args):
         raise RuntimeError('headset absent')
+
     monkeypatch.setattr(control, 'usb_device', absent)
-    monkeypatch.setattr(control.subprocess, 'Popen', lambda *args, **kwargs: pytest.fail('manager before USB readiness'))
+    monkeypatch.setattr(
+        control.subprocess,
+        'Popen',
+        lambda *args, **kwargs: pytest.fail('manager before USB readiness'),
+    )
     with pytest.raises(RuntimeError, match='headset absent'):
         control.main(['control'])

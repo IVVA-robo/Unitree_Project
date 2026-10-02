@@ -939,7 +939,7 @@ TEST(NoVelocityStopFallback, ConfirmsOnlyTheEnteredNonmovingMode)
 TEST(WirelessControllerMapping, ConvertsReviewedVelocityCeilingsToAxes)
 {
   const auto command = detail::velocity_to_wireless_controller(0.15, 0.12, 0.35);
-  EXPECT_FLOAT_EQ(command.lx, 1.0F);
+  EXPECT_FLOAT_EQ(command.lx, -1.0F);
   EXPECT_FLOAT_EQ(command.ly, 0.75F);
   EXPECT_FLOAT_EQ(command.rx, -1.0F);
   EXPECT_FLOAT_EQ(command.ry, 0.0F);
@@ -949,7 +949,7 @@ TEST(WirelessControllerMapping, ConvertsReviewedVelocityCeilingsToAxes)
 TEST(WirelessControllerMapping, ClampsAxesAndKeepsNeutralFrameZero)
 {
   const auto clamped = detail::velocity_to_wireless_controller(-2.0, 2.0, -2.0);
-  EXPECT_FLOAT_EQ(clamped.lx, 1.0F);
+  EXPECT_FLOAT_EQ(clamped.lx, -1.0F);
   EXPECT_FLOAT_EQ(clamped.ly, -1.0F);
   EXPECT_FLOAT_EQ(clamped.rx, 1.0F);
   EXPECT_FLOAT_EQ(clamped.ry, 0.0F);
@@ -961,6 +961,19 @@ TEST(WirelessControllerMapping, ClampsAxesAndKeepsNeutralFrameZero)
   EXPECT_FLOAT_EQ(zero.rx, 0.0F);
   EXPECT_FLOAT_EQ(zero.ry, 0.0F);
   EXPECT_EQ(zero.keys, 0U);
+}
+
+TEST(WirelessControllerMapping, LeftAndRightRosLateralMatchPhysicalPilotDirection)
+{
+  // Positive ROS Y is left, while positive R1 pilot LX moved this robot right.
+  const auto left = detail::velocity_to_wireless_controller(0.0, 0.06, 0.0);
+  const auto right = detail::velocity_to_wireless_controller(0.0, -0.06, 0.0);
+  EXPECT_FLOAT_EQ(left.lx, -0.5F);
+  EXPECT_FLOAT_EQ(right.lx, 0.5F);
+  EXPECT_FLOAT_EQ(left.ly, 0.0F);
+  EXPECT_FLOAT_EQ(left.rx, 0.0F);
+  EXPECT_EQ(left.keys, 0U);
+  EXPECT_EQ(right.keys, 0U);
 }
 
 TEST(WirelessControllerMapping, RightAndLeftRosYawMatchPhysicalPilotDirection)

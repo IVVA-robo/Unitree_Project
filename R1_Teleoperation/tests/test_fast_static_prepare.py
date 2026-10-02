@@ -68,3 +68,23 @@ def test_static_attestation_only_removes_duplicate_observation_not_safety_gates(
     assert 'arm_sdk_gate_duration=2.25' in text
     assert 'trap emergency_relock ERR' in text
     assert 'wait_for_prepare_confirmation' in text
+
+
+def test_full_control_reuses_one_passive_observer_but_keeps_safety_gates():
+    text = SCRIPT.read_text()
+    combined = text.index('combined_prepare_observation=true')
+    passive = text.index('--require-prepare-signals', combined)
+    traffic_gate = text.index('r1-arm-sdk-traffic-check', passive)
+    kill_release = text.index('/r1/safety/set_kill', traffic_gate)
+    prepare = text.index('/r1/live_writer/prepare', kill_release)
+
+    assert combined < passive < traffic_gate < kill_release < prepare
+    assert 'arm_sdk_gate_duration=2.25' in text
+    assert '--expected-writers 1' in text
+    assert 'trap emergency_relock ERR' in text
+    assert 'wait_for_prepare_confirmation' in text
+    assert 'duplicate topic readers skipped' in text
+    # Non-standard commissioning layouts retain the reviewed legacy checks.
+    assert 'fresh bounded head command was not observed' in text
+    assert 'fresh bounded locomotion command was not observed' in text
+    assert 'fresh arm IK command was not observed' in text

@@ -105,7 +105,10 @@ detail::WirelessControllerCommand detail::velocity_to_wireless_controller(
     return {};
   }
   return {
-    static_cast<float>(std::clamp(lateral / kLateralCeilingMps, -1.0, 1.0)),
+    // ROS positive lateral is left.  The commissioned R1 virtual-pilot lx
+    // axis is positive to the robot's right, so convert at the physical
+    // boundary while retaining standard ROS signs everywhere upstream.
+    static_cast<float>(std::clamp(-lateral / kLateralCeilingMps, -1.0, 1.0)),
     static_cast<float>(std::clamp(forward / kForwardCeilingMps, -1.0, 1.0)),
     // ROS positive yaw is left/CCW. R1 virtual-pilot rx is positive for
     // right/CW; convert at this boundary, retaining ROS signs in VR and RPC.

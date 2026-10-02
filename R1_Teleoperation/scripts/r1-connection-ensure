@@ -12,6 +12,8 @@ RESTART_COOLDOWN_SEC=${R1_CONNECTION_RESTART_COOLDOWN_SEC:-20}
 FRAME_GRACE_SEC=${R1_CONNECTION_FRAME_GRACE_SEC:-90}
 PROBE_COOLDOWN_SEC=${R1_CONNECTION_PROBE_COOLDOWN_SEC:-30}
 RESTART_LIMIT=${R1_CONNECTION_RESTART_LIMIT:-2}
+USB_VIDEO_ENSURE=${R1_USB_VIDEO_ENSURE:-${PROJECT_DIR}/scripts/r1-usb-video-ensure}
+usb_video_last_state=
 
 # Desktop/service launches may overlap. Only one camera watchdog may own the
 # offline unit; otherwise their independent failure counters restart it twice.
@@ -30,6 +32,22 @@ exhibition_active() {
   # A leftover unlocked file after a crash must not disable camera recovery.
   [[ -e "${EXHIBITION_RUNTIME}/session.lock" ]] \
     && ! flock --shared --nonblock "${EXHIBITION_RUNTIME}/session.lock" true
+}
+
+usb_video_ensure() {
+  [[ ${R1_VR_TRANSPORT:-lan} == usb ]] || return 0
+  local output status
+  set +e
+  output=$("${USB_VIDEO_ENSURE}" 2>&1)
+  status=$?
+  set -e
+  if [[ ${output} != "${usb_video_last_state}" ]]; then
+    printf '%s\n' "${output}"
+    usb_video_last_state=${output}
+  fi
+  if ((status != 0)); then
+    return 0
+  fi
 }
 
 video_ready() {
@@ -85,9 +103,11 @@ PY
 echo 'CONNECT state=SEARCHING'
 echo "CONNECT discovery=dds interface=${ROBOT_INTERFACE} diagnostic_ip=${PRIMARY_ROBOT_IP}"
 "${PROJECT_DIR}/scripts/r1-network-ensure"
+usb_video_ensure
 if command -v systemctl >/dev/null 2>&1 \
   && systemctl --user cat "${UNIT}" >/dev/null 2>&1; then
   while exhibition_active; do
+    usb_video_ensure
     echo 'CONNECT state=BRIDGE_READY detail=exhibition_owns_camera'
     sleep "${CHECK_INTERVAL_SEC}"
   done
@@ -121,6 +141,7 @@ if command -v systemctl >/dev/null 2>&1 \
   recoveries=0
   next_probe_at=0
   while true; do
+    usb_video_ensure
     if exhibition_active; then
       failures=0
       sleep "${CHECK_INTERVAL_SEC}"

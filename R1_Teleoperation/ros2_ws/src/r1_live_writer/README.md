@@ -233,8 +233,11 @@ Physical use still requires a new explicit on-site approval after indicator and
 pose/encoder correlation; a probe pass does **not** recenter the head or permit
 ordinary tracking.
 The normal locomotion stage converts the already bounded physical velocity to
-the axes captured from Unitree Explore: forward → `ly`, lateral → `lx`, yaw →
-`rx`, with `ry=0` and `keys=0`. It publishes at 20 Hz. On neutral, STOP,
+the axes captured from Unitree Explore: forward → `ly`, ROS left/right →
+sign-corrected `lx`, yaw → sign-corrected `rx`, with `ry=0` and `keys=0`.
+On the commissioned R1, positive pilot `lx` moves right while positive ROS Y
+moves left, so this conversion is deliberately inverted only at the physical
+transport boundary. It publishes at 20 Hz. On neutral, STOP,
 Deadman release, watchdog failure, or teardown it publishes six all-zero
 frames over 300 ms. `rt/lowcmd` and raw leg-joint control are not used.
 

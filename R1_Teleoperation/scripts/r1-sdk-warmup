@@ -10,9 +10,13 @@ PRIMARY_CONTROL_IP=${R1_CONTROL_IP:-192.168.123.161}
 PC2_IP=${R1_PC2_IP:-${R1_ROBOT_IP:-192.168.123.164}}
 DOMAIN_ID=${R1_LIVE_ROS_DOMAIN_ID:-88}
 RETRY_SEC=${R1_SDK_WARMUP_RETRY_SEC:-3}
-REFRESH_SEC=${R1_SDK_WARMUP_REFRESH_SEC:-180}
+# Start the next read-only refresh early enough that its usual 30-40 second
+# runtime overlaps the still-current result.  This removes the periodic empty
+# cache window without extending the previous 180 second LowState interval.
+REFRESH_SEC=${R1_SDK_WARMUP_REFRESH_SEC:-120}
 CONTROL_IP=${PRIMARY_CONTROL_IP}
 WARMUP_CHILD=''
+REFRESH_DUE=false
 
 # shellcheck source=scripts/r1-network-autodetect
 source "${PROJECT_DIR}/scripts/r1-network-autodetect"
@@ -52,7 +56,7 @@ invalidate_attestation
 echo 'SDK_WARMUP state=WAITING_FOR_ROBOT'
 while true; do
   CONTROL_IP="$(r1_resolve_control_ip "${INTERFACE}" "${PRIMARY_CONTROL_IP}" "${PC2_IP}" || true)"
-  if R1_CONTROL_IP="${CONTROL_IP}" \
+  if [[ ${REFRESH_DUE} == false ]] && R1_CONTROL_IP="${CONTROL_IP}" \
       "${SCRIPT_DIR}/r1-sdk-preflight-attestation" check >/dev/null 2>&1; then
     echo 'SDK_WARMUP state=READY'
     refresh_deadline=$((SECONDS + REFRESH_SEC))
@@ -71,13 +75,21 @@ while true; do
     # Revalidate from LowState at least once per refresh interval.  A short
     # robot reboot can otherwise preserve the same MAC, route and error
     # counters and make a one-hour cache look current after power-on.
-    invalidate_attestation
+    #
+    # Keep the preceding *healthy* attestation while the replacement
+    # preflight runs.  record() swaps the replacement atomically.  This makes
+    # a physical-mode request during REFRESHING reuse the recent result rather
+    # than aborting the refresh after its cache was already deleted.  Link
+    # loss and every unsuccessful refresh still invalidate it below.
     if [[ ${cache_link_ok} == true ]]; then
-      echo 'SDK_WARMUP state=REFRESHING detail=read_only'
+      REFRESH_DUE=true
+      echo 'SDK_WARMUP state=REFRESHING detail=read_only_overlap'
     else
+      invalidate_attestation
+      REFRESH_DUE=false
       echo 'SDK_WARMUP state=WAITING_FOR_ROBOT detail=cache_invalidated_after_link_loss'
+      continue
     fi
-    continue
   fi
   if pgrep -af '[r]1_live_writer_node' >/dev/null 2>&1; then
     echo 'SDK_WARMUP state=WAITING detail=live_writer_active'
@@ -85,6 +97,11 @@ while true; do
     continue
   fi
   if ! ping -I "${INTERFACE}" -c 1 -W 1 "${CONTROL_IP}" >/dev/null 2>&1; then
+    # This may be the narrow interval between the final monitor ping and the
+    # refresh launch.  Never retain the overlapping cache across link loss.
+    invalidate_attestation
+    REFRESH_DUE=false
+    echo 'SDK_WARMUP state=WAITING_FOR_ROBOT detail=cache_invalidated_after_link_loss'
     sleep "${RETRY_SEC}" & wait $!
     continue
   fi
@@ -104,11 +121,13 @@ while true; do
     R1_SDK_ROS_DOMAIN_ID="${DOMAIN_ID}" \
     R1_CONTROL_IP="${CONTROL_IP}" \
       "${SCRIPT_DIR}/r1-sdk-preflight-attestation" record
+    REFRESH_DUE=false
     # Enter the cache-monitoring branch immediately. It watches the live link
-    # and forces another physical read-only preflight at REFRESH_SEC.
+    # and starts an overlapping physical read-only preflight at REFRESH_SEC.
     continue
   else
     invalidate_attestation
+    REFRESH_DUE=false
     echo "SDK_WARMUP state=RETRY detail=preflight_exit_${status}"
     sleep "${RETRY_SEC}" & wait $!
   fi
