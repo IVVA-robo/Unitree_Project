@@ -315,8 +315,8 @@ def test_exhibition_home_keeps_lock_run_and_adds_separate_stand_button():
     assert panel.specs['exhibition_stand'].requires_run_mode is False
     assert panel.tabs.tabBar().isHidden()
     assert panel.connect_button.text() == "↻  НАЙТИ И ПОДКЛЮЧИТЬ"
-    assert panel.fullscreen_button.text() == "□"
-    assert panel.fullscreen_button.objectName() == "fullscreenButton"
+    assert "fullscreen_button" not in panel.__dict__
+    assert "settings_button" not in panel.__dict__
     assert panel.fullscreen_shortcut.key().toString() == "F11"
     assert panel.windowFlags() & app_module.Qt.WindowMaximizeButtonHint
     assert panel.tabs.widget(0) is panel.exhibition_tab
@@ -334,6 +334,9 @@ def test_exhibition_home_keeps_lock_run_and_adds_separate_stand_button():
     assert "kill_button" not in panel.__dict__
     assert "B справа" in panel.controller_action_hint.text()
     assert "X слева" in panel.controller_action_hint.text()
+    assert panel.exhibition_tab.toolTip() == ""
+    assert panel.static_mode_button.toolTip() == ""
+    assert panel.control_mode_button.toolTip() == ""
     assert panel.zero_torque_button.parentWidget() is not panel.centralWidget()
     assert "Аварийное" in [
         panel.service_tabs.tabText(index)
@@ -356,23 +359,20 @@ def test_fullscreen_toggle_does_not_change_operator_mode():
     panel.toggle_fullscreen()
     app.processEvents()
     assert panel.isFullScreen()
-    assert panel.fullscreen_button.text() == "❐"
+    assert "fullscreen_button" not in panel.__dict__
 
     panel.exit_fullscreen()
     app.processEvents()
     assert not panel.isFullScreen()
-    assert panel.fullscreen_button.text() == "□"
     assert panel.exhibition_mode == initial_mode
 
-    panel.fullscreen_button.click()
+    panel.toggle_window_maximized()
     app.processEvents()
     assert panel.isMaximized()
-    assert panel.fullscreen_button.text() == "❐"
 
-    panel.fullscreen_button.click()
+    panel.toggle_window_maximized()
     app.processEvents()
     assert not panel.isMaximized()
-    assert panel.fullscreen_button.text() == "□"
     panel.close()
     app.processEvents()
 
@@ -388,13 +388,12 @@ def test_exhibition_home_reflows_video_and_header_for_window_width():
     compact_video_width = panel.video_preview.width()
     assert panel.width() == 1280
     assert panel.help_button.text() == "?"
-    assert panel.settings_button.text() == "⚙"
+    assert "settings_button" not in panel.__dict__
     assert compact_video_width >= 320
 
     panel.resize(1600, 900)
     app.processEvents()
     assert "Как запустить" in panel.help_button.text()
-    assert "Настройки" in panel.settings_button.text()
     assert panel.video_preview.width() > compact_video_width
 
     panel.close()

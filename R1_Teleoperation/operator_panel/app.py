@@ -437,24 +437,12 @@ class OperatorPanel(QMainWindow):
         self.mode_label = QLabel()
         self.mode_label.setObjectName("modeLabel")
         header.addWidget(self.mode_label)
-        self.fullscreen_button = QPushButton("□")
-        self.fullscreen_button.setObjectName("fullscreenButton")
-        self.fullscreen_button.setAccessibleName("Развернуть окно")
-        self.fullscreen_button.setFixedSize(42, 36)
-        self.fullscreen_button.setToolTip("Развернуть окно на весь рабочий стол")
-        self.fullscreen_button.clicked.connect(self.toggle_window_maximized)
         self.service_toggle = QPushButton("⚙  Расширенные настройки")
         self.service_toggle.clicked.connect(self.toggle_service_view)
         header.addWidget(self.service_toggle)
         self.help_button = QPushButton("?  Как запустить")
         self.help_button.clicked.connect(self.show_quick_start)
         header.addWidget(self.help_button)
-        self.settings_button = QPushButton("Настройки соединения")
-        self.settings_button.clicked.connect(self.open_settings)
-        header.addWidget(self.settings_button)
-        # Keep the window control at the far right, visually matching the
-        # native minimize/maximize/close controls shown by the desktop shell.
-        header.addWidget(self.fullscreen_button)
         layout.addLayout(header)
 
         safety = QHBoxLayout()
@@ -566,6 +554,7 @@ class OperatorPanel(QMainWindow):
             "exhibition_static", "LOCK / СТАТИЧНЫЙ РЕЖИМ\nВидео и устойчивое положение"
         )
         self.static_mode_button.setObjectName("staticModeButton")
+        self.static_mode_button.setToolTip("")
         self.static_mode_button.setMinimumHeight(54)
         self.static_mode_button.setFont(QFont("Sans Serif", 12, QFont.Bold))
         mode_layout.addWidget(self.static_mode_button)
@@ -573,6 +562,7 @@ class OperatorPanel(QMainWindow):
             "exhibition_control", "RUN / ПОЛНОЕ УПРАВЛЕНИЕ\nVR: голова, руки и ноги"
         )
         self.control_mode_button.setObjectName("controlModeButton")
+        self.control_mode_button.setToolTip("")
         self.control_mode_button.setMinimumHeight(62)
         self.control_mode_button.setFont(QFont("Sans Serif", 12, QFont.Bold))
         mode_layout.addWidget(self.control_mode_button)
@@ -580,6 +570,7 @@ class OperatorPanel(QMainWindow):
             "exhibition_stand", "СТОЙКА\nШтатная поза • моторы удерживают"
         )
         self.stand_mode_button.setObjectName("standModeButton")
+        self.stand_mode_button.setToolTip("")
         self.stand_mode_button.setMinimumHeight(50)
         self.stand_mode_button.setFont(QFont("Sans Serif", 11, QFont.Bold))
         mode_layout.addWidget(self.stand_mode_button)
@@ -604,10 +595,6 @@ class OperatorPanel(QMainWindow):
         self.zero_torque_button.setObjectName("zeroTorqueButton")
         self.zero_torque_button.setMinimumHeight(48)
         self.zero_torque_button.setFont(QFont("Sans Serif", 10, QFont.Bold))
-        self.zero_torque_button.setToolTip(
-            "Завершить управление и отключить удерживающий момент. "
-            "Используйте только на страховке или с роботом на опоре."
-        )
         self.zero_torque_button.clicked.connect(self.request_zero_torque)
         safety_group = QGroupBox("Безопасное завершение")
         safety_group.setObjectName("safetyGroup")
@@ -669,6 +656,7 @@ class OperatorPanel(QMainWindow):
         tools.setSpacing(6)
         reconnect = self._action_button("exhibition_reconnect", "↻  Переподключить всё")
         reconnect.setObjectName("reconnectButton")
+        reconnect.setToolTip("")
         reconnect.setMinimumHeight(36)
         tools.addWidget(reconnect, 1)
         open_viewer = QPushButton("Открыть Robot POV")
@@ -682,9 +670,6 @@ class OperatorPanel(QMainWindow):
         self.exhibition_voice_status.setMinimumHeight(24)
         self.exhibition_voice_status.setParent(tab)
         self.exhibition_voice_status.setVisible(False)
-        self.exhibition_voice_status.setToolTip(
-            "Статус офлайн-ассистента Добрыня отображается в разделе «Голос»."
-        )
 
         self.controller_action_hint = QLabel(
             "B справа — аварийная остановка  •  X слева — нейтраль рук  •  "
@@ -700,7 +685,6 @@ class OperatorPanel(QMainWindow):
         self.controller_action_hint.setParent(tab)
         self.controller_action_hint.setVisible(False)
         self.exhibition_tab_hint = self.controller_action_hint.text()
-        tab.setToolTip(self.exhibition_tab_hint)
         self.exhibition_tab = tab
         self.tabs.addTab(tab, "Главный экран")
         self._refresh_exhibition_status()
@@ -1086,9 +1070,9 @@ class OperatorPanel(QMainWindow):
     @staticmethod
     def _set_simple_status(label: QLabel, text: str, state: str) -> None:
         colors = {
-            "ok": ("#214f3b", "#83e3ad"),
-            "wait": ("#5a481f", "#ffd166"),
-            "off": ("#44353a", "#d9b6be"),
+            "ok": ("#173523", "#30d158"),
+            "wait": ("#3a2d0e", "#ff9f0a"),
+            "off": ("#3a2022", "#ff6961"),
         }
         background, foreground = colors[state]
         label.setText(text)
@@ -1133,7 +1117,7 @@ class OperatorPanel(QMainWindow):
             )
             self.action_timing_status.setStyleSheet(
                 "padding: 4px 8px; border-radius: 5px; "
-                "background: #5a481f; color: #ffd166; font-weight: bold;"
+                "background: #3a2d0e; color: #ff9f0a; font-weight: bold;"
             )
         if "status_timer" in self.__dict__:
             QTimer.singleShot(
@@ -1164,9 +1148,9 @@ class OperatorPanel(QMainWindow):
                 f"{title}: {result} за {elapsed:.2f} с{suffix}"
             )
             colors = (
-                ("#214f3b", "#83e3ad")
+                ("#173523", "#30d158")
                 if ok
-                else ("#5a2931", "#ffb4bd")
+                else ("#3a2022", "#ff6961")
             )
             self.action_timing_status.setStyleSheet(
                 "padding: 4px 8px; border-radius: 5px; font-weight: bold; "
@@ -1427,7 +1411,6 @@ class OperatorPanel(QMainWindow):
         if not {
             "service_toggle",
             "help_button",
-            "settings_button",
         }.issubset(self.__dict__):
             return
         compact = self.width() < 1450
@@ -1437,7 +1420,6 @@ class OperatorPanel(QMainWindow):
         if compact:
             self.service_toggle.setText("←" if service_visible else "⚙")
             self.help_button.setText("?")
-            self.settings_button.setText("⚙")
         else:
             self.service_toggle.setText(
                 "←  Главный экран"
@@ -1445,14 +1427,6 @@ class OperatorPanel(QMainWindow):
                 else "⚙  Расширенные настройки"
             )
             self.help_button.setText("?  Как запустить")
-            self.settings_button.setText("Настройки соединения")
-        self.service_toggle.setToolTip(
-            "Вернуться на главный экран"
-            if service_visible
-            else "Открыть расширенные настройки и сервис"
-        )
-        self.help_button.setToolTip("Как запустить Unitree R1")
-        self.settings_button.setToolTip("Настройки Ethernet, USB и Robot POV")
 
     def _update_fullscreen_button(self) -> None:
         if "fullscreen_button" not in self.__dict__:
@@ -3236,101 +3210,95 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
     app.setStyleSheet(
         """
         * { outline: none; }
-        QWidget { font-family: "Noto Sans", "DejaVu Sans", sans-serif;
-                  font-size: 11pt; }
-        QMainWindow, #rootPanel { background: #101820; color: #eef4f8; }
-        QGroupBox { background: #18232d; border: 1px solid #354858;
-                    border-radius: 12px; margin-top: 10px;
+        QWidget { font-family: "Inter", "SF Pro Display", "Noto Sans", sans-serif;
+                  font-size: 10pt; }
+        QMainWindow, #rootPanel { background: #0f1115; color: #f5f5f7; }
+        QGroupBox { background: #1c1c1e; border: 1px solid #343438;
+                    border-radius: 14px; margin-top: 10px;
                     padding: 8px 8px 6px; }
         QGroupBox::title { subcontrol-origin: margin; left: 12px;
-                           padding: 0 7px; color: #9fc8e8;
-                           background: #101820; }
-        QPushButton { background: #24323e; border: 1px solid #4b6272;
-                      border-radius: 9px; padding: 10px 14px;
-                      color: #edf4f7; }
-        QPushButton:hover { background: #304555; border-color: #6f9bb5; }
-        QPushButton:pressed { background: #1b2832; }
-        QPushButton:disabled { background: #1c252d; color: #7e8a93;
-                               border-color: #34414b; }
+                           padding: 0 7px; color: #aeb0b8;
+                           background: #0f1115; }
+        QPushButton { background: #2c2c2e; border: 1px solid #48484a;
+                      border-radius: 10px; padding: 8px 12px;
+                      color: #f5f5f7; }
+        QPushButton:hover { background: #3a3a3c; border-color: #636366; }
+        QPushButton:pressed { background: #1f1f21; }
+        QPushButton:disabled { background: #202023; color: #636366;
+                               border-color: #343438; }
         QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
-            background: #111a21; border: 1px solid #405462;
-            border-radius: 7px; padding: 7px 9px; color: #eef4f8;
+            background: #1c1c1e; border: 1px solid #3a3a3c;
+            border-radius: 9px; padding: 7px 9px; color: #f5f5f7;
         }
         QLineEdit:focus, QComboBox:focus, QSpinBox:focus,
-        QDoubleSpinBox:focus { border-color: #6f9cff; }
-        QTabWidget::pane { border: 1px solid #344653; border-radius: 10px; }
-        QTabBar::tab { background: #1a2630; border: 1px solid #344653;
+        QDoubleSpinBox:focus { border-color: #0a84ff; }
+        QTabWidget::pane { border: 1px solid #343438; border-radius: 12px; }
+        QTabBar::tab { background: #1c1c1e; border: 1px solid #343438;
                        padding: 10px 14px; margin-right: 3px; }
-        QTabBar::tab:selected { background: #2b4e69; color: #ffffff;
-                                border-color: #6f9cff; }
-        QPushButton[liveAction="true"] { border-color: #d39b3b; }
-        QPushButton[unavailable="true"] { color: #89939d;
-                                           border-color: #555e66; }
-        #stopButton { background: #a86a22; border-color: #e8a849;
+        QTabBar::tab:selected { background: #2c2c2e; color: #f5f5f7;
+                                border-color: #0a84ff; }
+        QPushButton[liveAction="true"] { border-color: #ff9f0a; }
+        QPushButton[unavailable="true"] { color: #8e8e93;
+                                           border-color: #48484a; }
+        #stopButton { background: #5a3211; border-color: #ff9f0a;
                       font-weight: bold; }
-        #killButton { background: #9d2632; border-color: #ff6875;
+        #killButton { background: #5a2025; border-color: #ff453a;
                       font-weight: bold; }
-        #appTitle { color: #d9efff; letter-spacing: 1px; }
-        #brandSubtitle { color: #718999; font-size: 9pt; letter-spacing: 1px; }
-        #modeLabel { color: #ffd166; background: #202c35;
-                     border: 1px solid #465b68; border-radius: 9px;
-                     font-weight: bold; padding: 9px 12px; }
-        #fullscreenButton { background: #1d2a34; border-color: #536e7d;
-                            color: #dbeaf2; font-weight: bold; font-size: 16pt;
-                            padding: 0; }
-        #fullscreenButton:hover { background: #2b4250; }
-        #statusLabel { padding: 9px 12px; background: #202c35;
-                       border: 1px solid #354853; border-radius: 9px; }
-        #activeLabel { color: #a9bcc8; padding: 4px 6px; }
-        #exhibitionTitle { color: #dce7ff; letter-spacing: 1px; }
-        #hint { color: #b8c2ca; padding: 4px 6px; }
-        #warning { color: #ffd166; padding: 8px; }
-        #cardText { color: #d7e4ee; padding: 10px; }
-        #operatorInstruction { background: #2b3652; color: #dce7ff;
-                               border: 1px solid #536baf; border-radius: 8px;
+        #appTitle { color: #f5f5f7; letter-spacing: 1px; }
+        #brandSubtitle { color: #8e8e93; font-size: 9pt; letter-spacing: 1px; }
+        #modeLabel { color: #ff9f0a; background: #2c2c2e;
+                     border: 1px solid #48484a; border-radius: 10px;
+                     font-weight: bold; padding: 8px 12px; }
+        #statusLabel { padding: 8px 12px; background: #232326;
+                       border: 1px solid #343438; border-radius: 10px; }
+        #activeLabel { color: #aeb0b8; padding: 4px 6px; }
+        #exhibitionTitle { color: #f5f5f7; letter-spacing: 1px; }
+        #hint { color: #8e8e93; padding: 4px 6px; }
+        #warning { color: #ff9f0a; padding: 8px; }
+        #cardText { color: #d1d1d6; padding: 10px; }
+        #operatorInstruction { background: #232326; color: #f5f5f7;
+                               border: 1px solid #48484a; border-radius: 10px;
                                padding: 6px 10px; font-size: 12pt; font-weight: bold; }
-        #videoCanvas { background: #090c10; border: 1px solid #3d4b58;
-                       border-radius: 8px; color: #91a0ad; }
+        #videoCanvas { background: #000000; border: 1px solid #3a3a3c;
+                       border-radius: 10px; color: #8e8e93; }
         #videoGroup::title { subcontrol-origin: margin;
                              subcontrol-position: top center; padding: 0 10px; }
-        #videoStatus { background: #161d24; color: #a9d6ff;
-                       border-radius: 5px; padding: 7px; }
-        #batteryBadge { background: #344b9b; color: white;
-                        border: 1px solid #7894ef; border-radius: 8px; }
-        #batteryBadge[batteryLow="true"] { background: #8f2f3b;
-                                             border-color: #ff6875; }
-        #robotName { padding: 8px; color: #d5dde5; }
-        #robotName[connectionState="searching"] { color: #ffd166; }
-        #robotName[connectionState="connected"] { color: #71e3a4; }
-        #deviceGroup { border-color: #3c5a72; }
-        #modeGroup { border-color: #3d6780; }
-        #safetyGroup { border-color: #71404a; }
-        #statusGroup { border-color: #3f5562; }
-        #connectButton { background: #344b9b; border-color: #7894ef;
+        #videoStatus { background: #1c1c1e; color: #64d2ff;
+                       border-radius: 8px; padding: 7px; }
+        #batteryBadge { background: #0a84ff; color: #ffffff;
+                        border: 1px solid #64b5ff; border-radius: 10px; }
+        #batteryBadge[batteryLow="true"] { background: #5a2025;
+                                             border-color: #ff453a; }
+        #robotName { padding: 8px; color: #d1d1d6; }
+        #robotName[connectionState="searching"] { color: #ff9f0a; }
+        #robotName[connectionState="connected"] { color: #30d158; }
+        #deviceGroup, #modeGroup, #statusGroup { border-color: #343438; }
+        #safetyGroup { border-color: #5a3035; }
+        #connectButton { background: #0a84ff; border-color: #64b5ff;
                          font-weight: bold; }
-        #connectButton:hover { background: #4560bd; }
-        #staticModeButton { background: #1e4d58; border-color: #58c8d5;
+        #connectButton:hover { background: #409cff; }
+        #staticModeButton { background: #2c2c2e; border-color: #636366;
                             font-weight: bold; }
-        #staticModeButton:hover { background: #286775; }
-        #controlModeButton { background: #244c9c; border-color: #6f9cff;
+        #staticModeButton:hover { background: #3a3a3c; }
+        #controlModeButton { background: #0a84ff; border-color: #64b5ff;
                              font-weight: bold; }
-        #controlModeButton:hover { background: #2d5dbd; }
-        #standModeButton { background: #303d68; border-color: #879bf0;
+        #controlModeButton:hover { background: #409cff; }
+        #standModeButton { background: #2c2c2e; border-color: #636366;
                            font-weight: bold; }
-        #standModeButton:hover { background: #40518a; }
-        #reconnectButton { background: #263c4d; border-color: #6a9dbb;
+        #standModeButton:hover { background: #3a3a3c; }
+        #reconnectButton { background: #2c2c2e; border-color: #636366;
                            font-weight: bold; }
-        #zeroTorqueButton { background: #672d36; border-color: #dc6877;
+        #zeroTorqueButton { background: #5a2025; border-color: #ff453a;
                             color: white; font-weight: bold; }
-        #zeroTorqueButton:hover { background: #843946; }
-        #modeHint, #safetyHint { color: #92a6b3; font-size: 9.5pt;
+        #zeroTorqueButton:hover { background: #733039; }
+        #modeHint, #safetyHint { color: #8e8e93; font-size: 9.5pt;
                                  padding: 2px 4px; }
-        #simpleStatus { background: #202d37; color: #dce8ee;
-                        border: 1px solid #3c515d; border-radius: 8px;
+        #simpleStatus { background: #232326; color: #d1d1d6;
+                        border: 1px solid #3a3a3c; border-radius: 8px;
                         padding: 4px 8px; }
-        #simpleStatus[statusRole="timing"] { color: #b9d9ea; }
-        QPlainTextEdit { background: #11181e; color: #dbe7ef;
-                         border: 1px solid #354854; border-radius: 8px; }
+        #simpleStatus[statusRole="timing"] { color: #64d2ff; }
+        QPlainTextEdit { background: #1c1c1e; color: #d1d1d6;
+                         border: 1px solid #343438; border-radius: 10px; }
         """
     )
     return app
