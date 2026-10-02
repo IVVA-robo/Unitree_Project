@@ -184,6 +184,9 @@ writer. Целевые USB/handoff тесты: `50 passed`; финальный l
 `405 passed in 55.08s`. Пять новых физических журналов не содержат
 `[BLOCKED]`/`[FAIL]`, FSM 4/811 подтверждены, дубликатов процессов не найдено.
 
+Контрольный click-to-result замер этого Wi-Fi-off цикла: СТОЙКА — `22,39 s`,
+RUN — `31,91 s`, LOCK — `1,49 s`; видео после LOCK сохранилось.
+
 Бэкап перед USB-video handoff:
 `/home/unitree/r1-usb-video-handoff-before-20261002-KfB3s7/`;
 SHA256 `dirty-before.patch` —
