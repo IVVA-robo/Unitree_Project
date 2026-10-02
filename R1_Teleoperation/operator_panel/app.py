@@ -423,11 +423,12 @@ class OperatorPanel(QMainWindow):
         self.mode_label = QLabel()
         self.mode_label.setObjectName("modeLabel")
         header.addWidget(self.mode_label)
-        self.fullscreen_button = QPushButton("⛶  На весь экран")
+        self.fullscreen_button = QPushButton("□")
         self.fullscreen_button.setObjectName("fullscreenButton")
-        self.fullscreen_button.setToolTip("F11 — развернуть окно; Esc — вернуть обычный режим")
-        self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
-        header.addWidget(self.fullscreen_button)
+        self.fullscreen_button.setAccessibleName("Развернуть окно")
+        self.fullscreen_button.setFixedSize(42, 36)
+        self.fullscreen_button.setToolTip("Развернуть окно на весь рабочий стол")
+        self.fullscreen_button.clicked.connect(self.toggle_window_maximized)
         self.service_toggle = QPushButton("⚙  Расширенные настройки")
         self.service_toggle.clicked.connect(self.toggle_service_view)
         header.addWidget(self.service_toggle)
@@ -437,6 +438,9 @@ class OperatorPanel(QMainWindow):
         settings = QPushButton("Настройки соединения")
         settings.clicked.connect(self.open_settings)
         header.addWidget(settings)
+        # Keep the window control at the far right, visually matching the
+        # native minimize/maximize/close controls shown by the desktop shell.
+        header.addWidget(self.fullscreen_button)
         layout.addLayout(header)
 
         safety = QHBoxLayout()
@@ -1335,6 +1339,17 @@ class OperatorPanel(QMainWindow):
         elif not self.background_services_started:
             self.start_background_services()
 
+    def toggle_window_maximized(self) -> None:
+        """Toggle the dashboard between a normal window and a maximized window."""
+        if self.isMaximized():
+            self.showNormal()
+            if self._normal_geometry is not None:
+                self.setGeometry(self._normal_geometry)
+        else:
+            self._normal_geometry = self.geometry()
+            self.showMaximized()
+        self._update_fullscreen_button()
+
     def toggle_fullscreen(self) -> None:
         """Toggle the operator dashboard between windowed and full-screen modes."""
         if self.isFullScreen():
@@ -1354,14 +1369,15 @@ class OperatorPanel(QMainWindow):
     def _update_fullscreen_button(self) -> None:
         if "fullscreen_button" not in self.__dict__:
             return
-        fullscreen = self.isFullScreen()
-        self.fullscreen_button.setText(
-            "▣  Вернуть окно" if fullscreen else "⛶  На весь экран"
+        expanded = self.isFullScreen() or self.isMaximized()
+        self.fullscreen_button.setText("❐" if expanded else "□")
+        self.fullscreen_button.setAccessibleName(
+            "Вернуть обычный размер" if expanded else "Развернуть окно"
         )
         self.fullscreen_button.setToolTip(
-            "Esc или F11 — вернуть обычный размер"
-            if fullscreen
-            else "F11 — развернуть окно; Esc — вернуть обычный режим"
+            "Вернуть обычный размер окна"
+            if expanded
+            else "Развернуть окно на весь рабочий стол"
         )
 
     def toggle_service_view(self) -> None:
@@ -3173,7 +3189,8 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
                      border: 1px solid #465b68; border-radius: 9px;
                      font-weight: bold; padding: 9px 12px; }
         #fullscreenButton { background: #1d2a34; border-color: #536e7d;
-                            color: #dbeaf2; font-weight: bold; }
+                            color: #dbeaf2; font-weight: bold; font-size: 16pt;
+                            padding: 0; }
         #fullscreenButton:hover { background: #2b4250; }
         #statusLabel { padding: 9px 12px; background: #202c35;
                        border: 1px solid #354853; border-radius: 9px; }

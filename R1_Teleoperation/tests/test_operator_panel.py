@@ -315,7 +315,7 @@ def test_exhibition_home_keeps_lock_run_and_adds_separate_stand_button():
     assert panel.specs['exhibition_stand'].requires_run_mode is False
     assert panel.tabs.tabBar().isHidden()
     assert panel.connect_button.text() == "↻  НАЙТИ И ПОДКЛЮЧИТЬ"
-    assert panel.fullscreen_button.text() == "⛶  На весь экран"
+    assert panel.fullscreen_button.text() == "□"
     assert panel.fullscreen_button.objectName() == "fullscreenButton"
     assert panel.fullscreen_shortcut.key().toString() == "F11"
     assert all(
@@ -353,13 +353,23 @@ def test_fullscreen_toggle_does_not_change_operator_mode():
     panel.toggle_fullscreen()
     app.processEvents()
     assert panel.isFullScreen()
-    assert panel.fullscreen_button.text() == "▣  Вернуть окно"
+    assert panel.fullscreen_button.text() == "❐"
 
     panel.exit_fullscreen()
     app.processEvents()
     assert not panel.isFullScreen()
-    assert panel.fullscreen_button.text() == "⛶  На весь экран"
+    assert panel.fullscreen_button.text() == "□"
     assert panel.exhibition_mode == initial_mode
+
+    panel.fullscreen_button.click()
+    app.processEvents()
+    assert panel.isMaximized()
+    assert panel.fullscreen_button.text() == "❐"
+
+    panel.fullscreen_button.click()
+    app.processEvents()
+    assert not panel.isMaximized()
+    assert panel.fullscreen_button.text() == "□"
     panel.close()
     app.processEvents()
 
