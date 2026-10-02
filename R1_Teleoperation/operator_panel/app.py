@@ -491,24 +491,21 @@ class OperatorPanel(QMainWindow):
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "Подключение к роботу идёт только по Ethernet-кабелю. Включите "
-            "робота и VR: приложение само найдёт видео, батарею и контроллеры. "
-            "Телефон и Wi‑Fi робота не нужны."
+            "Ethernet к роботу  •  VR по USB-C или Wi‑Fi  •  телефон и Wi‑Fi робота не нужны"
         )
         subtitle.setObjectName("hint")
         subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setWordWrap(True)
-        subtitle.setMaximumHeight(36)
+        subtitle.setWordWrap(False)
+        subtitle.setMaximumHeight(28)
         layout.addWidget(subtitle)
 
         self.operator_instruction = QLabel(
-            "1  Включите робота и очки    2  Дождитесь зелёного «ПОДКЛЮЧЕНО»    "
-            "3  Нажмите STATIC или RUN"
+            "Включите робота и очки  →  дождитесь «ПОДКЛЮЧЕНО»  →  выберите LOCK или RUN"
         )
         self.operator_instruction.setObjectName("operatorInstruction")
         self.operator_instruction.setAlignment(Qt.AlignCenter)
-        self.operator_instruction.setWordWrap(True)
-        self.operator_instruction.setMaximumHeight(46)
+        self.operator_instruction.setWordWrap(False)
+        self.operator_instruction.setMaximumHeight(36)
         layout.addWidget(self.operator_instruction)
 
         content = QHBoxLayout()
@@ -535,13 +532,13 @@ class OperatorPanel(QMainWindow):
         self.battery_label = QLabel("—%")
         self.battery_label.setObjectName("batteryBadge")
         self.battery_label.setAlignment(Qt.AlignCenter)
-        self.battery_label.setMinimumSize(76, 48)
+        self.battery_label.setMinimumSize(64, 40)
         self.battery_label.setFont(QFont("Sans Serif", 16, QFont.Bold))
         device_layout.addWidget(self.battery_label, 0, 1, 2, 1)
         self.connect_button = QPushButton("↻  НАЙТИ И ПОДКЛЮЧИТЬ")
         self.connect_button.setObjectName("connectButton")
         self.connect_button.clicked.connect(self.auto_connect)
-        self.connect_button.setMinimumHeight(44)
+        self.connect_button.setMinimumHeight(36)
         device_layout.addWidget(self.connect_button, 1, 0)
         controls.addWidget(device)
 
@@ -554,22 +551,22 @@ class OperatorPanel(QMainWindow):
             "exhibition_static", "LOCK / СТАТИЧНЫЙ РЕЖИМ\nВидео и устойчивое положение"
         )
         self.static_mode_button.setObjectName("staticModeButton")
-        self.static_mode_button.setMinimumHeight(62)
-        self.static_mode_button.setFont(QFont("Sans Serif", 13, QFont.Bold))
+        self.static_mode_button.setMinimumHeight(54)
+        self.static_mode_button.setFont(QFont("Sans Serif", 12, QFont.Bold))
         mode_layout.addWidget(self.static_mode_button)
         self.control_mode_button = self._action_button(
             "exhibition_control", "RUN / ПОЛНОЕ УПРАВЛЕНИЕ\nVR: голова, руки и ноги"
         )
         self.control_mode_button.setObjectName("controlModeButton")
-        self.control_mode_button.setMinimumHeight(72)
-        self.control_mode_button.setFont(QFont("Sans Serif", 13, QFont.Bold))
+        self.control_mode_button.setMinimumHeight(62)
+        self.control_mode_button.setFont(QFont("Sans Serif", 12, QFont.Bold))
         mode_layout.addWidget(self.control_mode_button)
         self.stand_mode_button = self._action_button(
             "exhibition_stand", "СТОЙКА\nШтатная поза • моторы удерживают"
         )
         self.stand_mode_button.setObjectName("standModeButton")
-        self.stand_mode_button.setMinimumHeight(58)
-        self.stand_mode_button.setFont(QFont("Sans Serif", 12, QFont.Bold))
+        self.stand_mode_button.setMinimumHeight(50)
+        self.stand_mode_button.setFont(QFont("Sans Serif", 11, QFont.Bold))
         mode_layout.addWidget(self.stand_mode_button)
         mode_hint = QLabel(
             "LOCK — пауза с удержанием позы  •  RUN — голова, руки и ноги  •  "
@@ -577,7 +574,7 @@ class OperatorPanel(QMainWindow):
         )
         mode_hint.setObjectName("modeHint")
         mode_hint.setWordWrap(True)
-        mode_hint.setMaximumHeight(30)
+        mode_hint.setMaximumHeight(24)
         mode_layout.addWidget(mode_hint)
         controls.addWidget(mode_group)
 
@@ -586,11 +583,11 @@ class OperatorPanel(QMainWindow):
         # path in request_zero_torque(); this button only makes that path easy
         # to find when the operator has no time to open the service tab.
         self.zero_torque_button = QPushButton(
-            "ZERO TORQUE / РАССЛАБИТЬ\nтолько когда робот поддержан"
+            "ZERO TORQUE / РАССЛАБИТЬ\nробот должен быть поддержан"
         )
         self.zero_torque_button.setObjectName("zeroTorqueButton")
-        self.zero_torque_button.setMinimumHeight(54)
-        self.zero_torque_button.setFont(QFont("Sans Serif", 11, QFont.Bold))
+        self.zero_torque_button.setMinimumHeight(48)
+        self.zero_torque_button.setFont(QFont("Sans Serif", 10, QFont.Bold))
         self.zero_torque_button.setToolTip(
             "Завершить управление и отключить удерживающий момент. "
             "Используйте только на страховке или с роботом на опоре."
@@ -602,10 +599,10 @@ class OperatorPanel(QMainWindow):
         safety_layout.setContentsMargins(8, 6, 8, 6)
         safety_layout.setSpacing(3)
         safety_layout.addWidget(self.zero_torque_button)
-        safety_hint = QLabel("Используйте только когда робот поддержан или уже переведён в стойку.")
+        safety_hint = QLabel("Только на опоре или после СТОЙКИ.")
         safety_hint.setObjectName("safetyHint")
         safety_hint.setWordWrap(True)
-        safety_hint.setMaximumHeight(28)
+        safety_hint.setMaximumHeight(22)
         safety_layout.addWidget(safety_hint)
         controls.addWidget(safety_group)
 
@@ -626,7 +623,7 @@ class OperatorPanel(QMainWindow):
         )
         for label in status_labels:
             label.setObjectName("simpleStatus")
-            label.setMinimumHeight(30)
+            label.setMinimumHeight(26)
         status_grid.setVerticalSpacing(4)
         status_grid.setHorizontalSpacing(6)
         status_grid.addWidget(self.exhibition_robot_status, 0, 0)
@@ -637,7 +634,7 @@ class OperatorPanel(QMainWindow):
         self.action_timing_status = QLabel("Последнее действие: —")
         self.action_timing_status.setObjectName("simpleStatus")
         self.action_timing_status.setProperty("statusRole", "timing")
-        self.action_timing_status.setMinimumHeight(30)
+        self.action_timing_status.setMinimumHeight(26)
         status_grid.addWidget(self.action_timing_status, 3, 0, 1, 2)
         controls.addWidget(status_group)
 
@@ -645,17 +642,17 @@ class OperatorPanel(QMainWindow):
         tools.setHorizontalSpacing(6)
         reconnect = self._action_button("exhibition_reconnect", "↻  Переподключить всё")
         reconnect.setObjectName("reconnectButton")
-        reconnect.setMinimumHeight(40)
+        reconnect.setMinimumHeight(36)
         tools.addWidget(reconnect, 0, 0)
         open_viewer = QPushButton("Открыть Robot POV")
-        open_viewer.setMinimumHeight(40)
+        open_viewer.setMinimumHeight(36)
         open_viewer.clicked.connect(self.open_viewer)
         tools.addWidget(open_viewer, 0, 1)
         controls.addLayout(tools)
 
         self.exhibition_voice_status = QLabel("● Голос: проверяется")
         self.exhibition_voice_status.setObjectName("simpleStatus")
-        self.exhibition_voice_status.setMinimumHeight(30)
+        self.exhibition_voice_status.setMinimumHeight(26)
         controls.addWidget(self.exhibition_voice_status)
         controls.addStretch(1)
         content.addLayout(controls, 2)
@@ -663,12 +660,12 @@ class OperatorPanel(QMainWindow):
 
         self.controller_action_hint = QLabel(
             "B справа — аварийная остановка  •  X слева — нейтраль рук  •  "
-            "стики — ходьба; отпустите стик — возврат рук/головы. "
-            "VR восстановится автоматически; STOP/KILL — в «Сервисе»."
+            "стики — ходьба; отпустите стик — возврат рук/головы  •  "
+            "STOP/KILL — в «Сервисе»."
         )
         self.controller_action_hint.setObjectName("hint")
         self.controller_action_hint.setWordWrap(True)
-        self.controller_action_hint.setMaximumHeight(48)
+        self.controller_action_hint.setMaximumHeight(36)
         layout.addWidget(self.controller_action_hint)
         layout.addStretch(1)
         self.exhibition_tab = tab
