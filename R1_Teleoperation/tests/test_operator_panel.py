@@ -308,7 +308,7 @@ def test_exhibition_home_keeps_lock_run_and_adds_separate_stand_button():
     assert panel.static_mode_button.text().startswith("LOCK / СТАТИЧНЫЙ РЕЖИМ")
     assert panel.control_mode_button.text().startswith("RUN / ПОЛНОЕ УПРАВЛЕНИЕ")
     assert panel.stand_mode_button.text().startswith("СТОЙКА")
-    assert panel.zero_torque_button.text().startswith("ZERO TORQUE / РАССЛАБИТЬ")
+    assert panel.zero_torque_button.text().startswith("ZERO TORQUE")
     assert panel.zero_torque_button.objectName() == "zeroTorqueButton"
     assert panel.service_zero_torque_button.objectName() == "zeroTorqueServiceButton"
     assert panel.specs['exhibition_stand'].target == 'exhibition-static'
@@ -316,7 +316,7 @@ def test_exhibition_home_keeps_lock_run_and_adds_separate_stand_button():
     assert panel.tabs.tabBar().isHidden()
     assert panel.connect_button.text() == "↻  НАЙТИ И ПОДКЛЮЧИТЬ"
     assert "fullscreen_button" not in panel.__dict__
-    assert "settings_button" not in panel.__dict__
+    assert panel.settings_button.text() == "⚙"
     assert panel.fullscreen_shortcut.key().toString() == "F11"
     assert panel.windowFlags() & app_module.Qt.WindowMaximizeButtonHint
     assert panel.tabs.widget(0) is panel.exhibition_tab
@@ -334,6 +334,7 @@ def test_exhibition_home_keeps_lock_run_and_adds_separate_stand_button():
     assert "kill_button" not in panel.__dict__
     assert "B справа" in panel.controller_action_hint.text()
     assert "X слева" in panel.controller_action_hint.text()
+    assert not panel.controller_action_hint.isHidden()
     assert panel.exhibition_tab.toolTip() == ""
     assert panel.static_mode_button.toolTip() == ""
     assert panel.control_mode_button.toolTip() == ""
@@ -388,12 +389,13 @@ def test_exhibition_home_reflows_video_and_header_for_window_width():
     compact_video_width = panel.video_preview.width()
     assert panel.width() == 1280
     assert panel.help_button.text() == "?"
-    assert "settings_button" not in panel.__dict__
+    assert panel.settings_button.text() == "⚙"
     assert compact_video_width >= 320
 
     panel.resize(1600, 900)
     app.processEvents()
     assert "Как запустить" in panel.help_button.text()
+    assert "Настройки соединения" in panel.settings_button.text()
     assert panel.video_preview.width() > compact_video_width
 
     panel.close()

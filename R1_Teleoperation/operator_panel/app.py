@@ -15,8 +15,8 @@ import time
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
-from PyQt5.QtCore import QTimer, QUrl, Qt
-from PyQt5.QtGui import QDesktopServices, QFont, QIcon, QKeySequence
+from PyQt5.QtCore import QSize, QTimer, QUrl, Qt
+from PyQt5.QtGui import QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -146,6 +146,66 @@ def _tuning_spin(value, minimum, maximum, step, suffix):
     spin.setValue(value)
     spin.setSuffix(suffix)
     return spin
+
+
+class BatteryRing(QWidget):
+    """Compact circular battery gauge compatible with the old QLabel API."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._text = "—%"
+        self._percent: Optional[int] = None
+        self.setObjectName("batteryRing")
+        self.setMinimumSize(86, 86)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt virtual method
+        return QSize(96, 96)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt virtual method
+        return QSize(86, 86)
+
+    def text(self) -> str:
+        return self._text
+
+    def setText(self, text: str) -> None:
+        self._text = str(text)
+        match = re.search(r"(\d{1,3})", self._text)
+        self._percent = max(0, min(100, int(match.group(1)))) if match else None
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802 - Qt virtual method
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        side = max(24, min(self.width(), self.height()) - 14)
+        left = (self.width() - side) / 2
+        top = (self.height() - side) / 2
+        rect = self.rect().adjusted(
+            int(left), int(top), -int(left), -int(top)
+        )
+
+        track = QPen(QColor("#3a3a3c"), 9, Qt.SolidLine, Qt.RoundCap)
+        painter.setPen(track)
+        painter.drawArc(rect, 90 * 16, -360 * 16)
+
+        if self._percent is None:
+            accent = QColor("#636366")
+            span = 0
+        elif self._percent <= 20:
+            accent = QColor("#ff453a")
+            span = int(-360 * 16 * self._percent / 100)
+        elif self._percent <= 40:
+            accent = QColor("#ff9f0a")
+            span = int(-360 * 16 * self._percent / 100)
+        else:
+            accent = QColor("#30d158")
+            span = int(-360 * 16 * self._percent / 100)
+        if span:
+            painter.setPen(QPen(accent, 9, Qt.SolidLine, Qt.RoundCap))
+            painter.drawArc(rect, 90 * 16, span)
+
+        painter.setPen(QColor("#f5f5f7"))
+        painter.setFont(QFont("Inter", 15, QFont.Bold))
+        painter.drawText(self.rect(), Qt.AlignCenter, self._text)
 
 
 class SettingsDialog(QDialog):
@@ -419,40 +479,85 @@ class OperatorPanel(QMainWindow):
         layout.setContentsMargins(8, 8, 8, 6)
         layout.setSpacing(6)
 
-        header = QHBoxLayout()
-        header.setSpacing(8)
+        header_card = QWidget()
+        self.header_card = header_card
+        header_card.setObjectName("headerCard")
+        header = QGridLayout(header_card)
+        header.setContentsMargins(14, 10, 12, 10)
+        header.setHorizontalSpacing(10)
+        header.setVerticalSpacing(6)
+
         title = QLabel("UNITREE R1  •  ПАНЕЛЬ ОПЕРАТОРА")
         title.setObjectName("appTitle")
-        title.setFont(QFont("Sans Serif", 16, QFont.Bold))
+        title.setFont(QFont("Inter", 15, QFont.Bold))
         brand = QWidget()
         brand_layout = QVBoxLayout(brand)
         brand_layout.setContentsMargins(0, 0, 0, 0)
-        brand_layout.setSpacing(1)
-        brand_layout.addWidget(title)
-        brand_subtitle = QLabel("ОФЛАЙН-УПРАВЛЕНИЕ  •  ETHERNET + USB-C")
+        brand_layout.setSpacing(4)
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(8)
+        robot_icon = QLabel()
+        robot_icon.setObjectName("brandIcon")
+        icon_path = (
+            Path(__file__).resolve().parents[1]
+            / "assets"
+            / "icons"
+            / "unitree-r1-robot-64.png"
+        )
+        if icon_path.is_file():
+            robot_icon.setPixmap(QIcon(str(icon_path)).pixmap(28, 28))
+        title_row.addWidget(robot_icon)
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        brand_layout.addLayout(title_row)
+        brand_subtitle = QLabel("↔  ETHERNET + USB-C   •   ПОЛНОСТЬЮ ОФЛАЙН")
         brand_subtitle.setObjectName("brandSubtitle")
         brand_layout.addWidget(brand_subtitle)
-        header.addWidget(brand)
-        header.addStretch(1)
+
         self.mode_label = QLabel()
         self.mode_label.setObjectName("modeLabel")
-        header.addWidget(self.mode_label)
-        self.service_toggle = QPushButton("⚙  Расширенные настройки")
-        self.service_toggle.clicked.connect(self.toggle_service_view)
-        header.addWidget(self.service_toggle)
-        self.help_button = QPushButton("?  Как запустить")
-        self.help_button.clicked.connect(self.show_quick_start)
-        header.addWidget(self.help_button)
-        layout.addLayout(header)
+        self.mode_label.setAlignment(Qt.AlignCenter)
 
-        safety = QHBoxLayout()
+        actions_widget = QWidget()
+        self.header_actions = actions_widget
+        actions = QHBoxLayout(actions_widget)
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(6)
+        self.service_toggle = QPushButton("⚙  Расширенные настройки")
+        self.service_toggle.setObjectName("headerAction")
+        self.service_toggle.setMinimumHeight(44)
+        self.service_toggle.clicked.connect(self.toggle_service_view)
+        actions.addWidget(self.service_toggle)
+        self.help_button = QPushButton("?  Как запустить")
+        self.help_button.setObjectName("headerAction")
+        self.help_button.setMinimumHeight(44)
+        self.help_button.clicked.connect(self.show_quick_start)
+        actions.addWidget(self.help_button)
+        self.settings_button = QPushButton("⚙  Настройки соединения")
+        self.settings_button.setObjectName("headerAction")
+        self.settings_button.setMinimumHeight(44)
+        self.settings_button.clicked.connect(self.open_settings)
+        actions.addWidget(self.settings_button)
+
+        summary = QWidget()
+        summary_layout = QHBoxLayout(summary)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        summary_layout.setSpacing(8)
         self.status_label = QLabel()
         self.status_label.setObjectName("statusLabel")
-        safety.addWidget(self.status_label, 1)
+        summary_layout.addWidget(self.status_label, 1)
         self.active_label = QLabel("Активных процессов: 0")
         self.active_label.setObjectName("activeLabel")
-        safety.addWidget(self.active_label)
-        layout.addLayout(safety)
+        summary_layout.addWidget(self.active_label)
+
+        header.addWidget(brand, 0, 0)
+        header.addWidget(self.mode_label, 0, 1)
+        header.addWidget(actions_widget, 0, 2, 2, 1)
+        header.addWidget(summary, 1, 0, 1, 2)
+        header.setColumnStretch(0, 3)
+        header.setColumnStretch(1, 2)
+        layout.addWidget(header_card)
 
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
@@ -477,30 +582,6 @@ class OperatorPanel(QMainWindow):
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(4)
 
-        title = QLabel("Выставочный запуск")
-        title.setObjectName("exhibitionTitle")
-        title.setFont(QFont("Sans Serif", 16, QFont.Bold))
-        title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
-
-        subtitle = QLabel(
-            "Ethernet к роботу  •  VR по USB-C или Wi‑Fi  •  телефон и Wi‑Fi робота не нужны"
-        )
-        subtitle.setObjectName("hint")
-        subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setWordWrap(False)
-        subtitle.setMaximumHeight(28)
-        layout.addWidget(subtitle)
-
-        self.operator_instruction = QLabel(
-            "Включите робота и очки  →  дождитесь «ПОДКЛЮЧЕНО»  →  выберите LOCK или RUN"
-        )
-        self.operator_instruction.setObjectName("operatorInstruction")
-        self.operator_instruction.setAlignment(Qt.AlignCenter)
-        self.operator_instruction.setWordWrap(False)
-        self.operator_instruction.setMaximumHeight(36)
-        layout.addWidget(self.operator_instruction)
-
         # Exhibition layout: controls on the left, a flexible video canvas in
         # the center, and safety/health on the right.  Each column is allowed
         # to grow with the window; the video receives the largest share.
@@ -518,31 +599,38 @@ class OperatorPanel(QMainWindow):
         )
         self.video_preview.state_changed.connect(self._on_video_state)
         video_layout.addWidget(self.video_preview)
+        self.controller_action_hint = QLabel(
+            "B справа — аварийная остановка  •  X слева — нейтраль рук  •  "
+            "стики — ходьба; отпустите стик — возврат рук/головы  •  "
+            "STOP/KILL — в «Сервисе»."
+        )
+        self.controller_action_hint.setObjectName("controllerHint")
+        self.controller_action_hint.setAlignment(Qt.AlignCenter)
+        self.controller_action_hint.setWordWrap(True)
+        self.controller_action_hint.setMaximumHeight(40)
+        video_layout.addWidget(self.controller_action_hint)
 
         left_column = QVBoxLayout()
         left_column.setSpacing(4)
-        device = QGroupBox("Подключение")
+        device = QGroupBox("Подключение и заряд")
         device.setObjectName("deviceGroup")
         device_layout = QGridLayout(device)
-        device_layout.setContentsMargins(6, 4, 6, 4)
-        device_layout.setHorizontalSpacing(4)
-        device_layout.setVerticalSpacing(3)
+        device_layout.setContentsMargins(8, 6, 8, 6)
+        device_layout.setHorizontalSpacing(8)
+        device_layout.setVerticalSpacing(4)
         self.robot_name_label = QLabel(f"○  {self.config.robot_name}  — не в сети")
         self.robot_name_label.setObjectName("robotName")
-        self.robot_name_label.setFont(QFont("Sans Serif", 13, QFont.Bold))
-        device_layout.addWidget(self.robot_name_label, 0, 0)
-        self.battery_label = QLabel("—%")
-        self.battery_label.setObjectName("batteryBadge")
-        self.battery_label.setAlignment(Qt.AlignCenter)
-        self.battery_label.setMinimumSize(58, 40)
-        self.battery_label.setFont(QFont("Sans Serif", 14, QFont.Bold))
-        device_layout.addWidget(self.battery_label, 0, 1, 2, 1)
+        self.robot_name_label.setFont(QFont("Inter", 11, QFont.Bold))
+        self.robot_name_label.setWordWrap(True)
+        device_layout.addWidget(self.robot_name_label, 0, 1)
+        self.battery_label = BatteryRing(device)
+        device_layout.addWidget(self.battery_label, 0, 0, 2, 1)
         self.connect_button = QPushButton("↻  НАЙТИ И ПОДКЛЮЧИТЬ")
         self.connect_button.setObjectName("connectButton")
         self.connect_button.clicked.connect(self.auto_connect)
         self.connect_button.setMinimumHeight(34)
-        device_layout.addWidget(self.connect_button, 1, 0)
-        device_layout.setColumnStretch(0, 1)
+        device_layout.addWidget(self.connect_button, 1, 1)
+        device_layout.setColumnStretch(1, 1)
         left_column.addWidget(device)
 
         mode_group = QGroupBox("Режим управления")
@@ -555,16 +643,16 @@ class OperatorPanel(QMainWindow):
         )
         self.static_mode_button.setObjectName("staticModeButton")
         self.static_mode_button.setToolTip("")
-        self.static_mode_button.setMinimumHeight(54)
-        self.static_mode_button.setFont(QFont("Sans Serif", 12, QFont.Bold))
+        self.static_mode_button.setMinimumHeight(50)
+        self.static_mode_button.setFont(QFont("Inter", 10, QFont.Bold))
         mode_layout.addWidget(self.static_mode_button)
         self.control_mode_button = self._action_button(
             "exhibition_control", "RUN / ПОЛНОЕ УПРАВЛЕНИЕ\nVR: голова, руки и ноги"
         )
         self.control_mode_button.setObjectName("controlModeButton")
         self.control_mode_button.setToolTip("")
-        self.control_mode_button.setMinimumHeight(62)
-        self.control_mode_button.setFont(QFont("Sans Serif", 12, QFont.Bold))
+        self.control_mode_button.setMinimumHeight(52)
+        self.control_mode_button.setFont(QFont("Inter", 10, QFont.Bold))
         mode_layout.addWidget(self.control_mode_button)
         self.stand_mode_button = self._action_button(
             "exhibition_stand", "СТОЙКА\nШтатная поза • моторы удерживают"
@@ -572,16 +660,8 @@ class OperatorPanel(QMainWindow):
         self.stand_mode_button.setObjectName("standModeButton")
         self.stand_mode_button.setToolTip("")
         self.stand_mode_button.setMinimumHeight(50)
-        self.stand_mode_button.setFont(QFont("Sans Serif", 11, QFont.Bold))
+        self.stand_mode_button.setFont(QFont("Inter", 10, QFont.Bold))
         mode_layout.addWidget(self.stand_mode_button)
-        mode_hint = QLabel(
-            "LOCK — пауза  •  RUN — голова, руки, ноги  •  СТОЙКА — поза"
-        )
-        mode_hint.setObjectName("modeHint")
-        mode_hint.setAlignment(Qt.AlignCenter)
-        mode_hint.setWordWrap(True)
-        mode_hint.setMaximumHeight(32)
-        mode_layout.addWidget(mode_hint)
         left_column.addWidget(mode_group)
 
         # Keep the physical relaxation action visible on the operator's
@@ -589,11 +669,11 @@ class OperatorPanel(QMainWindow):
         # path in request_zero_torque(); this button only makes that path easy
         # to find when the operator has no time to open the service tab.
         self.zero_torque_button = QPushButton(
-            "ZERO TORQUE / РАССЛАБИТЬ\nробот должен быть поддержан"
+            "ZERO TORQUE  •  РАССЛАБИТЬ"
         )
         self.zero_torque_button.setObjectName("zeroTorqueButton")
-        self.zero_torque_button.setMinimumHeight(48)
-        self.zero_torque_button.setFont(QFont("Sans Serif", 10, QFont.Bold))
+        self.zero_torque_button.setMinimumHeight(42)
+        self.zero_torque_button.setFont(QFont("Inter", 10, QFont.Bold))
         self.zero_torque_button.clicked.connect(self.request_zero_torque)
         safety_group = QGroupBox("Безопасное завершение")
         safety_group.setObjectName("safetyGroup")
@@ -631,17 +711,24 @@ class OperatorPanel(QMainWindow):
             label.setMinimumHeight(26)
             label.setWordWrap(True)
             status_layout.addWidget(label)
-        self.action_timing_status = QLabel("Последнее действие: —")
-        self.action_timing_status.setObjectName("simpleStatus")
-        self.action_timing_status.setProperty("statusRole", "timing")
-        self.action_timing_status.setMinimumHeight(26)
-        self.action_timing_status.setWordWrap(True)
-        status_layout.addWidget(self.action_timing_status)
 
         right_column = QVBoxLayout()
         right_column.setSpacing(4)
         right_column.addWidget(status_group)
         right_column.addStretch(1)
+
+        reconnect = self._action_button(
+            "exhibition_reconnect", "↻  Переподключить всё"
+        )
+        reconnect.setObjectName("reconnectButton")
+        reconnect.setToolTip("")
+        reconnect.setMinimumHeight(36)
+        right_column.addWidget(reconnect)
+        open_viewer = QPushButton("▣  Открыть Robot POV")
+        open_viewer.setObjectName("openPovButton")
+        open_viewer.setMinimumHeight(36)
+        open_viewer.clicked.connect(self.open_viewer)
+        right_column.addWidget(open_viewer)
 
         dashboard.addLayout(left_column, 0, 0)
         dashboard.addWidget(video_group, 0, 1)
@@ -652,18 +739,24 @@ class OperatorPanel(QMainWindow):
         dashboard.setRowStretch(0, 1)
         layout.addLayout(dashboard, 1)
 
-        tools = QHBoxLayout()
-        tools.setSpacing(6)
-        reconnect = self._action_button("exhibition_reconnect", "↻  Переподключить всё")
-        reconnect.setObjectName("reconnectButton")
-        reconnect.setToolTip("")
-        reconnect.setMinimumHeight(36)
-        tools.addWidget(reconnect, 1)
-        open_viewer = QPushButton("Открыть Robot POV")
-        open_viewer.setMinimumHeight(36)
-        open_viewer.clicked.connect(self.open_viewer)
-        tools.addWidget(open_viewer, 1)
-        layout.addLayout(tools)
+        self.action_timing_status = QLabel("Последнее действие: —")
+        self.action_timing_status.setObjectName("footerStatus")
+        self.action_timing_status.setProperty("statusRole", "timing")
+        self.action_timing_status.setMinimumHeight(28)
+        self.action_timing_status.setWordWrap(True)
+
+        self.operator_instruction = QLabel(
+            "Включите робота и очки  →  дождитесь «ПОДКЛЮЧЕНО»  →  выберите LOCK или RUN"
+        )
+        self.operator_instruction.setObjectName("operatorInstruction")
+        self.operator_instruction.setAlignment(Qt.AlignCenter)
+        self.operator_instruction.setWordWrap(True)
+        self.operator_instruction.setMaximumHeight(40)
+        footer = QHBoxLayout()
+        footer.setSpacing(4)
+        footer.addWidget(self.action_timing_status, 1)
+        footer.addWidget(self.operator_instruction, 2)
+        layout.addLayout(footer)
 
         self.exhibition_voice_status = QLabel("● Голос: проверяется")
         self.exhibition_voice_status.setObjectName("simpleStatus")
@@ -671,19 +764,6 @@ class OperatorPanel(QMainWindow):
         self.exhibition_voice_status.setParent(tab)
         self.exhibition_voice_status.setVisible(False)
 
-        self.controller_action_hint = QLabel(
-            "B справа — аварийная остановка  •  X слева — нейтраль рук  •  "
-            "стики — ходьба; отпустите стик — возврат рук/головы  •  "
-            "STOP/KILL — в «Сервисе»."
-        )
-        self.controller_action_hint.setObjectName("hint")
-        self.controller_action_hint.setWordWrap(True)
-        self.controller_action_hint.setMaximumHeight(36)
-        # This information is useful, but a permanent footer is the first
-        # thing that gets clipped on a shorter external display.  Keep it in
-        # the widget tree for status/tests and expose it as a tooltip instead.
-        self.controller_action_hint.setParent(tab)
-        self.controller_action_hint.setVisible(False)
         self.exhibition_tab_hint = self.controller_action_hint.text()
         self.exhibition_tab = tab
         self.tabs.addTab(tab, "Главный экран")
@@ -1411,6 +1491,7 @@ class OperatorPanel(QMainWindow):
         if not {
             "service_toggle",
             "help_button",
+            "settings_button",
         }.issubset(self.__dict__):
             return
         compact = self.width() < 1450
@@ -1418,8 +1499,9 @@ class OperatorPanel(QMainWindow):
             "tabs" in self.__dict__ and self.tabs.currentIndex() == 1
         )
         if compact:
-            self.service_toggle.setText("←" if service_visible else "⚙")
+            self.service_toggle.setText("←" if service_visible else "☰")
             self.help_button.setText("?")
+            self.settings_button.setText("⚙")
         else:
             self.service_toggle.setText(
                 "←  Главный экран"
@@ -1427,6 +1509,22 @@ class OperatorPanel(QMainWindow):
                 else "⚙  Расширенные настройки"
             )
             self.help_button.setText("?  Как запустить")
+            self.settings_button.setText("⚙  Настройки соединения")
+        for button in (
+            self.service_toggle,
+            self.help_button,
+            self.settings_button,
+        ):
+            button.updateGeometry()
+        if "header_actions" in self.__dict__:
+            self.header_actions.updateGeometry()
+            if self.header_actions.layout() is not None:
+                self.header_actions.layout().invalidate()
+        if "header_card" in self.__dict__:
+            self.header_card.updateGeometry()
+            if self.header_card.layout() is not None:
+                self.header_card.layout().invalidate()
+                self.header_card.layout().activate()
 
     def _update_fullscreen_button(self) -> None:
         if "fullscreen_button" not in self.__dict__:
@@ -1665,16 +1763,17 @@ class OperatorPanel(QMainWindow):
         self.mode_label.setText("РЕЖИМ: " + self.exhibition_mode.upper())
         self.status_label.setText(self.last_status)
         if self.last_status.startswith("Зелёный"):
-            color = "#2d8a57"
+            background, foreground, border = "#173523", "#30d158", "#245d39"
         elif self.last_status.startswith("Жёлтый"):
-            color = "#8c6b24"
+            background, foreground, border = "#3a2d0e", "#ff9f0a", "#654d16"
         elif self.last_status.startswith("Красный"):
-            color = "#8f2f3b"
+            background, foreground, border = "#3a2022", "#ff6961", "#6b3438"
         else:
-            color = "#5b6269"
+            background, foreground, border = "#232326", "#aeb0b8", "#3a3a3c"
         self.status_label.setStyleSheet(
-            f"padding: 8px; border-radius: 4px; background: {color}; "
-            "color: #eef4f8;"
+            "padding: 6px 10px; border-radius: 8px; "
+            f"background: {background}; color: {foreground}; "
+            f"border: 1px solid {border};"
         )
         self.active_label.setText(
             f"Активных процессов: {len(self.controller.active_keys())}"
@@ -3213,6 +3312,8 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
         QWidget { font-family: "Inter", "SF Pro Display", "Noto Sans", sans-serif;
                   font-size: 10pt; }
         QMainWindow, #rootPanel { background: #0f1115; color: #f5f5f7; }
+        #headerCard { background: #1c1c1e; border: 1px solid #343438;
+                      border-radius: 14px; }
         QGroupBox { background: #1c1c1e; border: 1px solid #343438;
                     border-radius: 14px; margin-top: 10px;
                     padding: 8px 8px 6px; }
@@ -3249,6 +3350,7 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
         #modeLabel { color: #ff9f0a; background: #2c2c2e;
                      border: 1px solid #48484a; border-radius: 10px;
                      font-weight: bold; padding: 8px 12px; }
+        #headerAction { min-width: 42px; }
         #statusLabel { padding: 8px 12px; background: #232326;
                        border: 1px solid #343438; border-radius: 10px; }
         #activeLabel { color: #aeb0b8; padding: 4px 6px; }
@@ -3256,19 +3358,21 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
         #hint { color: #8e8e93; padding: 4px 6px; }
         #warning { color: #ff9f0a; padding: 8px; }
         #cardText { color: #d1d1d6; padding: 10px; }
-        #operatorInstruction { background: #232326; color: #f5f5f7;
-                               border: 1px solid #48484a; border-radius: 10px;
-                               padding: 6px 10px; font-size: 12pt; font-weight: bold; }
+        #operatorInstruction { background: #1c1c1e; color: #aeb0b8;
+                               border: 1px solid #343438; border-radius: 10px;
+                               padding: 6px 10px; font-size: 10pt; }
+        #footerStatus { background: #1c1c1e; color: #d1d1d6;
+                        border: 1px solid #343438; border-radius: 10px;
+                        padding: 6px 10px; }
+        #controllerHint { background: #232326; color: #aeb0b8;
+                          border-radius: 9px; padding: 6px 10px;
+                          font-size: 9.5pt; }
         #videoCanvas { background: #000000; border: 1px solid #3a3a3c;
                        border-radius: 10px; color: #8e8e93; }
         #videoGroup::title { subcontrol-origin: margin;
                              subcontrol-position: top center; padding: 0 10px; }
         #videoStatus { background: #1c1c1e; color: #64d2ff;
                        border-radius: 8px; padding: 7px; }
-        #batteryBadge { background: #0a84ff; color: #ffffff;
-                        border: 1px solid #64b5ff; border-radius: 10px; }
-        #batteryBadge[batteryLow="true"] { background: #5a2025;
-                                             border-color: #ff453a; }
         #robotName { padding: 8px; color: #d1d1d6; }
         #robotName[connectionState="searching"] { color: #ff9f0a; }
         #robotName[connectionState="connected"] { color: #30d158; }
@@ -3288,6 +3392,7 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
         #standModeButton:hover { background: #3a3a3c; }
         #reconnectButton { background: #2c2c2e; border-color: #636366;
                            font-weight: bold; }
+        #openPovButton { background: #2c2c2e; border-color: #48484a; }
         #zeroTorqueButton { background: #5a2025; border-color: #ff453a;
                             color: white; font-weight: bold; }
         #zeroTorqueButton:hover { background: #733039; }
