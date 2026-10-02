@@ -204,9 +204,10 @@ class VideoPreview(QWidget):
         self._worker = None
         self._last_image = QImage()
         self.setObjectName("videoPreview")
-        # Keep the exhibition dashboard compact enough for a normal desktop
-        # window while allowing the preview to expand when space is available.
-        self.setMinimumSize(420, 240)
+        # The preview is a flexible center pane.  Keep a useful small
+        # footprint for a 1280px-wide external display, while letting the
+        # surrounding dashboard allocate the remaining space dynamically.
+        self.setMinimumSize(320, 190)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         layout = QVBoxLayout(self)
@@ -214,7 +215,7 @@ class VideoPreview(QWidget):
         self.image_label = QLabel("Видео подключится автоматически")
         self.image_label.setObjectName("videoCanvas")
         self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setMinimumSize(420, 240)
+        self.image_label.setMinimumSize(320, 190)
         self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout.addWidget(self.image_label, 1)
         self.status_label = QLabel("Ожидание Robot POV")

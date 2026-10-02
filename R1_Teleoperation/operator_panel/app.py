@@ -446,12 +446,12 @@ class OperatorPanel(QMainWindow):
         self.service_toggle = QPushButton("⚙  Расширенные настройки")
         self.service_toggle.clicked.connect(self.toggle_service_view)
         header.addWidget(self.service_toggle)
-        help_button = QPushButton("?  Как запустить")
-        help_button.clicked.connect(self.show_quick_start)
-        header.addWidget(help_button)
-        settings = QPushButton("Настройки соединения")
-        settings.clicked.connect(self.open_settings)
-        header.addWidget(settings)
+        self.help_button = QPushButton("?  Как запустить")
+        self.help_button.clicked.connect(self.show_quick_start)
+        header.addWidget(self.help_button)
+        self.settings_button = QPushButton("Настройки соединения")
+        self.settings_button.clicked.connect(self.open_settings)
+        header.addWidget(self.settings_button)
         # Keep the window control at the far right, visually matching the
         # native minimize/maximize/close controls shown by the desktop shell.
         header.addWidget(self.fullscreen_button)
@@ -462,6 +462,7 @@ class OperatorPanel(QMainWindow):
         self.status_label.setObjectName("statusLabel")
         safety.addWidget(self.status_label, 1)
         self.active_label = QLabel("Активных процессов: 0")
+        self.active_label.setObjectName("activeLabel")
         safety.addWidget(self.active_label)
         layout.addLayout(safety)
 
@@ -480,6 +481,7 @@ class OperatorPanel(QMainWindow):
         self._add_motion_tab()
         self._add_logs_tab()
         self.tabs.tabBar().hide()
+        self._refresh_header_controls()
 
     def _add_exhibition_tab(self) -> None:
         tab = QWidget()
@@ -511,39 +513,49 @@ class OperatorPanel(QMainWindow):
         self.operator_instruction.setMaximumHeight(36)
         layout.addWidget(self.operator_instruction)
 
-        content = QHBoxLayout()
-        content.setSpacing(6)
+        # Exhibition layout: controls on the left, a flexible video canvas in
+        # the center, and safety/health on the right.  Each column is allowed
+        # to grow with the window; the video receives the largest share.
+        dashboard = QGridLayout()
+        dashboard.setContentsMargins(0, 0, 0, 0)
+        dashboard.setHorizontalSpacing(8)
+        dashboard.setVerticalSpacing(4)
+
         video_group = QGroupBox("Видео глазами робота")
         video_group.setObjectName("videoGroup")
         video_layout = QVBoxLayout(video_group)
+        video_layout.setContentsMargins(6, 6, 6, 6)
         self.video_preview = VideoPreview(
             self.config.video_url, self.config.video_profile, video_group
         )
         self.video_preview.state_changed.connect(self._on_video_state)
         video_layout.addWidget(self.video_preview)
-        content.addWidget(video_group, 3)
 
-        controls = QVBoxLayout()
-        controls.setSpacing(4)
+        left_column = QVBoxLayout()
+        left_column.setSpacing(4)
         device = QGroupBox("Подключение")
         device.setObjectName("deviceGroup")
         device_layout = QGridLayout(device)
+        device_layout.setContentsMargins(6, 4, 6, 4)
+        device_layout.setHorizontalSpacing(4)
+        device_layout.setVerticalSpacing(3)
         self.robot_name_label = QLabel(f"○  {self.config.robot_name}  — не в сети")
         self.robot_name_label.setObjectName("robotName")
-        self.robot_name_label.setFont(QFont("Sans Serif", 16, QFont.Bold))
+        self.robot_name_label.setFont(QFont("Sans Serif", 13, QFont.Bold))
         device_layout.addWidget(self.robot_name_label, 0, 0)
         self.battery_label = QLabel("—%")
         self.battery_label.setObjectName("batteryBadge")
         self.battery_label.setAlignment(Qt.AlignCenter)
-        self.battery_label.setMinimumSize(64, 40)
-        self.battery_label.setFont(QFont("Sans Serif", 16, QFont.Bold))
+        self.battery_label.setMinimumSize(58, 40)
+        self.battery_label.setFont(QFont("Sans Serif", 14, QFont.Bold))
         device_layout.addWidget(self.battery_label, 0, 1, 2, 1)
         self.connect_button = QPushButton("↻  НАЙТИ И ПОДКЛЮЧИТЬ")
         self.connect_button.setObjectName("connectButton")
         self.connect_button.clicked.connect(self.auto_connect)
-        self.connect_button.setMinimumHeight(36)
+        self.connect_button.setMinimumHeight(34)
         device_layout.addWidget(self.connect_button, 1, 0)
-        controls.addWidget(device)
+        device_layout.setColumnStretch(0, 1)
+        left_column.addWidget(device)
 
         mode_group = QGroupBox("Режим управления")
         mode_group.setObjectName("modeGroup")
@@ -575,10 +587,12 @@ class OperatorPanel(QMainWindow):
             "LOCK — пауза  •  RUN — голова, руки, ноги  •  СТОЙКА — поза"
         )
         mode_hint.setObjectName("modeHint")
-        mode_hint.setWordWrap(False)
-        mode_hint.setMaximumHeight(21)
+        mode_hint.setAlignment(Qt.AlignCenter)
+        mode_hint.setWordWrap(True)
+        mode_hint.setMaximumHeight(32)
         mode_layout.addWidget(mode_hint)
-        controls.addWidget(mode_group)
+        left_column.addWidget(mode_group)
+        left_column.addStretch(1)
 
         # Keep the physical relaxation action visible on the operator's
         # normal screen.  It still uses the reviewed confirmation and cleanup
@@ -606,12 +620,12 @@ class OperatorPanel(QMainWindow):
         safety_hint.setWordWrap(True)
         safety_hint.setMaximumHeight(22)
         safety_layout.addWidget(safety_hint)
-        controls.addWidget(safety_group)
 
         status_group = QGroupBox("Состояние системы")
         status_group.setObjectName("statusGroup")
-        status_grid = QGridLayout(status_group)
-        status_grid.setContentsMargins(6, 4, 6, 4)
+        status_layout = QVBoxLayout(status_group)
+        status_layout.setContentsMargins(6, 4, 6, 4)
+        status_layout.setSpacing(3)
         self.exhibition_robot_status = QLabel()
         self.exhibition_vr_status = QLabel()
         self.exhibition_controllers_status = QLabel()
@@ -627,31 +641,41 @@ class OperatorPanel(QMainWindow):
         for label in status_labels:
             label.setObjectName("simpleStatus")
             label.setMinimumHeight(26)
-        status_grid.setVerticalSpacing(3)
-        status_grid.setHorizontalSpacing(4)
-        status_grid.addWidget(self.exhibition_robot_status, 0, 0)
-        status_grid.addWidget(self.exhibition_vr_status, 0, 1)
-        status_grid.addWidget(self.exhibition_controllers_status, 1, 0)
-        status_grid.addWidget(self.exhibition_video_status, 1, 1)
-        status_grid.addWidget(self.exhibition_mode_status, 2, 0, 1, 2)
+            label.setWordWrap(True)
+            status_layout.addWidget(label)
         self.action_timing_status = QLabel("Последнее действие: —")
         self.action_timing_status.setObjectName("simpleStatus")
         self.action_timing_status.setProperty("statusRole", "timing")
         self.action_timing_status.setMinimumHeight(26)
-        status_grid.addWidget(self.action_timing_status, 3, 0, 1, 2)
-        controls.addWidget(status_group)
+        self.action_timing_status.setWordWrap(True)
+        status_layout.addWidget(self.action_timing_status)
 
-        tools = QGridLayout()
-        tools.setHorizontalSpacing(6)
+        right_column = QVBoxLayout()
+        right_column.setSpacing(4)
+        right_column.addWidget(safety_group)
+        right_column.addWidget(status_group)
+        right_column.addStretch(1)
+
+        dashboard.addLayout(left_column, 0, 0)
+        dashboard.addWidget(video_group, 0, 1)
+        dashboard.addLayout(right_column, 0, 2)
+        dashboard.setColumnStretch(0, 2)
+        dashboard.setColumnStretch(1, 5)
+        dashboard.setColumnStretch(2, 2)
+        dashboard.setRowStretch(0, 1)
+        layout.addLayout(dashboard, 1)
+
+        tools = QHBoxLayout()
+        tools.setSpacing(6)
         reconnect = self._action_button("exhibition_reconnect", "↻  Переподключить всё")
         reconnect.setObjectName("reconnectButton")
         reconnect.setMinimumHeight(36)
-        tools.addWidget(reconnect, 0, 0)
+        tools.addWidget(reconnect, 1)
         open_viewer = QPushButton("Открыть Robot POV")
         open_viewer.setMinimumHeight(36)
         open_viewer.clicked.connect(self.open_viewer)
-        tools.addWidget(open_viewer, 0, 1)
-        controls.addLayout(tools)
+        tools.addWidget(open_viewer, 1)
+        layout.addLayout(tools)
 
         self.exhibition_voice_status = QLabel("● Голос: проверяется")
         self.exhibition_voice_status.setObjectName("simpleStatus")
@@ -661,9 +685,6 @@ class OperatorPanel(QMainWindow):
         self.exhibition_voice_status.setToolTip(
             "Статус офлайн-ассистента Добрыня отображается в разделе «Голос»."
         )
-        controls.addStretch(1)
-        content.addLayout(controls, 2)
-        layout.addLayout(content, 1)
 
         self.controller_action_hint = QLabel(
             "B справа — аварийная остановка  •  X слева — нейтраль рук  •  "
@@ -680,7 +701,6 @@ class OperatorPanel(QMainWindow):
         self.controller_action_hint.setVisible(False)
         self.exhibition_tab_hint = self.controller_action_hint.text()
         tab.setToolTip(self.exhibition_tab_hint)
-        layout.addStretch(1)
         self.exhibition_tab = tab
         self.tabs.addTab(tab, "Главный экран")
         self._refresh_exhibition_status()
@@ -1397,6 +1417,43 @@ class OperatorPanel(QMainWindow):
         if self.isFullScreen():
             self.toggle_fullscreen()
 
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt virtual method
+        """Keep the header readable while the dashboard changes width."""
+        super().resizeEvent(event)
+        self._refresh_header_controls()
+
+    def _refresh_header_controls(self) -> None:
+        """Use icon-sized header actions when a shorter window is narrow."""
+        if not {
+            "service_toggle",
+            "help_button",
+            "settings_button",
+        }.issubset(self.__dict__):
+            return
+        compact = self.width() < 1450
+        service_visible = bool(
+            "tabs" in self.__dict__ and self.tabs.currentIndex() == 1
+        )
+        if compact:
+            self.service_toggle.setText("←" if service_visible else "⚙")
+            self.help_button.setText("?")
+            self.settings_button.setText("⚙")
+        else:
+            self.service_toggle.setText(
+                "←  Главный экран"
+                if service_visible
+                else "⚙  Расширенные настройки"
+            )
+            self.help_button.setText("?  Как запустить")
+            self.settings_button.setText("Настройки соединения")
+        self.service_toggle.setToolTip(
+            "Вернуться на главный экран"
+            if service_visible
+            else "Открыть расширенные настройки и сервис"
+        )
+        self.help_button.setToolTip("Как запустить Unitree R1")
+        self.settings_button.setToolTip("Настройки Ethernet, USB и Robot POV")
+
     def _update_fullscreen_button(self) -> None:
         if "fullscreen_button" not in self.__dict__:
             return
@@ -1415,9 +1472,7 @@ class OperatorPanel(QMainWindow):
         """Keep the normal operator on one screen; expose service tools on demand."""
         service_visible = self.tabs.currentIndex() == 1
         self.tabs.setCurrentIndex(0 if service_visible else 1)
-        self.service_toggle.setText(
-            "⚙  Расширенные настройки" if service_visible else "←  Главный экран"
-        )
+        self._refresh_header_controls()
 
     def show_quick_start(self) -> None:
         QMessageBox.information(
@@ -1644,7 +1699,8 @@ class OperatorPanel(QMainWindow):
         else:
             color = "#5b6269"
         self.status_label.setStyleSheet(
-            f"padding: 8px; border-radius: 4px; background: {color};"
+            f"padding: 8px; border-radius: 4px; background: {color}; "
+            "color: #eef4f8;"
         )
         self.active_label.setText(
             f"Активных процессов: {len(self.controller.active_keys())}"
@@ -3225,6 +3281,8 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
         #fullscreenButton:hover { background: #2b4250; }
         #statusLabel { padding: 9px 12px; background: #202c35;
                        border: 1px solid #354853; border-radius: 9px; }
+        #activeLabel { color: #a9bcc8; padding: 4px 6px; }
+        #exhibitionTitle { color: #dce7ff; letter-spacing: 1px; }
         #hint { color: #b8c2ca; padding: 4px 6px; }
         #warning { color: #ffd166; padding: 8px; }
         #cardText { color: #d7e4ee; padding: 10px; }
@@ -3233,6 +3291,8 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
                                padding: 6px 10px; font-size: 12pt; font-weight: bold; }
         #videoCanvas { background: #090c10; border: 1px solid #3d4b58;
                        border-radius: 8px; color: #91a0ad; }
+        #videoGroup::title { subcontrol-origin: margin;
+                             subcontrol-position: top center; padding: 0 10px; }
         #videoStatus { background: #161d24; color: #a9d6ff;
                        border-radius: 5px; padding: 7px; }
         #batteryBadge { background: #344b9b; color: white;

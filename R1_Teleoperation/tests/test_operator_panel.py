@@ -377,6 +377,30 @@ def test_fullscreen_toggle_does_not_change_operator_mode():
     app.processEvents()
 
 
+def test_exhibition_home_reflows_video_and_header_for_window_width():
+    app = app_module.build_app(OperatorConfig(status_poll_sec=60))
+    panel = OperatorPanel(OperatorConfig(status_poll_sec=60))
+    panel.status_timer.stop()
+    panel.show()
+
+    panel.resize(1280, 800)
+    app.processEvents()
+    compact_video_width = panel.video_preview.width()
+    assert panel.width() == 1280
+    assert panel.help_button.text() == "?"
+    assert panel.settings_button.text() == "⚙"
+    assert compact_video_width >= 320
+
+    panel.resize(1600, 900)
+    app.processEvents()
+    assert "Как запустить" in panel.help_button.text()
+    assert "Настройки" in panel.settings_button.text()
+    assert panel.video_preview.width() > compact_video_width
+
+    panel.close()
+    app.processEvents()
+
+
 def test_main_reconnect_without_owner_never_changes_robot_mode(monkeypatch):
     calls = []
 
