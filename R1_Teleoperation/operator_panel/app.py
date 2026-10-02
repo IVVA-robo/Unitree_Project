@@ -583,7 +583,6 @@ class OperatorPanel(QMainWindow):
         mode_hint.setMaximumHeight(32)
         mode_layout.addWidget(mode_hint)
         left_column.addWidget(mode_group)
-        left_column.addStretch(1)
 
         # Keep the physical relaxation action visible on the operator's
         # normal screen.  It still uses the reviewed confirmation and cleanup
@@ -607,6 +606,8 @@ class OperatorPanel(QMainWindow):
         safety_hint.setWordWrap(True)
         safety_hint.setMaximumHeight(22)
         safety_layout.addWidget(safety_hint)
+        left_column.addWidget(safety_group)
+        left_column.addStretch(1)
 
         status_group = QGroupBox("Состояние системы")
         status_group.setObjectName("statusGroup")
@@ -639,7 +640,6 @@ class OperatorPanel(QMainWindow):
 
         right_column = QVBoxLayout()
         right_column.setSpacing(4)
-        right_column.addWidget(safety_group)
         right_column.addWidget(status_group)
         right_column.addStretch(1)
 
