@@ -109,7 +109,7 @@ participant, а после подтверждения STOP независимы�
 [R1_Teleoperation/docs/exhibition_panel_optimization_20261001.md](R1_Teleoperation/docs/exhibition_panel_optimization_20261001.md).
 
 Резервная копия непосредственно перед этим этапом сохранена вне рабочего
-дерева в `/home/unitree/r1-static-offline-reuse-before-20261001-kNzucI/`:
+дерева в `/home/unitree/R1_Backups/legacy-2026-10-02/r1-static-offline-reuse-before-20261001-kNzucI/`:
 
 - `source-before-offline-reuse.tar.gz` — SHA256
   `3112af2324ec024cf45d02f32cfcb1b12b98ec57097cc5ddc2ca0c5417c47055`;
@@ -121,34 +121,34 @@ PC2 этим обновлением не охвачен: включить его
 Дополнительные резервные копии перед process-local POV recovery находятся вне
 рабочего дерева:
 
-- `/home/unitree/r1-pov-respawn-before-20261001-DLXXci/`;
-- `/home/unitree/r1-pov-manager-grace-before-20261001-2YpNUj/`.
+- `/home/unitree/R1_Backups/legacy-2026-10-02/r1-pov-respawn-before-20261001-DLXXci/`;
+- `/home/unitree/R1_Backups/legacy-2026-10-02/r1-pov-manager-grace-before-20261001-2YpNUj/`.
 
 Бэкап перед исправлением cold warmup также находится вне рабочего дерева:
-`/home/unitree/r1-cold-warmup-before-20261001-1tQ6Yu/`; SHA256
+`/home/unitree/R1_Backups/legacy-2026-10-02/r1-cold-warmup-before-20261001-1tQ6Yu/`; SHA256
 `history.bundle` —
 `68d1f078716e4c5a88195c4e48642a6a177b1dbca7d78b772c857c3831b37b5b`.
 
 Бэкап перед overlap-refresh:
-`/home/unitree/r1-sdk-refresh-race-before-20261001-dmD5Ek/`.
+`/home/unitree/R1_Backups/legacy-2026-10-02/r1-sdk-refresh-race-before-20261001-dmD5Ek/`.
 
 Бэкап перед исправлением боковой оси:
-`/home/unitree/r1-lateral-axis-before-20261001-UAArIG/`.
+`/home/unitree/R1_Backups/legacy-2026-10-02/r1-lateral-axis-before-20261001-UAArIG/`.
 
 Финальный dirty-tree patch перед документацией и публикацией:
-`/home/unitree/r1-panel-finalization-before-20261001-km4LVl/working-tree.patch`,
+`/home/unitree/R1_Backups/legacy-2026-10-02/r1-panel-finalization-before-20261001-km4LVl/working-tree.patch`,
 SHA256 `cabaad5617511dccf5e862372e9d2dcba80ad4927c559ee64b79d180fd932ac6`.
 
 Бэкап перед cold-warmup handoff 02.10:
-`/home/unitree/r1-cold-boot-handoff-before-20261002-W5jj6P/working-tree.patch`,
+`/home/unitree/R1_Backups/legacy-2026-10-02/r1-cold-boot-handoff-before-20261002-W5jj6P/working-tree.patch`,
 SHA256 `d277c1ab99923493f3b70d77fbd16d864e9cadfd1ed3ac6bcc40b0aadbaec60e`.
 
 Бэкап перед оптимизацией RUN → СТОЙКА 02.10:
-`/home/unitree/r1-run-stand-handoff-before-20261002-uFSK9l/dirty-before.patch`,
+`/home/unitree/R1_Backups/legacy-2026-10-02/r1-run-stand-handoff-before-20261002-uFSK9l/dirty-before.patch`,
 SHA256 `ed87040f7c9b6c6f080860abc93e303a5d2e2847f3eb3689ff99519290ca494d`.
 
 Бэкап перед исправлением фрагментированного warmup/ранней причины RUN 02.10:
-`/home/unitree/r1-panel-run-failure-before-20261002-mV5Ek5/dirty-before.patch`,
+`/home/unitree/R1_Backups/legacy-2026-10-02/r1-panel-run-failure-before-20261002-mV5Ek5/dirty-before.patch`,
 SHA256 `e4c6059f1ba8f6d7f59b7b1ed4ea76557fb71b0bb75a4a84402c079cdc71afd3`.
 
 Последняя попытка RUN завершилась безопасной ошибкой за `28,12 s`; нового
@@ -188,12 +188,12 @@ writer. Целевые USB/handoff тесты: `50 passed`; финальный l
 RUN — `31,91 s`, LOCK — `1,49 s`; видео после LOCK сохранилось.
 
 Бэкап перед USB-video handoff:
-`/home/unitree/r1-usb-video-handoff-before-20261002-KfB3s7/`;
+`/home/unitree/R1_Backups/legacy-2026-10-02/r1-usb-video-handoff-before-20261002-KfB3s7/`;
 SHA256 `dirty-before.patch` —
 `c5e1264546c3132c079bdfdbf3ccfc153b09c0e76701a71fab88d82ce80384c7`.
 
 Бэкап перед финальной фиксацией автономной проверки:
-`/home/unitree/r1-usb-offline-final-before-20261002-16UYp8/`.
+`/home/unitree/R1_Backups/legacy-2026-10-02/r1-usb-offline-final-before-20261002-16UYp8/`.
 
 ## Охват
 
@@ -241,7 +241,7 @@ Unity и ROS, незавершённые скачивания, полная ча
 могли быть tracked до этого переноса: .gitignore не переписывает историю Git.
 
 Резервная копия перед переносом находится **вне Git**:
-`/home/unitree/unitree-github-backup-20260930-qDVVE9/`.
+`/home/unitree/R1_Backups/legacy-2026-10-02/unitree-github-backup-20260930-qDVVE9/`.
 
 - history.bundle — предшествующая Git-история;
   SHA256 d8a036a78219e1516b1c8fa599e3660a9c598ac3acd117a2cdb3ee8dd0bfbc8d.

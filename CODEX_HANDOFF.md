@@ -116,7 +116,7 @@ Pico USB-C ↔ ноутбук Ethernet ↔ R1. Сохранить нынешню
     KILL и FSM сохранены. ROS mock нового observer: `2,80 s`; физический cold RUN
     ещё не выполнен. Root suite: `377 passed, 5 skipped`; ROS package functional:
     `427 passed, 1 skipped`. Отдельный бэкап:
-    `/home/unitree/r1-control-prepare-before-20261001-rugasB/`.
+    `/home/unitree/R1_Backups/legacy-2026-10-02/r1-control-prepare-before-20261001-rugasB/`.
 13. Физический повтор СТОЙКИ начался в 16:20:54 и подтвердил FSM 4 в 16:21:40.
     `logs/exhibition/static-20261001-162054.log`: полный переход `46,696 s`,
     preflight `3,657 s`, `ready_static=35,130 s`, prepare `7,502 s`; сам StandUp
@@ -127,7 +127,7 @@ Pico USB-C ↔ ноутбук Ethernet ↔ R1. Сохранить нынешню
     preflight всё равно инвалидируют кэш. Целевые тесты: `78 passed`; расширенный
     PID+loopback прогон: `355 passed, 5 skipped`, четыре namespace-зависимых
     signal/QProcess cleanup отказа не относятся к изменённому пути. Бэкап:
-    `/home/unitree/r1-sdk-refresh-race-before-20261001-dmD5Ek/`.
+    `/home/unitree/R1_Backups/legacy-2026-10-02/r1-sdk-refresh-race-before-20261001-dmD5Ek/`.
 14. После нового разрешения оператора static-сеанс штатно остановлен за
     `2,303 s`: `safe_stop_confirmed=true`, manager/writer исчезли. Панель
     запустила один исправленный read-only warmup. В 16:39:57, пока новый
@@ -157,7 +157,7 @@ Pico USB-C ↔ ноутбук Ethernet ↔ R1. Сохранить нынешню
     изменялись. Целевые тесты дали `53 passed`, C++ safety — `68 passed`,
     изолированный пакетный прогон writer+bridge — `265 passed`. Оператор
     подтвердил правильное движение в обе стороны. Бэкап:
-    `/home/unitree/r1-lateral-axis-before-20261001-UAArIG/`.
+    `/home/unitree/R1_Backups/legacy-2026-10-02/r1-lateral-axis-before-20261001-UAArIG/`.
 18. После аппаратной проверки 01.10 выполнены LOCK и разрешённый STOP. На том
     этапе состояние было `status=stopped`, `safe_stop_confirmed=true`,
     manager/writer отсутствовали; video-only offline-служба была восстановлена.
@@ -174,7 +174,7 @@ Pico USB-C ↔ ноутбук Ethernet ↔ R1. Сохранить нынешню
     manager; через 45 секунд используется прежний authoritative fallback.
     Целевые software-only тесты: `105 passed`. Изменение ещё не загружалось в
     работавшую физическую панель и требует отдельного будущего cold замера.
-    Бэкап: `/home/unitree/r1-cold-boot-handoff-before-20261002-W5jj6P/`.
+    Бэкап: `/home/unitree/R1_Backups/legacy-2026-10-02/r1-cold-boot-handoff-before-20261002-W5jj6P/`.
 21. По замеру RUN → СТОЙКА `24,15 s` оптимизирован подтверждённый cleanup:
     DISARM, central emergency STOP и writer STOP используют один локальный ROS
     participant, а POV/control process groups завершаются параллельно только
@@ -183,7 +183,7 @@ Pico USB-C ↔ ноутбук Ethernet ↔ R1. Сохранить нынешню
     gate, `148 passed, 1 skipped` для расширенного набора и `385 passed,
     5 skipped` для полного loopback-only regression. Физического замера новой
     версии ещё нет. Бэкап:
-    `/home/unitree/r1-run-stand-handoff-before-20261002-uFSK9l/`.
+    `/home/unitree/R1_Backups/legacy-2026-10-02/r1-run-stand-handoff-before-20261002-uFSK9l/`.
 
 Не считать эту хронологию стенограммой или независимым аудитом каждого события.
 Для чисел и программных изменений сверять отчёты и код.
@@ -270,13 +270,13 @@ Cold-start и физические повторы СТОЙКИ выполнен�
 `11,652 s`. ZERO TORQUE на опоре и принудительный отказ только POV проверены.
 
 Бэкап непосредственно перед cold-warmup изменением находится вне рабочего
-дерева: `/home/unitree/r1-cold-warmup-before-20261001-1tQ6Yu/`; SHA256
+дерева: `/home/unitree/R1_Backups/legacy-2026-10-02/r1-cold-warmup-before-20261001-1tQ6Yu/`; SHA256
 `history.bundle`:
 `68d1f078716e4c5a88195c4e48642a6a177b1dbca7d78b772c857c3831b37b5b`.
 Бэкап перед overlap-refresh:
-`/home/unitree/r1-sdk-refresh-race-before-20261001-dmD5Ek/`.
+`/home/unitree/R1_Backups/legacy-2026-10-02/r1-sdk-refresh-race-before-20261001-dmD5Ek/`.
 Бэкап перед исправлением боковой оси:
-`/home/unitree/r1-lateral-axis-before-20261001-UAArIG/`.
+`/home/unitree/R1_Backups/legacy-2026-10-02/r1-lateral-axis-before-20261001-UAArIG/`.
 Последняя наблюдавшаяся физическая команда 02.10 — переход RUN → СТОЙКА;
 `logs/exhibition/static-20261002-092531.log` записал ready/static в 09:25:44.
 На момент чтения state работали static manager/writer и переиспользованный
@@ -317,7 +317,7 @@ root regression `387 passed, 5 skipped in 51.56s`; lint/compile/diff-check
 read-only warmup создал attestation в 10:16:07. Следующий RUN не запускался.
 
 Бэкап перед этим исправлением:
-`/home/unitree/r1-panel-run-failure-before-20261002-mV5Ek5/dirty-before.patch`,
+`/home/unitree/R1_Backups/legacy-2026-10-02/r1-panel-run-failure-before-20261002-mV5Ek5/dirty-before.patch`,
 SHA256 `e4c6059f1ba8f6d7f59b7b1ed4ea76557fb71b0bb75a4a84402c079cdc71afd3`.
 
 ## Последний этап 02.10: USB-видео между RUN и СТОЙКОЙ
@@ -373,13 +373,13 @@ FSM 4/811 и отсутствие дубликатов. Последнее на�
 являются гарантией времени холодного старта после каждой перезагрузки.
 
 Бэкап перед изменением:
-`/home/unitree/r1-usb-video-handoff-before-20261002-KfB3s7/`.
+`/home/unitree/R1_Backups/legacy-2026-10-02/r1-usb-video-handoff-before-20261002-KfB3s7/`.
 SHA256 `dirty-before.patch`:
 `c5e1264546c3132c079bdfdbf3ccfc153b09c0e76701a71fab88d82ce80384c7`.
 
 Бэкап непосредственно перед финальной документацией и подтверждением
 Wi-Fi-off находится вне рабочего дерева:
-`/home/unitree/r1-usb-offline-final-before-20261002-16UYp8/`.
+`/home/unitree/R1_Backups/legacy-2026-10-02/r1-usb-offline-final-before-20261002-16UYp8/`.
 
 ## Что намеренно не передано в публичный репозиторий
 

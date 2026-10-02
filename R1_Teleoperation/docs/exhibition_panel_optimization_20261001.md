@@ -18,48 +18,48 @@ USB-схема VR не менялись.
 Бэкап до изменений находится вне рабочего дерева:
 
 ```text
-/home/unitree/r1-panel-optimization-20261001-100023/active-code-config-before.tar.gz
+/home/unitree/R1_Backups/legacy-2026-10-02/r1-panel-optimization-20261001-100023/active-code-config-before.tar.gz
 SHA256 00c55bf517d7a8c6a407050b6721d3d69025426602a4ede8925417d87c63704f
 
-/home/unitree/r1-panel-controller-status-before-20261001-111200/source-before.tar.gz
+/home/unitree/R1_Backups/legacy-2026-10-02/r1-panel-controller-status-before-20261001-111200/source-before.tar.gz
 SHA256 5867b5174ecdc3babddc89065965fc0b1e349b20223bf3e1026785f118f1485d
 
-/home/unitree/r1-panel-ethernet-recovery-before-20261001-113000/source-before.tar.gz
+/home/unitree/R1_Backups/legacy-2026-10-02/r1-panel-ethernet-recovery-before-20261001-113000/source-before.tar.gz
 SHA256 df62395247d0f68313e4cd6bda7532c2a3df98e4fb64611f0953884b75ab2613
 
-/home/unitree/r1-static-fastpath-before-20261001-DDTWTE/source-before.tar.gz
+/home/unitree/R1_Backups/legacy-2026-10-02/r1-static-fastpath-before-20261001-DDTWTE/source-before.tar.gz
 SHA256 ea52f28e2637b2e0a75a8fc55fe5fbcb51f03e8068643dc150aebc6c7d87acb1
 
-/home/unitree/r1-static-prepare-client-before-20261001-YctgpI/source-before-client.tar.gz
+/home/unitree/R1_Backups/legacy-2026-10-02/r1-static-prepare-client-before-20261001-YctgpI/source-before-client.tar.gz
 SHA256 b0297d18d52f3d4b6ca8c76e4c561e55585cfa5da47395bbee51d2482b78e5ff
 
-/home/unitree/r1-static-offline-reuse-before-20261001-kNzucI/source-before-offline-reuse.tar.gz
+/home/unitree/R1_Backups/legacy-2026-10-02/r1-static-offline-reuse-before-20261001-kNzucI/source-before-offline-reuse.tar.gz
 SHA256 3112af2324ec024cf45d02f32cfcb1b12b98ec57097cc5ddc2ca0c5417c47055
 
-/home/unitree/r1-pov-respawn-before-20261001-DLXXci/source-before-pov-respawn.tar.gz
+/home/unitree/R1_Backups/legacy-2026-10-02/r1-pov-respawn-before-20261001-DLXXci/source-before-pov-respawn.tar.gz
 SHA256 9ef0f6efe35f98e6050fe9aef564705123d4f38639ff3a82562a0145a41b8ffe
 
-/home/unitree/r1-pov-manager-grace-before-20261001-2YpNUj/source-before-manager-grace.tar.gz
+/home/unitree/R1_Backups/legacy-2026-10-02/r1-pov-manager-grace-before-20261001-2YpNUj/source-before-manager-grace.tar.gz
 SHA256 87dc88f19f7c03848745faf25cea4f9b83546ffec047c19387a0e3d158b8bc80
 
-/home/unitree/r1-cold-warmup-before-20261001-1tQ6Yu/
+/home/unitree/R1_Backups/legacy-2026-10-02/r1-cold-warmup-before-20261001-1tQ6Yu/
 history.bundle SHA256 68d1f078716e4c5a88195c4e48642a6a177b1dbca7d78b772c857c3831b37b5b
 
-/home/unitree/r1-control-prepare-before-20261001-rugasB/
+/home/unitree/R1_Backups/legacy-2026-10-02/r1-control-prepare-before-20261001-rugasB/
 history.bundle SHA256 97101c2cdea68d56d041abc909c9e282f459a9c6ec7a8d8e317bc6575832d0af
 working-tree.patch SHA256 318dbf853d5f65520cd0cda16cca39cfb04905a2fef5721e6d6bd94ae2c7d757
 
-/home/unitree/r1-sdk-refresh-race-before-20261001-dmD5Ek/
+/home/unitree/R1_Backups/legacy-2026-10-02/r1-sdk-refresh-race-before-20261001-dmD5Ek/
 scripts/r1-sdk-warmup SHA256 87d1d012e5634dbba81a3882c40875d936109c8fafb30e11358449226365a7bf
 tests/test_sdk_preflight_attestation.py SHA256 4a16ceb085b5d60914feb2d07d1c4eee43082c33eee8d51ed0a2a3f6bebb21f2
 tests/test_sdk_warmup_handoff.py SHA256 f8aabd5a6faddede678e63445466bbc6e6c5c027c5e0c7028d696d2f0fd31f97
 
-/home/unitree/r1-lateral-axis-before-20261001-UAArIG/
+/home/unitree/R1_Backups/legacy-2026-10-02/r1-lateral-axis-before-20261001-UAArIG/
 
-/home/unitree/r1-panel-finalization-before-20261001-km4LVl/
+/home/unitree/R1_Backups/legacy-2026-10-02/r1-panel-finalization-before-20261001-km4LVl/
 working-tree.patch SHA256 cabaad5617511dccf5e862372e9d2dcba80ad4927c559ee64b79d180fd932ac6
 
-/home/unitree/r1-cold-boot-handoff-before-20261002-W5jj6P/
+/home/unitree/R1_Backups/legacy-2026-10-02/r1-cold-boot-handoff-before-20261002-W5jj6P/
 working-tree.patch SHA256 d277c1ab99923493f3b70d77fbd16d864e9cadfd1ed3ac6bcc40b0aadbaec60e
 ```
 
