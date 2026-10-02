@@ -189,6 +189,29 @@ def test_settings_dialog_exposes_bounded_exhibition_tuning():
     app.processEvents()
 
 
+def test_settings_dialog_scrolls_content_and_keeps_actions_visible():
+    app = app_module.build_app(OperatorConfig())
+    dialog = SettingsDialog(OperatorConfig())
+    dialog.resize(580, 600)
+    dialog.show()
+    app.processEvents()
+
+    assert dialog.settings_scroll.verticalScrollBar().maximum() > 0
+    assert dialog.settings_scroll.horizontalScrollBar().maximum() == 0
+    assert dialog.settings_buttons.isVisible()
+    assert (
+        dialog.settings_buttons.button(app_module.QDialogButtonBox.Save).text()
+        == "Сохранить"
+    )
+    assert (
+        dialog.settings_buttons.geometry().top()
+        > dialog.settings_scroll.geometry().bottom()
+    )
+
+    dialog.close()
+    app.processEvents()
+
+
 def test_live_actions_are_marked_and_reset_kill_uses_reviewed_rearm():
     specs = {spec.key: spec for spec in command_catalog()}
     assert specs["arms_live"].live

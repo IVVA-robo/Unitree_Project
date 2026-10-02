@@ -34,6 +34,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QShortcut,
     QSpinBox,
     QTabWidget,
@@ -211,10 +212,50 @@ class BatteryRing(QWidget):
 class SettingsDialog(QDialog):
     def __init__(self, config: OperatorConfig, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self.setObjectName("settingsDialog")
         self.setWindowTitle("Настройки панели")
         self.setModal(True)
+        self.setMinimumSize(540, 480)
+        self.resize(580, 720)
         self.config = config
-        form = QFormLayout(self)
+
+        dialog_layout = QVBoxLayout(self)
+        dialog_layout.setContentsMargins(12, 12, 12, 12)
+        dialog_layout.setSpacing(10)
+
+        self.settings_scroll = QScrollArea(self)
+        self.settings_scroll.setObjectName("settingsScroll")
+        self.settings_scroll.setWidgetResizable(True)
+        self.settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.settings_scroll.viewport().setObjectName("settingsViewport")
+        settings_bar = self.settings_scroll.verticalScrollBar()
+        settings_bar.setObjectName("settingsVerticalScroll")
+        settings_bar.setStyleSheet(
+            """
+            QScrollBar:vertical {
+                background: #1c1c1e;
+                border: none;
+                width: 10px;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #636366;
+                border-radius: 5px;
+                min-height: 32px;
+            }
+            QScrollBar::handle:vertical:hover { background: #8e8e93; }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical { height: 0; width: 0; }
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical { background: transparent; }
+            """
+        )
+        self.settings_content = QWidget()
+        self.settings_content.setObjectName("settingsContent")
+        form = QFormLayout(self.settings_content)
+        form.setContentsMargins(8, 4, 10, 8)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
         self.project_dir = QLineEdit(config.project_dir)
         self.robot_name = QLineEdit(config.robot_name)
         self.robot_ip = QLineEdit(config.robot_ip)
@@ -338,10 +379,16 @@ class SettingsDialog(QDialog):
         )
         note.setWordWrap(True)
         form.addRow(note)
+        self.settings_scroll.setWidget(self.settings_content)
+        dialog_layout.addWidget(self.settings_scroll, 1)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Save).setText("Сохранить")
+        buttons.button(QDialogButtonBox.Cancel).setText("Отмена")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        form.addRow(buttons)
+        self.settings_buttons = buttons
+        dialog_layout.addWidget(buttons)
 
     def values(self) -> OperatorConfig:
         return OperatorConfig(
@@ -3312,6 +3359,13 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
         QWidget { font-family: "Inter", "SF Pro Display", "Noto Sans", sans-serif;
                   font-size: 10pt; }
         QMainWindow, #rootPanel { background: #0f1115; color: #f5f5f7; }
+        QDialog#settingsDialog { background: #1c1c1e; color: #f5f5f7; }
+        #settingsDialog QLabel, #settingsDialog QCheckBox {
+            background: transparent; color: #f5f5f7;
+        }
+        #settingsScroll, #settingsViewport, #settingsContent {
+            background: #1c1c1e; border: none;
+        }
         #headerCard { background: #1c1c1e; border: 1px solid #343438;
                       border-radius: 14px; }
         QGroupBox { background: #1c1c1e; border: 1px solid #343438;
