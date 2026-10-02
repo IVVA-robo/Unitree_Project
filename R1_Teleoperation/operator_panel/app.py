@@ -413,8 +413,11 @@ class OperatorPanel(QMainWindow):
         root.setObjectName("rootPanel")
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(12, 12, 12, 8)
-        layout.setSpacing(10)
+        # Keep the operator dashboard usable on a second monitor with a
+        # shorter work area.  The native window controls remain available;
+        # this only removes decorative empty space around the content.
+        layout.setContentsMargins(8, 8, 8, 6)
+        layout.setSpacing(6)
 
         header = QHBoxLayout()
         header.setSpacing(8)
@@ -481,8 +484,8 @@ class OperatorPanel(QMainWindow):
     def _add_exhibition_tab(self) -> None:
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(6)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(4)
 
         title = QLabel("Выставочный запуск")
         title.setObjectName("exhibitionTitle")
@@ -509,7 +512,7 @@ class OperatorPanel(QMainWindow):
         layout.addWidget(self.operator_instruction)
 
         content = QHBoxLayout()
-        content.setSpacing(8)
+        content.setSpacing(6)
         video_group = QGroupBox("Видео глазами робота")
         video_group.setObjectName("videoGroup")
         video_layout = QVBoxLayout(video_group)
@@ -521,7 +524,7 @@ class OperatorPanel(QMainWindow):
         content.addWidget(video_group, 3)
 
         controls = QVBoxLayout()
-        controls.setSpacing(6)
+        controls.setSpacing(4)
         device = QGroupBox("Подключение")
         device.setObjectName("deviceGroup")
         device_layout = QGridLayout(device)
@@ -545,8 +548,8 @@ class OperatorPanel(QMainWindow):
         mode_group = QGroupBox("Режим управления")
         mode_group.setObjectName("modeGroup")
         mode_layout = QVBoxLayout(mode_group)
-        mode_layout.setContentsMargins(8, 6, 8, 6)
-        mode_layout.setSpacing(4)
+        mode_layout.setContentsMargins(6, 4, 6, 4)
+        mode_layout.setSpacing(3)
         self.static_mode_button = self._action_button(
             "exhibition_static", "LOCK / СТАТИЧНЫЙ РЕЖИМ\nВидео и устойчивое положение"
         )
@@ -569,12 +572,11 @@ class OperatorPanel(QMainWindow):
         self.stand_mode_button.setFont(QFont("Sans Serif", 11, QFont.Bold))
         mode_layout.addWidget(self.stand_mode_button)
         mode_hint = QLabel(
-            "LOCK — пауза с удержанием позы  •  RUN — голова, руки и ноги  •  "
-            "СТОЙКА — штатная поза"
+            "LOCK — пауза  •  RUN — голова, руки, ноги  •  СТОЙКА — поза"
         )
         mode_hint.setObjectName("modeHint")
-        mode_hint.setWordWrap(True)
-        mode_hint.setMaximumHeight(24)
+        mode_hint.setWordWrap(False)
+        mode_hint.setMaximumHeight(21)
         mode_layout.addWidget(mode_hint)
         controls.addWidget(mode_group)
 
@@ -596,8 +598,8 @@ class OperatorPanel(QMainWindow):
         safety_group = QGroupBox("Безопасное завершение")
         safety_group.setObjectName("safetyGroup")
         safety_layout = QVBoxLayout(safety_group)
-        safety_layout.setContentsMargins(8, 6, 8, 6)
-        safety_layout.setSpacing(3)
+        safety_layout.setContentsMargins(6, 4, 6, 4)
+        safety_layout.setSpacing(2)
         safety_layout.addWidget(self.zero_torque_button)
         safety_hint = QLabel("Только на опоре или после СТОЙКИ.")
         safety_hint.setObjectName("safetyHint")
@@ -609,6 +611,7 @@ class OperatorPanel(QMainWindow):
         status_group = QGroupBox("Состояние системы")
         status_group.setObjectName("statusGroup")
         status_grid = QGridLayout(status_group)
+        status_grid.setContentsMargins(6, 4, 6, 4)
         self.exhibition_robot_status = QLabel()
         self.exhibition_vr_status = QLabel()
         self.exhibition_controllers_status = QLabel()
@@ -624,8 +627,8 @@ class OperatorPanel(QMainWindow):
         for label in status_labels:
             label.setObjectName("simpleStatus")
             label.setMinimumHeight(26)
-        status_grid.setVerticalSpacing(4)
-        status_grid.setHorizontalSpacing(6)
+        status_grid.setVerticalSpacing(3)
+        status_grid.setHorizontalSpacing(4)
         status_grid.addWidget(self.exhibition_robot_status, 0, 0)
         status_grid.addWidget(self.exhibition_vr_status, 0, 1)
         status_grid.addWidget(self.exhibition_controllers_status, 1, 0)
@@ -652,8 +655,12 @@ class OperatorPanel(QMainWindow):
 
         self.exhibition_voice_status = QLabel("● Голос: проверяется")
         self.exhibition_voice_status.setObjectName("simpleStatus")
-        self.exhibition_voice_status.setMinimumHeight(26)
-        controls.addWidget(self.exhibition_voice_status)
+        self.exhibition_voice_status.setMinimumHeight(24)
+        self.exhibition_voice_status.setParent(tab)
+        self.exhibition_voice_status.setVisible(False)
+        self.exhibition_voice_status.setToolTip(
+            "Статус офлайн-ассистента Добрыня отображается в разделе «Голос»."
+        )
         controls.addStretch(1)
         content.addLayout(controls, 2)
         layout.addLayout(content, 1)
@@ -666,7 +673,13 @@ class OperatorPanel(QMainWindow):
         self.controller_action_hint.setObjectName("hint")
         self.controller_action_hint.setWordWrap(True)
         self.controller_action_hint.setMaximumHeight(36)
-        layout.addWidget(self.controller_action_hint)
+        # This information is useful, but a permanent footer is the first
+        # thing that gets clipped on a shorter external display.  Keep it in
+        # the widget tree for status/tests and expose it as a tooltip instead.
+        self.controller_action_hint.setParent(tab)
+        self.controller_action_hint.setVisible(False)
+        self.exhibition_tab_hint = self.controller_action_hint.text()
+        tab.setToolTip(self.exhibition_tab_hint)
         layout.addStretch(1)
         self.exhibition_tab = tab
         self.tabs.addTab(tab, "Главный экран")
@@ -1060,7 +1073,7 @@ class OperatorPanel(QMainWindow):
         background, foreground = colors[state]
         label.setText(text)
         label.setStyleSheet(
-            "padding: 9px 12px; border-radius: 5px; "
+            "padding: 4px 8px; border-radius: 5px; "
             f"background: {background}; color: {foreground}; font-weight: bold;"
         )
 
@@ -1099,7 +1112,7 @@ class OperatorPanel(QMainWindow):
                 f"Выполняется: {title} • тайм-аут {timeout:.0f} с"
             )
             self.action_timing_status.setStyleSheet(
-                "padding: 9px 12px; border-radius: 5px; "
+                "padding: 4px 8px; border-radius: 5px; "
                 "background: #5a481f; color: #ffd166; font-weight: bold;"
             )
         if "status_timer" in self.__dict__:
@@ -1136,7 +1149,7 @@ class OperatorPanel(QMainWindow):
                 else ("#5a2931", "#ffb4bd")
             )
             self.action_timing_status.setStyleSheet(
-                "padding: 9px 12px; border-radius: 5px; font-weight: bold; "
+                "padding: 4px 8px; border-radius: 5px; font-weight: bold; "
                 f"background: {colors[0]}; color: {colors[1]};"
             )
         if "log_view" in self.__dict__:
@@ -3171,8 +3184,8 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
                   font-size: 11pt; }
         QMainWindow, #rootPanel { background: #101820; color: #eef4f8; }
         QGroupBox { background: #18232d; border: 1px solid #354858;
-                    border-radius: 12px; margin-top: 14px;
-                    padding: 14px 10px 10px; }
+                    border-radius: 12px; margin-top: 10px;
+                    padding: 8px 8px 6px; }
         QGroupBox::title { subcontrol-origin: margin; left: 12px;
                            padding: 0 7px; color: #9fc8e8;
                            background: #101820; }
@@ -3212,12 +3225,12 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
         #fullscreenButton:hover { background: #2b4250; }
         #statusLabel { padding: 9px 12px; background: #202c35;
                        border: 1px solid #354853; border-radius: 9px; }
-        #hint { color: #b8c2ca; padding: 8px; }
+        #hint { color: #b8c2ca; padding: 4px 6px; }
         #warning { color: #ffd166; padding: 8px; }
         #cardText { color: #d7e4ee; padding: 10px; }
         #operatorInstruction { background: #2b3652; color: #dce7ff;
                                border: 1px solid #536baf; border-radius: 8px;
-                               padding: 12px; font-size: 12pt; font-weight: bold; }
+                               padding: 6px 10px; font-size: 12pt; font-weight: bold; }
         #videoCanvas { background: #090c10; border: 1px solid #3d4b58;
                        border-radius: 8px; color: #91a0ad; }
         #videoStatus { background: #161d24; color: #a9d6ff;
@@ -3254,7 +3267,7 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
                                  padding: 2px 4px; }
         #simpleStatus { background: #202d37; color: #dce8ee;
                         border: 1px solid #3c515d; border-radius: 8px;
-                        padding: 8px 10px; }
+                        padding: 4px 8px; }
         #simpleStatus[statusRole="timing"] { color: #b9d9ea; }
         QPlainTextEdit { background: #11181e; color: #dbe7ef;
                          border: 1px solid #354854; border-radius: 8px; }
