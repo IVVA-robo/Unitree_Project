@@ -25,7 +25,6 @@ from PyQt5.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
-    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -35,8 +34,6 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QScrollArea,
-    QSizePolicy,
     QShortcut,
     QSpinBox,
     QTabWidget,
@@ -484,10 +481,12 @@ class OperatorPanel(QMainWindow):
     def _add_exhibition_tab(self) -> None:
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
 
         title = QLabel("Выставочный запуск")
         title.setObjectName("exhibitionTitle")
-        title.setFont(QFont("Sans Serif", 20, QFont.Bold))
+        title.setFont(QFont("Sans Serif", 16, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
 
@@ -499,6 +498,7 @@ class OperatorPanel(QMainWindow):
         subtitle.setObjectName("hint")
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setWordWrap(True)
+        subtitle.setMaximumHeight(36)
         layout.addWidget(subtitle)
 
         self.operator_instruction = QLabel(
@@ -508,10 +508,11 @@ class OperatorPanel(QMainWindow):
         self.operator_instruction.setObjectName("operatorInstruction")
         self.operator_instruction.setAlignment(Qt.AlignCenter)
         self.operator_instruction.setWordWrap(True)
+        self.operator_instruction.setMaximumHeight(46)
         layout.addWidget(self.operator_instruction)
 
         content = QHBoxLayout()
-        content.setSpacing(12)
+        content.setSpacing(8)
         video_group = QGroupBox("Видео глазами робота")
         video_group.setObjectName("videoGroup")
         video_layout = QVBoxLayout(video_group)
@@ -523,7 +524,7 @@ class OperatorPanel(QMainWindow):
         content.addWidget(video_group, 3)
 
         controls = QVBoxLayout()
-        controls.setSpacing(10)
+        controls.setSpacing(6)
         device = QGroupBox("Подключение")
         device.setObjectName("deviceGroup")
         device_layout = QGridLayout(device)
@@ -534,40 +535,41 @@ class OperatorPanel(QMainWindow):
         self.battery_label = QLabel("—%")
         self.battery_label.setObjectName("batteryBadge")
         self.battery_label.setAlignment(Qt.AlignCenter)
-        self.battery_label.setMinimumSize(88, 64)
-        self.battery_label.setFont(QFont("Sans Serif", 20, QFont.Bold))
+        self.battery_label.setMinimumSize(76, 48)
+        self.battery_label.setFont(QFont("Sans Serif", 16, QFont.Bold))
         device_layout.addWidget(self.battery_label, 0, 1, 2, 1)
         self.connect_button = QPushButton("↻  НАЙТИ И ПОДКЛЮЧИТЬ")
         self.connect_button.setObjectName("connectButton")
         self.connect_button.clicked.connect(self.auto_connect)
-        self.connect_button.setMinimumHeight(52)
+        self.connect_button.setMinimumHeight(44)
         device_layout.addWidget(self.connect_button, 1, 0)
         controls.addWidget(device)
 
         mode_group = QGroupBox("Режим управления")
         mode_group.setObjectName("modeGroup")
         mode_layout = QVBoxLayout(mode_group)
-        mode_layout.setSpacing(8)
+        mode_layout.setContentsMargins(8, 6, 8, 6)
+        mode_layout.setSpacing(4)
         self.static_mode_button = self._action_button(
             "exhibition_static", "LOCK / СТАТИЧНЫЙ РЕЖИМ\nВидео и устойчивое положение"
         )
         self.static_mode_button.setObjectName("staticModeButton")
-        self.static_mode_button.setMinimumHeight(94)
-        self.static_mode_button.setFont(QFont("Sans Serif", 15, QFont.Bold))
+        self.static_mode_button.setMinimumHeight(62)
+        self.static_mode_button.setFont(QFont("Sans Serif", 13, QFont.Bold))
         mode_layout.addWidget(self.static_mode_button)
         self.control_mode_button = self._action_button(
             "exhibition_control", "RUN / ПОЛНОЕ УПРАВЛЕНИЕ\nVR: голова, руки и ноги"
         )
         self.control_mode_button.setObjectName("controlModeButton")
-        self.control_mode_button.setMinimumHeight(112)
-        self.control_mode_button.setFont(QFont("Sans Serif", 15, QFont.Bold))
+        self.control_mode_button.setMinimumHeight(72)
+        self.control_mode_button.setFont(QFont("Sans Serif", 13, QFont.Bold))
         mode_layout.addWidget(self.control_mode_button)
         self.stand_mode_button = self._action_button(
             "exhibition_stand", "СТОЙКА\nШтатная поза • моторы удерживают"
         )
         self.stand_mode_button.setObjectName("standModeButton")
-        self.stand_mode_button.setMinimumHeight(78)
-        self.stand_mode_button.setFont(QFont("Sans Serif", 14, QFont.Bold))
+        self.stand_mode_button.setMinimumHeight(58)
+        self.stand_mode_button.setFont(QFont("Sans Serif", 12, QFont.Bold))
         mode_layout.addWidget(self.stand_mode_button)
         mode_hint = QLabel(
             "LOCK — пауза с удержанием позы  •  RUN — голова, руки и ноги  •  "
@@ -575,6 +577,7 @@ class OperatorPanel(QMainWindow):
         )
         mode_hint.setObjectName("modeHint")
         mode_hint.setWordWrap(True)
+        mode_hint.setMaximumHeight(30)
         mode_layout.addWidget(mode_hint)
         controls.addWidget(mode_group)
 
@@ -586,8 +589,8 @@ class OperatorPanel(QMainWindow):
             "ZERO TORQUE / РАССЛАБИТЬ\nтолько когда робот поддержан"
         )
         self.zero_torque_button.setObjectName("zeroTorqueButton")
-        self.zero_torque_button.setMinimumHeight(70)
-        self.zero_torque_button.setFont(QFont("Sans Serif", 13, QFont.Bold))
+        self.zero_torque_button.setMinimumHeight(54)
+        self.zero_torque_button.setFont(QFont("Sans Serif", 11, QFont.Bold))
         self.zero_torque_button.setToolTip(
             "Завершить управление и отключить удерживающий момент. "
             "Используйте только на страховке или с роботом на опоре."
@@ -596,11 +599,13 @@ class OperatorPanel(QMainWindow):
         safety_group = QGroupBox("Безопасное завершение")
         safety_group.setObjectName("safetyGroup")
         safety_layout = QVBoxLayout(safety_group)
-        safety_layout.setContentsMargins(8, 8, 8, 8)
+        safety_layout.setContentsMargins(8, 6, 8, 6)
+        safety_layout.setSpacing(3)
         safety_layout.addWidget(self.zero_torque_button)
         safety_hint = QLabel("Используйте только когда робот поддержан или уже переведён в стойку.")
         safety_hint.setObjectName("safetyHint")
         safety_hint.setWordWrap(True)
+        safety_hint.setMaximumHeight(28)
         safety_layout.addWidget(safety_hint)
         controls.addWidget(safety_group)
 
@@ -621,7 +626,9 @@ class OperatorPanel(QMainWindow):
         )
         for label in status_labels:
             label.setObjectName("simpleStatus")
-            label.setMinimumHeight(38)
+            label.setMinimumHeight(30)
+        status_grid.setVerticalSpacing(4)
+        status_grid.setHorizontalSpacing(6)
         status_grid.addWidget(self.exhibition_robot_status, 0, 0)
         status_grid.addWidget(self.exhibition_vr_status, 0, 1)
         status_grid.addWidget(self.exhibition_controllers_status, 1, 0)
@@ -630,56 +637,42 @@ class OperatorPanel(QMainWindow):
         self.action_timing_status = QLabel("Последнее действие: —")
         self.action_timing_status.setObjectName("simpleStatus")
         self.action_timing_status.setProperty("statusRole", "timing")
-        self.action_timing_status.setMinimumHeight(38)
+        self.action_timing_status.setMinimumHeight(30)
         status_grid.addWidget(self.action_timing_status, 3, 0, 1, 2)
         controls.addWidget(status_group)
 
         tools = QGridLayout()
+        tools.setHorizontalSpacing(6)
         reconnect = self._action_button("exhibition_reconnect", "↻  Переподключить всё")
         reconnect.setObjectName("reconnectButton")
-        reconnect.setMinimumHeight(48)
-        tools.addWidget(reconnect, 0, 0, 1, 2)
+        reconnect.setMinimumHeight(40)
+        tools.addWidget(reconnect, 0, 0)
         open_viewer = QPushButton("Открыть Robot POV")
-        open_viewer.setMinimumHeight(48)
+        open_viewer.setMinimumHeight(40)
         open_viewer.clicked.connect(self.open_viewer)
-        tools.addWidget(open_viewer, 1, 0, 1, 2)
+        tools.addWidget(open_viewer, 0, 1)
         controls.addLayout(tools)
 
         self.exhibition_voice_status = QLabel("● Голос: проверяется")
         self.exhibition_voice_status.setObjectName("simpleStatus")
+        self.exhibition_voice_status.setMinimumHeight(30)
         controls.addWidget(self.exhibition_voice_status)
         controls.addStretch(1)
         content.addLayout(controls, 2)
         layout.addLayout(content, 1)
 
         self.controller_action_hint = QLabel(
-            "B на правом контроллере — аварийная остановка.  "
-            "X на левом контроллере — вернуть руки в нейтраль.  "
-            "Стик — ходьба; отпустите стик — после остановки вернётся управление "
-            "руками и головой.  "
-            "После краткой потери VR управление ждёт переподключения и "
-            "возобновляется автоматически. STOP/KILL остаются в разделе «Сервис», "
-            "а ZERO TORQUE теперь доступна здесь на главном экране."
+            "B справа — аварийная остановка  •  X слева — нейтраль рук  •  "
+            "стики — ходьба; отпустите стик — возврат рук/головы. "
+            "VR восстановится автоматически; STOP/KILL — в «Сервисе»."
         )
         self.controller_action_hint.setObjectName("hint")
         self.controller_action_hint.setWordWrap(True)
+        self.controller_action_hint.setMaximumHeight(48)
         layout.addWidget(self.controller_action_hint)
         layout.addStretch(1)
-        # The dashboard is intentionally taller than a small laptop display
-        # when all status cards are expanded.  A resizable scroll container
-        # keeps the window's minimum size compact so native resize/maximize
-        # controls remain available instead of forcing a giant window.
-        exhibition_scroll = QScrollArea()
-        exhibition_scroll.setObjectName("exhibitionScroll")
-        exhibition_scroll.setFrameShape(QFrame.NoFrame)
-        exhibition_scroll.setWidgetResizable(True)
-        exhibition_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        exhibition_scroll.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Expanding
-        )
-        exhibition_scroll.setWidget(tab)
-        self.exhibition_scroll = exhibition_scroll
-        self.tabs.addTab(exhibition_scroll, "Главный экран")
+        self.exhibition_tab = tab
+        self.tabs.addTab(tab, "Главный экран")
         self._refresh_exhibition_status()
 
     def _connect_controller(self) -> None:
@@ -3204,8 +3197,6 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
                        padding: 10px 14px; margin-right: 3px; }
         QTabBar::tab:selected { background: #2b4e69; color: #ffffff;
                                 border-color: #6f9cff; }
-        #exhibitionScroll { background: #101820; border: none; }
-        #exhibitionScroll QWidget { background: #101820; }
         QPushButton[liveAction="true"] { border-color: #d39b3b; }
         QPushButton[unavailable="true"] { color: #89939d;
                                            border-color: #555e66; }

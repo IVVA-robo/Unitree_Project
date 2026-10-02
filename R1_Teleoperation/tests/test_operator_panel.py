@@ -319,7 +319,7 @@ def test_exhibition_home_keeps_lock_run_and_adds_separate_stand_button():
     assert panel.fullscreen_button.objectName() == "fullscreenButton"
     assert panel.fullscreen_shortcut.key().toString() == "F11"
     assert panel.windowFlags() & app_module.Qt.WindowMaximizeButtonHint
-    assert panel.exhibition_scroll.objectName() == "exhibitionScroll"
+    assert panel.tabs.widget(0) is panel.exhibition_tab
     assert panel.minimumSizeHint().height() < 1200
     assert all(
         "калибровать руки" not in button.text().lower()
@@ -332,8 +332,8 @@ def test_exhibition_home_keeps_lock_run_and_adds_separate_stand_button():
     )
     assert "stop_button" not in panel.__dict__
     assert "kill_button" not in panel.__dict__
-    assert "B на правом контроллере" in panel.controller_action_hint.text()
-    assert "X на левом контроллере" in panel.controller_action_hint.text()
+    assert "B справа" in panel.controller_action_hint.text()
+    assert "X слева" in panel.controller_action_hint.text()
     assert panel.zero_torque_button.parentWidget() is not panel.centralWidget()
     assert "Аварийное" in [
         panel.service_tabs.tabText(index)
