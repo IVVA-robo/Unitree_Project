@@ -1,4 +1,5 @@
-"""Recorded operator poses mapped to bounded joint-space preview endpoints.
+"""
+Recorded operator poses mapped to bounded joint-space preview endpoints.
 
 Pure calculation only. The live node can opt into a supervised probe.
 A profile describes a configured range, not mechanical maxima.
@@ -14,7 +15,9 @@ class ArmPoseRange:
     """Continuous interpolation within the convex hull of measured anchors."""
 
     def __init__(self, data, chains):
-        if data.get('version') != 1 or data.get('scope') not in ('offline_preview', 'supervised_bounded'):
+        if data.get('version') != 1 or data.get('scope') not in (
+            'offline_preview', 'supervised_bounded'
+        ):
             raise ValueError('unsupported pose range profile')
         if set(data.get('arms', {})) != {'left', 'right'}:
             raise ValueError('both arms are required')
@@ -31,7 +34,9 @@ class ArmPoseRange:
         self.absolute_targets = space == 'absolute'
         self.rest_start_enabled = data.get('startup_pose') == 'hands_at_hips'
         if self.rest_start_enabled and not (self.absolute_targets and self._lowered_hands):
-            raise ValueError('hands-at-hips start requires absolute poses and lowered-hand rest mapping')
+            raise ValueError(
+                'hands-at-hips start requires absolute poses and lowered-hand rest mapping'
+            )
         for side, chain in chains.items():
             arm = data['arms'][side]
             if tuple(arm['joint_names']) != chain.joint_names:
@@ -41,7 +46,12 @@ class ArmPoseRange:
             endpoints = np.asarray(arm['robot_endpoints_rad'], dtype=float)
             reset = np.asarray(arm.get('robot_reset_rad', neutral), dtype=float)
             n = len(chain.joint_names)
-            if basis.shape != (3, 3) or neutral.shape != (n,) or reset.shape != (n,) or endpoints.shape != (3, n):
+            if (
+                basis.shape != (3, 3)
+                or neutral.shape != (n,)
+                or reset.shape != (n,)
+                or endpoints.shape != (3, n)
+            ):
                 raise ValueError('invalid pose range dimensions')
             if not all(np.isfinite(v).all() for v in (basis, neutral, reset, endpoints)):
                 raise ValueError('pose range must be finite')
@@ -68,7 +78,9 @@ class ArmPoseRange:
                         for k in range(11 - i - j):
                             q = neutral + np.array([i, j, k]) / 10 @ (endpoints - neutral)
                             if not self.contains_target(side, q):
-                                raise ValueError('bounded probe exceeds physical wrist/joint envelope')
+                                raise ValueError(
+                                    'bounded probe exceeds physical wrist/joint envelope'
+                                )
         if bounded:
             self.max_probe_fraction = 1.0
             self.max_probe_rate = 1.0
@@ -78,7 +90,11 @@ class ArmPoseRange:
             return True
         chain, offset = self._bounds[side]
         q = offset + target
-        if not np.isfinite(q).all() or np.any(q < chain.lower + .08) or np.any(q > chain.upper - .08):
+        if (
+            not np.isfinite(q).all()
+            or np.any(q < chain.lower + .08)
+            or np.any(q > chain.upper - .08)
+        ):
             return False
         wrist = chain.forward(q)[:3, 3]
         return bool(wrist[0] >= -.02 and wrist[1] * (1 if side == 'left' else -1) >= .10)
@@ -109,7 +125,8 @@ class ArmPoseRange:
         return cls(json.loads(Path(path).read_text()), chains)
 
     def evaluate(self, side, displacement_m):
-        """Return desired joints and normalized weights; no velocity shaping.
+        """
+        Return desired joints and normalized weights; no velocity shaping.
 
         Displacement is relative to the operator neutral in its fixed torso
         frame. Moving beyond an anchor saturates; combinations share the range.

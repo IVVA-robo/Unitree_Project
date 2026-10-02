@@ -373,6 +373,15 @@ def wait_for_status(marker, text, duration=4.0, deadman=True):
         raise AssertionError(f'writer status did not contain {text!r}')
 
 
+def wait_for_central_kill(marker, duration=2.0):
+    """Allow the supervisor DDS callback to publish the downstream kill latch."""
+    if not cycle(
+        duration,
+        predicate=lambda: any(kill_values[marker:]),
+    ):
+        raise AssertionError('central safety supervisor did not latch kill=true')
+
+
 def prepare_and_rearm(yaw, pitch):
     global follow_debug_target, record_targets
     follow_debug_target = False
@@ -488,6 +497,7 @@ try:
         raise AssertionError(
             f'terminal probe status did not confirm mock weight=0 release: {terminal}'
         )
+    wait_for_central_kill(central_kill_marker)
     if not any(kill_requests[kill_marker:]):
         raise AssertionError('probe completion did not request the central kill')
     if not any(kill_values[central_kill_marker:]):
@@ -559,6 +569,7 @@ try:
     )
     if 'head_release=mock ArmSdk weight release recorded' not in abort_status:
         raise AssertionError(f'probe abort did not release ownership: {abort_status}')
+    wait_for_central_kill(central_kill_marker)
     if not any(kill_requests[kill_marker:]):
         raise AssertionError('probe abort did not request the central kill')
     if not any(kill_values[central_kill_marker:]):

@@ -90,7 +90,11 @@ def _neutral_guard_node(errors):
 
 def test_probe_first_frame_is_neutral_then_rate_limited():
     node = object.__new__(R1KinematicsControl)
-    node._arm_range_probe = SimpleNamespace(contains_target=lambda *_: True, max_probe_rate=.20, absolute_targets=False)
+    node._arm_range_probe = SimpleNamespace(
+        contains_target=lambda *_: True,
+        max_probe_rate=.20,
+        absolute_targets=False,
+    )
     node._arm_range_probe_targets = {'left': np.array([-.2, .06])}
     node._max_joint_velocity = .75
     runtime = SimpleNamespace(side='left', command=None, chain=SimpleNamespace(
@@ -117,8 +121,10 @@ def test_bounded_probe_holds_when_physical_envelope_rejects_step():
 
 def test_absolute_profile_starts_at_calibrated_neutral():
     node = object.__new__(R1KinematicsControl)
-    node._arm_range_probe = SimpleNamespace(absolute_targets=True,
-        reset_target=lambda _: np.array([.2, .3]))
+    node._arm_range_probe = SimpleNamespace(
+        absolute_targets=True,
+        reset_target=lambda _: np.array([.2, .3]),
+    )
     node._arm_range_probe_targets = {'left': np.array([-1., 1.])}
     runtime = SimpleNamespace(side='left', command=None)
     assert node._solve_arm(runtime, np.eye(4), .02) == pytest.approx([.2, .3])
@@ -127,8 +133,13 @@ def test_absolute_profile_starts_at_calibrated_neutral():
 def test_probe_hold_does_not_add_physical_feedback_twice():
     node = object.__new__(R1KinematicsControl)
     node._arm_range_probe = object()
-    node._arms = {side: SimpleNamespace(command=np.array([.1]),
-        chain=SimpleNamespace(joint_names=(side,))) for side in ('left', 'right')}
+    node._arms = {
+        side: SimpleNamespace(
+            command=np.array([.1]),
+            chain=SimpleNamespace(joint_names=(side,)),
+        )
+        for side in ('left', 'right')
+    }
     node._joint_positions = {'left': .6, 'right': .7}
     node._trajectory_time_sec = .1
     node._hands_commanded = False

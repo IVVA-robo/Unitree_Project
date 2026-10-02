@@ -73,8 +73,11 @@ def test_probe_cannot_enable_full_range():
 
 
 def test_hips_start_needs_both_lowered_finite_hands_and_actual_rest_output():
-    profile = SimpleNamespace(rest_start_enabled=True,
-        evaluate=lambda *_: (np.zeros(2), None), reset_target=lambda _: np.zeros(2))
+    profile = SimpleNamespace(
+        rest_start_enabled=True,
+        evaluate=lambda *_: (np.zeros(2), None),
+        reset_target=lambda _: np.zeros(2),
+    )
     valid = {'left': [-.4, .05, -.5], 'right': [-.4, -.05, -.5]}
     assert ArmPoseRange.allows_rest_start(profile, valid)
     for bad in ([0., 0., 0.], [-.4, .5, -.5], [-.4, 0., -.2], [np.nan, 0., -.5]):
@@ -100,6 +103,7 @@ def test_bounded_profile_requires_offset_and_checks_physical_envelope():
         ArmPoseRange(data, chains)
     for side, chain in chains.items():
         data['arms'][side]['writer_offset_rad'] = [0., 0.]
+
         def forward(q, side=side):
             pose = np.eye(4)
             pose[:3, 3] = [.1, .2 if side == 'left' else -.2, 0.]

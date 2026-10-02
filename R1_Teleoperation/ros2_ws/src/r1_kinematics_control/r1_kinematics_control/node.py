@@ -224,16 +224,25 @@ class R1KinematicsControl(Node):
         self._arm_range_probe_fraction = float(
             self.get_parameter('arm_range_probe_fraction').value)
         if probe_file:
-            if not self._headset_relative_enabled or set(self._arms) != {'left', 'right'}:
-                raise ValueError('arm range probe requires calibrated body mapping and both URDF chains')
+            if (
+                not self._headset_relative_enabled
+                or set(self._arms) != {'left', 'right'}
+            ):
+                raise ValueError(
+                    'arm range probe requires calibrated body mapping and both URDF chains'
+                )
             self._arm_range_probe = ArmPoseRange.load(
                 os.path.expanduser(probe_file),
                 {side: runtime.chain for side, runtime in self._arms.items()})
-            if not 0.0 < self._arm_range_probe_fraction <= self._arm_range_probe.max_probe_fraction:
+            if not 0.0 < self._arm_range_probe_fraction <= (
+                self._arm_range_probe.max_probe_fraction
+            ):
                 raise ValueError('arm range probe exceeds validated profile limit')
             self.get_logger().warning(
                 f'Supervised arm range probe enabled: {self._arm_range_probe_fraction:.0%}; '
-                f'rate capped at {min(self._max_joint_velocity, self._arm_range_probe.max_probe_rate):.2f} rad/s')
+                f'rate capped at '
+                f'{min(self._max_joint_velocity, self._arm_range_probe.max_probe_rate):.2f} rad/s'
+            )
         self.get_logger().info(
             'R1 kinematics control started in safe state; '
             f'headset_relative={self._headset_relative_enabled}; '
@@ -954,14 +963,20 @@ class R1KinematicsControl(Node):
                     if self._arm_range_probe.absolute_targets
                     else runtime.chain.neutral_positions())
                 return runtime.command.copy()
-            step = min(self._max_joint_velocity, self._arm_range_probe.max_probe_rate) * max(0.0, min(dt, .05))
+            step = (
+                min(self._max_joint_velocity, self._arm_range_probe.max_probe_rate)
+                * max(0.0, min(dt, .05))
+            )
             delta = target - runtime.command
             # A common interpolation factor preserves the convex pose range.
             distance = float(np.max(np.abs(delta)))
             candidate = runtime.command + delta * min(1.0, step / max(distance, 1e-12))
             candidate = np.clip(candidate, runtime.chain.lower, runtime.chain.upper)
             if not self._arm_range_probe.contains_target(runtime.side, candidate):
-                self._warn('probe_envelope_' + runtime.side, 'Arm range target held at configured envelope')
+                self._warn(
+                    'probe_envelope_' + runtime.side,
+                    'Arm range target held at configured envelope',
+                )
                 return runtime.command.copy()
             runtime.command = candidate
             runtime.solution = runtime.command.copy()
