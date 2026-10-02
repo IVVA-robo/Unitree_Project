@@ -315,6 +315,9 @@ def test_exhibition_home_keeps_lock_run_and_adds_separate_stand_button():
     assert panel.specs['exhibition_stand'].requires_run_mode is False
     assert panel.tabs.tabBar().isHidden()
     assert panel.connect_button.text() == "↻  НАЙТИ И ПОДКЛЮЧИТЬ"
+    assert panel.fullscreen_button.text() == "⛶  На весь экран"
+    assert panel.fullscreen_button.objectName() == "fullscreenButton"
+    assert panel.fullscreen_shortcut.key().toString() == "F11"
     assert all(
         "калибровать руки" not in button.text().lower()
         and "калибровать hmd и руки" not in button.text().lower()
@@ -335,6 +338,28 @@ def test_exhibition_home_keeps_lock_run_and_adds_separate_stand_button():
     ]
     assert panel.service_tabs.count() >= 7
 
+    panel.close()
+    app.processEvents()
+
+
+def test_fullscreen_toggle_does_not_change_operator_mode():
+    app = QApplication.instance() or QApplication([])
+    panel = OperatorPanel(OperatorConfig(status_poll_sec=60))
+    panel.status_timer.stop()
+    initial_mode = panel.exhibition_mode
+    panel.show()
+    app.processEvents()
+
+    panel.toggle_fullscreen()
+    app.processEvents()
+    assert panel.isFullScreen()
+    assert panel.fullscreen_button.text() == "▣  Вернуть окно"
+
+    panel.exit_fullscreen()
+    app.processEvents()
+    assert not panel.isFullScreen()
+    assert panel.fullscreen_button.text() == "⛶  На весь экран"
+    assert panel.exhibition_mode == initial_mode
     panel.close()
     app.processEvents()
 

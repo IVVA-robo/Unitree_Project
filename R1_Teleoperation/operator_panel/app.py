@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 from PyQt5.QtCore import QTimer, QUrl, Qt
-from PyQt5.QtGui import QDesktopServices, QFont, QIcon
+from PyQt5.QtGui import QDesktopServices, QFont, QIcon, QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -34,6 +34,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QShortcut,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -371,6 +372,7 @@ class OperatorPanel(QMainWindow):
         self.live_session_token = secrets.token_urlsafe(24)
         self.status_values = {}
         self.last_status = "Серый • диагностика ещё не запускалась"
+        self._normal_geometry = None
         self.setWindowTitle("Unitree R1 Панель оператора")
         icon_path = (
             Path(__file__).resolve().parents[1]
@@ -382,6 +384,12 @@ class OperatorPanel(QMainWindow):
             self.setWindowIcon(QIcon(str(icon_path)))
         self.resize(1220, 820)
         self._build_ui()
+        self.fullscreen_shortcut = QShortcut(QKeySequence("F11"), self)
+        self.fullscreen_shortcut.setContext(Qt.WindowShortcut)
+        self.fullscreen_shortcut.activated.connect(self.toggle_fullscreen)
+        self.escape_fullscreen_shortcut = QShortcut(QKeySequence("Esc"), self)
+        self.escape_fullscreen_shortcut.setContext(Qt.WindowShortcut)
+        self.escape_fullscreen_shortcut.activated.connect(self.exit_fullscreen)
         self._connect_controller()
         self.status_timer = QTimer(self)
         self.status_timer.setInterval(max(1000, int(self.config.status_poll_sec * 1000)))
@@ -391,19 +399,35 @@ class OperatorPanel(QMainWindow):
 
     def _build_ui(self) -> None:
         root = QWidget()
+        root.setObjectName("rootPanel")
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
         layout.setContentsMargins(12, 12, 12, 8)
+        layout.setSpacing(10)
 
         header = QHBoxLayout()
+        header.setSpacing(8)
         title = QLabel("UNITREE R1  •  ПАНЕЛЬ ОПЕРАТОРА")
         title.setObjectName("appTitle")
         title.setFont(QFont("Sans Serif", 16, QFont.Bold))
-        header.addWidget(title)
+        brand = QWidget()
+        brand_layout = QVBoxLayout(brand)
+        brand_layout.setContentsMargins(0, 0, 0, 0)
+        brand_layout.setSpacing(1)
+        brand_layout.addWidget(title)
+        brand_subtitle = QLabel("ОФЛАЙН-УПРАВЛЕНИЕ  •  ETHERNET + USB-C")
+        brand_subtitle.setObjectName("brandSubtitle")
+        brand_layout.addWidget(brand_subtitle)
+        header.addWidget(brand)
         header.addStretch(1)
         self.mode_label = QLabel()
         self.mode_label.setObjectName("modeLabel")
         header.addWidget(self.mode_label)
+        self.fullscreen_button = QPushButton("⛶  На весь экран")
+        self.fullscreen_button.setObjectName("fullscreenButton")
+        self.fullscreen_button.setToolTip("F11 — развернуть окно; Esc — вернуть обычный режим")
+        self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
+        header.addWidget(self.fullscreen_button)
         self.service_toggle = QPushButton("⚙  Расширенные настройки")
         self.service_toggle.clicked.connect(self.toggle_service_view)
         header.addWidget(self.service_toggle)
@@ -469,7 +493,9 @@ class OperatorPanel(QMainWindow):
         layout.addWidget(self.operator_instruction)
 
         content = QHBoxLayout()
+        content.setSpacing(12)
         video_group = QGroupBox("Видео глазами робота")
+        video_group.setObjectName("videoGroup")
         video_layout = QVBoxLayout(video_group)
         self.video_preview = VideoPreview(
             self.config.video_url, self.config.video_profile, video_group
@@ -479,7 +505,9 @@ class OperatorPanel(QMainWindow):
         content.addWidget(video_group, 3)
 
         controls = QVBoxLayout()
+        controls.setSpacing(10)
         device = QGroupBox("Подключение")
+        device.setObjectName("deviceGroup")
         device_layout = QGridLayout(device)
         self.robot_name_label = QLabel(f"○  {self.config.robot_name}  — не в сети")
         self.robot_name_label.setObjectName("robotName")
@@ -497,27 +525,40 @@ class OperatorPanel(QMainWindow):
         self.connect_button.setMinimumHeight(52)
         device_layout.addWidget(self.connect_button, 1, 0)
         controls.addWidget(device)
+
+        mode_group = QGroupBox("Режим управления")
+        mode_group.setObjectName("modeGroup")
+        mode_layout = QVBoxLayout(mode_group)
+        mode_layout.setSpacing(8)
         self.static_mode_button = self._action_button(
             "exhibition_static", "LOCK / СТАТИЧНЫЙ РЕЖИМ\nВидео и устойчивое положение"
         )
         self.static_mode_button.setObjectName("staticModeButton")
         self.static_mode_button.setMinimumHeight(94)
         self.static_mode_button.setFont(QFont("Sans Serif", 15, QFont.Bold))
-        controls.addWidget(self.static_mode_button)
+        mode_layout.addWidget(self.static_mode_button)
         self.control_mode_button = self._action_button(
             "exhibition_control", "RUN / ПОЛНОЕ УПРАВЛЕНИЕ\nVR: голова, руки и ноги"
         )
         self.control_mode_button.setObjectName("controlModeButton")
         self.control_mode_button.setMinimumHeight(112)
         self.control_mode_button.setFont(QFont("Sans Serif", 15, QFont.Bold))
-        controls.addWidget(self.control_mode_button)
+        mode_layout.addWidget(self.control_mode_button)
         self.stand_mode_button = self._action_button(
             "exhibition_stand", "СТОЙКА\nШтатная поза • моторы удерживают"
         )
         self.stand_mode_button.setObjectName("standModeButton")
         self.stand_mode_button.setMinimumHeight(78)
         self.stand_mode_button.setFont(QFont("Sans Serif", 14, QFont.Bold))
-        controls.addWidget(self.stand_mode_button)
+        mode_layout.addWidget(self.stand_mode_button)
+        mode_hint = QLabel(
+            "LOCK — пауза с удержанием позы  •  RUN — голова, руки и ноги  •  "
+            "СТОЙКА — штатная поза"
+        )
+        mode_hint.setObjectName("modeHint")
+        mode_hint.setWordWrap(True)
+        mode_layout.addWidget(mode_hint)
+        controls.addWidget(mode_group)
 
         # Keep the physical relaxation action visible on the operator's
         # normal screen.  It still uses the reviewed confirmation and cleanup
@@ -534,9 +575,19 @@ class OperatorPanel(QMainWindow):
             "Используйте только на страховке или с роботом на опоре."
         )
         self.zero_torque_button.clicked.connect(self.request_zero_torque)
-        controls.addWidget(self.zero_torque_button)
+        safety_group = QGroupBox("Безопасное завершение")
+        safety_group.setObjectName("safetyGroup")
+        safety_layout = QVBoxLayout(safety_group)
+        safety_layout.setContentsMargins(8, 8, 8, 8)
+        safety_layout.addWidget(self.zero_torque_button)
+        safety_hint = QLabel("Используйте только когда робот поддержан или уже переведён в стойку.")
+        safety_hint.setObjectName("safetyHint")
+        safety_hint.setWordWrap(True)
+        safety_layout.addWidget(safety_hint)
+        controls.addWidget(safety_group)
 
         status_group = QGroupBox("Состояние системы")
+        status_group.setObjectName("statusGroup")
         status_grid = QGridLayout(status_group)
         self.exhibition_robot_status = QLabel()
         self.exhibition_vr_status = QLabel()
@@ -560,6 +611,7 @@ class OperatorPanel(QMainWindow):
         status_grid.addWidget(self.exhibition_mode_status, 2, 0, 1, 2)
         self.action_timing_status = QLabel("Последнее действие: —")
         self.action_timing_status.setObjectName("simpleStatus")
+        self.action_timing_status.setProperty("statusRole", "timing")
         self.action_timing_status.setMinimumHeight(38)
         status_grid.addWidget(self.action_timing_status, 3, 0, 1, 2)
         controls.addWidget(status_group)
@@ -1282,6 +1334,35 @@ class OperatorPanel(QMainWindow):
             self.auto_connect(track_action=False)
         elif not self.background_services_started:
             self.start_background_services()
+
+    def toggle_fullscreen(self) -> None:
+        """Toggle the operator dashboard between windowed and full-screen modes."""
+        if self.isFullScreen():
+            self.showNormal()
+            if self._normal_geometry is not None:
+                self.setGeometry(self._normal_geometry)
+        else:
+            self._normal_geometry = self.geometry()
+            self.showFullScreen()
+        self._update_fullscreen_button()
+
+    def exit_fullscreen(self) -> None:
+        """Leave full-screen mode without affecting any robot process."""
+        if self.isFullScreen():
+            self.toggle_fullscreen()
+
+    def _update_fullscreen_button(self) -> None:
+        if "fullscreen_button" not in self.__dict__:
+            return
+        fullscreen = self.isFullScreen()
+        self.fullscreen_button.setText(
+            "▣  Вернуть окно" if fullscreen else "⛶  На весь экран"
+        )
+        self.fullscreen_button.setToolTip(
+            "Esc или F11 — вернуть обычный размер"
+            if fullscreen
+            else "F11 — развернуть окно; Esc — вернуть обычный режим"
+        )
 
     def toggle_service_view(self) -> None:
         """Keep the normal operator on one screen; expose service tools on demand."""
@@ -3051,15 +3132,34 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
     app.setStyle("Fusion")
     app.setStyleSheet(
         """
-        QWidget { font-size: 11pt; }
-        QMainWindow, QWidget { background: #20252b; color: #eef2f5; }
-        QGroupBox { border: 1px solid #46515c; border-radius: 6px;
-                    margin-top: 10px; padding: 12px; }
-        QGroupBox::title { subcontrol-origin: margin; left: 10px;
-                           padding: 0 5px; color: #a9d6ff; }
-        QPushButton { background: #35414c; border: 1px solid #5b6b79;
-                      border-radius: 5px; padding: 8px 12px; }
-        QPushButton:hover { background: #435463; }
+        * { outline: none; }
+        QWidget { font-family: "Noto Sans", "DejaVu Sans", sans-serif;
+                  font-size: 11pt; }
+        QMainWindow, #rootPanel { background: #101820; color: #eef4f8; }
+        QGroupBox { background: #18232d; border: 1px solid #354858;
+                    border-radius: 12px; margin-top: 14px;
+                    padding: 14px 10px 10px; }
+        QGroupBox::title { subcontrol-origin: margin; left: 12px;
+                           padding: 0 7px; color: #9fc8e8;
+                           background: #101820; }
+        QPushButton { background: #24323e; border: 1px solid #4b6272;
+                      border-radius: 9px; padding: 10px 14px;
+                      color: #edf4f7; }
+        QPushButton:hover { background: #304555; border-color: #6f9bb5; }
+        QPushButton:pressed { background: #1b2832; }
+        QPushButton:disabled { background: #1c252d; color: #7e8a93;
+                               border-color: #34414b; }
+        QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+            background: #111a21; border: 1px solid #405462;
+            border-radius: 7px; padding: 7px 9px; color: #eef4f8;
+        }
+        QLineEdit:focus, QComboBox:focus, QSpinBox:focus,
+        QDoubleSpinBox:focus { border-color: #6f9cff; }
+        QTabWidget::pane { border: 1px solid #344653; border-radius: 10px; }
+        QTabBar::tab { background: #1a2630; border: 1px solid #344653;
+                       padding: 10px 14px; margin-right: 3px; }
+        QTabBar::tab:selected { background: #2b4e69; color: #ffffff;
+                                border-color: #6f9cff; }
         QPushButton[liveAction="true"] { border-color: #d39b3b; }
         QPushButton[unavailable="true"] { color: #89939d;
                                            border-color: #555e66; }
@@ -3067,9 +3167,16 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
                       font-weight: bold; }
         #killButton { background: #9d2632; border-color: #ff6875;
                       font-weight: bold; }
-        #appTitle { color: #9ed5ff; }
-        #modeLabel { color: #ffd166; font-weight: bold; padding: 8px; }
-        #statusLabel { padding: 8px; background: #2c343c; border-radius: 4px; }
+        #appTitle { color: #d9efff; letter-spacing: 1px; }
+        #brandSubtitle { color: #718999; font-size: 9pt; letter-spacing: 1px; }
+        #modeLabel { color: #ffd166; background: #202c35;
+                     border: 1px solid #465b68; border-radius: 9px;
+                     font-weight: bold; padding: 9px 12px; }
+        #fullscreenButton { background: #1d2a34; border-color: #536e7d;
+                            color: #dbeaf2; font-weight: bold; }
+        #fullscreenButton:hover { background: #2b4250; }
+        #statusLabel { padding: 9px 12px; background: #202c35;
+                       border: 1px solid #354853; border-radius: 9px; }
         #hint { color: #b8c2ca; padding: 8px; }
         #warning { color: #ffd166; padding: 8px; }
         #cardText { color: #d7e4ee; padding: 10px; }
@@ -3087,16 +3194,35 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
         #robotName { padding: 8px; color: #d5dde5; }
         #robotName[connectionState="searching"] { color: #ffd166; }
         #robotName[connectionState="connected"] { color: #71e3a4; }
-        #connectButton { background: #39477b; border-color: #6e86df;
+        #deviceGroup { border-color: #3c5a72; }
+        #modeGroup { border-color: #3d6780; }
+        #safetyGroup { border-color: #71404a; }
+        #statusGroup { border-color: #3f5562; }
+        #connectButton { background: #344b9b; border-color: #7894ef;
                          font-weight: bold; }
+        #connectButton:hover { background: #4560bd; }
+        #staticModeButton { background: #1e4d58; border-color: #58c8d5;
+                            font-weight: bold; }
+        #staticModeButton:hover { background: #286775; }
         #controlModeButton { background: #244c9c; border-color: #6f9cff;
                              font-weight: bold; }
         #controlModeButton:hover { background: #2d5dbd; }
+        #standModeButton { background: #303d68; border-color: #879bf0;
+                           font-weight: bold; }
+        #standModeButton:hover { background: #40518a; }
+        #reconnectButton { background: #263c4d; border-color: #6a9dbb;
+                           font-weight: bold; }
         #zeroTorqueButton { background: #672d36; border-color: #dc6877;
                             color: white; font-weight: bold; }
         #zeroTorqueButton:hover { background: #843946; }
-        QPlainTextEdit { background: #15191d; color: #dbe7ef; }
-        QTabBar::tab { padding: 10px 14px; }
+        #modeHint, #safetyHint { color: #92a6b3; font-size: 9.5pt;
+                                 padding: 2px 4px; }
+        #simpleStatus { background: #202d37; color: #dce8ee;
+                        border: 1px solid #3c515d; border-radius: 8px;
+                        padding: 8px 10px; }
+        #simpleStatus[statusRole="timing"] { color: #b9d9ea; }
+        QPlainTextEdit { background: #11181e; color: #dbe7ef;
+                         border: 1px solid #354854; border-radius: 8px; }
         """
     )
     return app
