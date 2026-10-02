@@ -322,6 +322,17 @@ class OperatorPanel(QMainWindow):
 
     def __init__(self, config: Optional[OperatorConfig] = None):
         super().__init__()
+        # Keep native desktop decorations enabled and explicitly request the
+        # maximize control.  Some Linux themes hide the square button unless
+        # the hint is present even for a normal QMainWindow.
+        self.setWindowFlags(
+            Qt.Window
+            | Qt.WindowTitleHint
+            | Qt.WindowSystemMenuHint
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
+        )
         self.config = config or load_config()
         self.controller = ProcessController(self.config, self)
         self.specs: Dict[str, CommandSpec] = {
