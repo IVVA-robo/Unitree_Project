@@ -25,6 +25,7 @@ from PyQt5.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -34,6 +35,8 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QShortcut,
     QSpinBox,
     QTabWidget,
@@ -662,7 +665,21 @@ class OperatorPanel(QMainWindow):
         self.controller_action_hint.setWordWrap(True)
         layout.addWidget(self.controller_action_hint)
         layout.addStretch(1)
-        self.tabs.addTab(tab, "Главный экран")
+        # The dashboard is intentionally taller than a small laptop display
+        # when all status cards are expanded.  A resizable scroll container
+        # keeps the window's minimum size compact so native resize/maximize
+        # controls remain available instead of forcing a giant window.
+        exhibition_scroll = QScrollArea()
+        exhibition_scroll.setObjectName("exhibitionScroll")
+        exhibition_scroll.setFrameShape(QFrame.NoFrame)
+        exhibition_scroll.setWidgetResizable(True)
+        exhibition_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        exhibition_scroll.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
+        )
+        exhibition_scroll.setWidget(tab)
+        self.exhibition_scroll = exhibition_scroll
+        self.tabs.addTab(exhibition_scroll, "Главный экран")
         self._refresh_exhibition_status()
 
     def _connect_controller(self) -> None:
@@ -3187,6 +3204,8 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
                        padding: 10px 14px; margin-right: 3px; }
         QTabBar::tab:selected { background: #2b4e69; color: #ffffff;
                                 border-color: #6f9cff; }
+        #exhibitionScroll { background: #101820; border: none; }
+        #exhibitionScroll QWidget { background: #101820; }
         QPushButton[liveAction="true"] { border-color: #d39b3b; }
         QPushButton[unavailable="true"] { color: #89939d;
                                            border-color: #555e66; }

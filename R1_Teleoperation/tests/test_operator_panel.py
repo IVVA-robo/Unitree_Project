@@ -319,6 +319,8 @@ def test_exhibition_home_keeps_lock_run_and_adds_separate_stand_button():
     assert panel.fullscreen_button.objectName() == "fullscreenButton"
     assert panel.fullscreen_shortcut.key().toString() == "F11"
     assert panel.windowFlags() & app_module.Qt.WindowMaximizeButtonHint
+    assert panel.exhibition_scroll.objectName() == "exhibitionScroll"
+    assert panel.minimumSizeHint().height() < 1200
     assert all(
         "калибровать руки" not in button.text().lower()
         and "калибровать hmd и руки" not in button.text().lower()
