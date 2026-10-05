@@ -71,7 +71,8 @@ seed/feedback — отдельный путь, её нельзя подменя�
 
 Канонический путь проекта на этом ноутбуке:
 `/home/unitree/Unitree_Project/R1_Teleoperation`. Общая карта файлов находится в
-`/home/unitree/Unitree_Project/README.md`.
+`/home/unitree/Unitree_Project/README.md`. Краткая карта активного проекта:
+[`PROJECT_MAP_RU.md`](PROJECT_MAP_RU.md).
 
 Подробная архитектура, контракт топиков и порядок интеграции описаны в
 [`docs/architecture.md`](docs/architecture.md).
