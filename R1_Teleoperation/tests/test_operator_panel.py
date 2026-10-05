@@ -14,6 +14,8 @@ from operator_panel.app import (  # noqa: E402
     OperatorPanel,
     QuickStartDialog,
     SettingsDialog,
+    ZeroTorqueConfirmDialog,
+    ZeroTorqueSuccessDialog,
 )
 from operator_panel.commands import (  # noqa: E402
     command_catalog,
@@ -227,6 +229,55 @@ def test_quick_start_dialog_uses_scrollable_step_cards():
     assert all(card.objectName() == "quickStepCard" for card in dialog.step_cards)
 
     dialog.close()
+    app.processEvents()
+
+
+def test_zero_torque_dialogs_match_ui_and_keep_cancel_as_safe_default():
+    app = app_module.build_app(OperatorConfig())
+    confirm = ZeroTorqueConfirmDialog()
+    confirm.show()
+    app.processEvents()
+
+    assert confirm.cancel_button.isDefault()
+    assert confirm.relax_button.isDefault() is False
+    assert confirm.relax_button.autoDefault() is False
+    assert confirm.relax_button.objectName() == "destructiveDialogButton"
+    confirm.reject()
+
+    success = ZeroTorqueSuccessDialog()
+    success.show()
+    app.processEvents()
+    assert success.close_button.isDefault()
+    assert success.close_button.text() == "Готово"
+    success.close()
+    app.processEvents()
+
+
+def test_zero_torque_cancel_does_not_start_any_process(monkeypatch):
+    app = app_module.build_app(OperatorConfig(status_poll_sec=60))
+    panel = OperatorPanel(OperatorConfig(status_poll_sec=60))
+    panel.status_timer.stop()
+    starts = []
+
+    class RejectedDialog:
+        def __init__(self, _parent):
+            pass
+
+        def exec_(self):
+            return app_module.QDialog.Rejected
+
+    monkeypatch.setattr(app_module, "ZeroTorqueConfirmDialog", RejectedDialog)
+    monkeypatch.setattr(
+        panel.controller,
+        "start",
+        lambda *args, **kwargs: starts.append((args, kwargs)),
+    )
+
+    panel.request_zero_torque()
+
+    assert starts == []
+    assert panel.pending_zero_torque is False
+    panel.close()
     app.processEvents()
 
 

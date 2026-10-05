@@ -365,6 +365,170 @@ class QuickStartDialog(QDialog):
         root.addLayout(action_row)
 
 
+class ZeroTorqueConfirmDialog(QDialog):
+    """Fail-safe confirmation for the physical Zero Torque transition."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("zeroTorqueConfirmDialog")
+        self.setWindowTitle("Zero Torque — подтверждение")
+        self.setModal(True)
+        self.setMinimumSize(560, 360)
+        self.resize(620, 390)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+
+        hero = QWidget()
+        hero.setObjectName("dialogHeroCard")
+        hero_layout = QHBoxLayout(hero)
+        hero_layout.setContentsMargins(14, 12, 14, 12)
+        hero_layout.setSpacing(12)
+        icon = QLabel("!")
+        icon.setObjectName("dangerDialogIcon")
+        icon.setAlignment(Qt.AlignCenter)
+        icon.setFixedSize(48, 48)
+        hero_layout.addWidget(icon)
+        heading = QVBoxLayout()
+        heading.setSpacing(2)
+        eyebrow = QLabel("КРИТИЧЕСКОЕ ДЕЙСТВИЕ")
+        eyebrow.setObjectName("dangerDialogEyebrow")
+        title = QLabel("Робот потеряет удержание")
+        title.setObjectName("dialogTitle")
+        subtitle = QLabel("Zero Torque отключает удерживающий момент суставов")
+        subtitle.setObjectName("dialogSubtitle")
+        heading.addWidget(eyebrow)
+        heading.addWidget(title)
+        heading.addWidget(subtitle)
+        hero_layout.addLayout(heading, 1)
+        root.addWidget(hero)
+
+        impact = QWidget()
+        impact.setObjectName("dialogBodyCard")
+        impact_layout = QVBoxLayout(impact)
+        impact_layout.setContentsMargins(14, 11, 14, 11)
+        impact_layout.setSpacing(4)
+        impact_title = QLabel("Что произойдёт")
+        impact_title.setObjectName("dialogSectionTitle")
+        impact_text = QLabel(
+            "Суставы перестанут удерживать робота. Он может резко сложиться "
+            "или упасть. Панель сначала завершит VR и управляющие процессы."
+        )
+        impact_text.setObjectName("dialogBodyText")
+        impact_text.setWordWrap(True)
+        impact_layout.addWidget(impact_title)
+        impact_layout.addWidget(impact_text)
+        root.addWidget(impact)
+
+        guard = QWidget()
+        guard.setObjectName("dangerNoticeCard")
+        guard_layout = QVBoxLayout(guard)
+        guard_layout.setContentsMargins(14, 11, 14, 11)
+        guard_layout.setSpacing(4)
+        guard_title = QLabel("Перед продолжением")
+        guard_title.setObjectName("dangerNoticeTitle")
+        guard_text = QLabel(
+            "Продолжайте только если робот лежит или надёжно поддержан. "
+            "После остановки процессов панель подтвердит Damping и только "
+            "затем включит Zero Torque."
+        )
+        guard_text.setObjectName("dangerNoticeText")
+        guard_text.setWordWrap(True)
+        guard_layout.addWidget(guard_title)
+        guard_layout.addWidget(guard_text)
+        root.addWidget(guard)
+        root.addStretch(1)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        actions.addStretch(1)
+        self.cancel_button = QPushButton("Отмена")
+        self.cancel_button.setObjectName("secondaryDialogButton")
+        self.cancel_button.setMinimumSize(112, 42)
+        self.cancel_button.setDefault(True)
+        self.cancel_button.clicked.connect(self.reject)
+        actions.addWidget(self.cancel_button)
+        self.relax_button = QPushButton("Расслабить робота")
+        self.relax_button.setObjectName("destructiveDialogButton")
+        self.relax_button.setMinimumSize(190, 42)
+        self.relax_button.setAutoDefault(False)
+        self.relax_button.clicked.connect(self.accept)
+        actions.addWidget(self.relax_button)
+        root.addLayout(actions)
+        self.cancel_button.setFocus()
+
+
+class ZeroTorqueSuccessDialog(QDialog):
+    """Confirmation that the reviewed helper reached and verified FSM 0."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("zeroTorqueSuccessDialog")
+        self.setWindowTitle("Zero Torque включён")
+        self.setModal(True)
+        self.setMinimumSize(500, 280)
+        self.resize(560, 300)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+
+        hero = QWidget()
+        hero.setObjectName("dialogHeroCard")
+        hero_layout = QHBoxLayout(hero)
+        hero_layout.setContentsMargins(14, 12, 14, 12)
+        hero_layout.setSpacing(12)
+        icon = QLabel("✓")
+        icon.setObjectName("successDialogIcon")
+        icon.setAlignment(Qt.AlignCenter)
+        icon.setFixedSize(48, 48)
+        hero_layout.addWidget(icon)
+        heading = QVBoxLayout()
+        heading.setSpacing(2)
+        eyebrow = QLabel("КОМАНДА ПОДТВЕРЖДЕНА")
+        eyebrow.setObjectName("successDialogEyebrow")
+        title = QLabel("Робот расслаблен")
+        title.setObjectName("dialogTitle")
+        subtitle = QLabel("Удерживающий момент отключён")
+        subtitle.setObjectName("dialogSubtitle")
+        heading.addWidget(eyebrow)
+        heading.addWidget(title)
+        heading.addWidget(subtitle)
+        hero_layout.addLayout(heading, 1)
+        root.addWidget(hero)
+
+        body = QWidget()
+        body.setObjectName("dialogBodyCard")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(14, 12, 14, 12)
+        body_layout.setSpacing(8)
+        body_text = QLabel(
+            "Управляющие процессы завершены. Робот находится в режиме "
+            "Zero Torque и больше не удерживает позу."
+        )
+        body_text.setObjectName("dialogBodyText")
+        body_text.setWordWrap(True)
+        status = QLabel("●  FSM 0 подтверждён")
+        status.setObjectName("successStatusPill")
+        status.setAlignment(Qt.AlignCenter)
+        status.setMinimumHeight(34)
+        body_layout.addWidget(body_text)
+        body_layout.addWidget(status)
+        root.addWidget(body)
+        root.addStretch(1)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        self.close_button = QPushButton("Готово")
+        self.close_button.setObjectName("primaryDialogButton")
+        self.close_button.setMinimumSize(128, 42)
+        self.close_button.setDefault(True)
+        self.close_button.clicked.connect(self.accept)
+        actions.addWidget(self.close_button)
+        root.addLayout(actions)
+
+
 class SettingsDialog(QDialog):
     def __init__(self, config: OperatorConfig, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -2108,23 +2272,7 @@ class OperatorPanel(QMainWindow):
 
     def request_zero_torque(self) -> None:
         """Stop every physical owner, then request confirmed Damping -> FSM 0."""
-        dialog = QMessageBox(self)
-        dialog.setIcon(QMessageBox.Warning)
-        dialog.setWindowTitle("Zero Torque — робот потеряет удержание")
-        dialog.setText(
-            "После Zero Torque суставы перестанут удерживать робота. "
-            "Он может резко сложиться или упасть."
-        )
-        dialog.setInformativeText(
-            "Продолжайте только если робот лежит или надёжно поддержан. "
-            "Панель сначала завершит VR и управляющие процессы, затем "
-            "подтвердит Damping и включит Zero Torque."
-        )
-        relax = dialog.addButton("РАССЛАБИТЬ РОБОТА", QMessageBox.DestructiveRole)
-        cancel = dialog.addButton("Отмена", QMessageBox.RejectRole)
-        dialog.setDefaultButton(cancel)
-        dialog.exec_()
-        if dialog.clickedButton() is not relax:
+        if ZeroTorqueConfirmDialog(self).exec_() != QDialog.Accepted:
             return
         if not self._begin_action("zero_torque"):
             return
@@ -3344,12 +3492,7 @@ class OperatorPanel(QMainWindow):
                 "FSM 0 подтверждён" if code == 0 else f"helper завершился с кодом {code}",
             )
             if code == 0:
-                QMessageBox.information(
-                    self,
-                    "Zero Torque включён",
-                    "Управляющие процессы завершены. Робот расслаблен, "
-                    "удерживающий момент отключён.",
-                )
+                ZeroTorqueSuccessDialog(self).exec_()
             else:
                 QMessageBox.critical(
                     self,
@@ -3585,6 +3728,50 @@ def build_app(config: Optional[OperatorConfig] = None) -> QApplication:
         #primaryDialogButton { background: #0a84ff; border-color: #64b5ff;
                                color: white; font-weight: bold; }
         #primaryDialogButton:hover { background: #409cff; }
+        QDialog#zeroTorqueConfirmDialog,
+        QDialog#zeroTorqueSuccessDialog {
+            background: #0f1115; color: #f5f5f7;
+        }
+        #dialogHeroCard { background: #1c1c1e;
+                          border: 1px solid #343438;
+                          border-radius: 14px; }
+        #dangerDialogIcon { background: #ff453a; color: white;
+                            border-radius: 24px; font-size: 20pt;
+                            font-weight: bold; }
+        #successDialogIcon { background: #30d158; color: #071b0d;
+                             border-radius: 24px; font-size: 18pt;
+                             font-weight: bold; }
+        #dangerDialogEyebrow { background: transparent; color: #ff6961;
+                               font-size: 9pt; font-weight: bold;
+                               letter-spacing: 1px; }
+        #successDialogEyebrow { background: transparent; color: #30d158;
+                                font-size: 9pt; font-weight: bold;
+                                letter-spacing: 1px; }
+        #dialogTitle { background: transparent; color: #f5f5f7;
+                       font-size: 18pt; font-weight: bold; }
+        #dialogSubtitle { background: transparent; color: #aeb0b8; }
+        #dialogBodyCard { background: #1c1c1e;
+                          border: 1px solid #343438;
+                          border-radius: 12px; }
+        #dialogSectionTitle { background: transparent; color: #f5f5f7;
+                              font-weight: bold; }
+        #dialogBodyText { background: transparent; color: #d1d1d6; }
+        #dangerNoticeCard { background: #3a2022;
+                            border: 1px solid #6b3438;
+                            border-radius: 12px; }
+        #dangerNoticeTitle { background: transparent; color: #ff6961;
+                             font-weight: bold; }
+        #dangerNoticeText { background: transparent; color: #f0c7c9; }
+        #secondaryDialogButton { background: #2c2c2e;
+                                 border-color: #636366; color: #f5f5f7; }
+        #secondaryDialogButton:hover { background: #3a3a3c; }
+        #destructiveDialogButton { background: #8b1e27;
+                                   border-color: #ff453a; color: white;
+                                   font-weight: bold; }
+        #destructiveDialogButton:hover { background: #a9232e; }
+        #successStatusPill { background: #173523; color: #30d158;
+                             border: 1px solid #245d39;
+                             border-radius: 9px; font-weight: bold; }
         QTabWidget#serviceTabs::pane { background: #0f1115;
                                       border: 1px solid #343438;
                                       border-radius: 14px; }
